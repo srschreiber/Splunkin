@@ -19,20 +19,23 @@ bool Window::init(const char* title) {
     sdl_window = SDL_CreateWindow(title, width, height, SDL_WINDOW_OPENGL);
     if (!sdl_window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+        shutdown();
         return false;
     }
     gl_context = SDL_GL_CreateContext(sdl_window);
     if (!gl_context) {
         std::fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+        shutdown();
         return false;
     }
     SDL_GL_MakeCurrent(sdl_window, static_cast<SDL_GLContext>(gl_context));
 
     if (!gladLoadGL(reinterpret_cast<GLADloadfunc>(SDL_GL_GetProcAddress))) {
         std::fprintf(stderr, "gladLoadGL failed\n");
+        shutdown();
         return false;
     }
-    std::printf("GL %s\n", glGetString(GL_VERSION));
+    std::printf("GL %s\n", reinterpret_cast<const char*>(glGetString(GL_VERSION)));
     glViewport(0, 0, width, height);
     return true;
 }
