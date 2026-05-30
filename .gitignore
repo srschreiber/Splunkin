@@ -1,0 +1,8 @@
+/build/
+/third_party/install/
+/third_party/glad/
+/third_party/*.h
+# vendored submodule sources are tracked via .gitmodules, their build artifacts are not
+__pycache__/
+*.o
+.DS_Store
