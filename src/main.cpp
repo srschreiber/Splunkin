@@ -3,6 +3,7 @@
 #include "engine/renderer/renderer.h"
 #include "engine/renderer/mesh.h"
 #include "engine/renderer/camera.h"
+#include "engine/entity/player.h"
 #include "engine/world/map.h"
 #include "engine/world/map_mesh.h"
 
@@ -48,9 +49,11 @@ int main(int argc, char** argv) {
     mesh.upload(dc::world::build_map_mesh(*map));
 
     dc::renderer::Camera camera;
-    camera.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
-    camera.position[1] = dc::world::EYE_HEIGHT;
-    camera.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
+
+    dc::entity::Player player;
+    player.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
+    player.position[1] = dc::world::EYE_HEIGHT;
+    player.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
 
     dc::input::Input input;
     bool running = true;
@@ -62,15 +65,16 @@ int main(int argc, char** argv) {
         float dt = static_cast<float>(now - prev) / 1.0e9f;
         prev = now;
 
-        camera.look(input.mouse_dx, input.mouse_dy);
+        player.add_look(input.mouse_dx, input.mouse_dy);
         float forward = (input.key_down(SDL_SCANCODE_W) ? 1.0f : 0.0f)
                       - (input.key_down(SDL_SCANCODE_S) ? 1.0f : 0.0f);
         float strafe  = (input.key_down(SDL_SCANCODE_D) ? 1.0f : 0.0f)
                       - (input.key_down(SDL_SCANCODE_A) ? 1.0f : 0.0f);
-        camera.move(forward, strafe, dt);
+        bool jump = input.key_down(SDL_SCANCODE_SPACE);
+        player.update(forward, strafe, jump, dt, *map);
 
         int w, h; window.framebuffer_size(w, h);
-        renderer.render(mesh, camera, w, h);
+        renderer.render(mesh, camera, player, w, h);
         window.swap();
 
         if (smoke) { std::printf("smoke: one frame rendered, exiting\n"); break; }
