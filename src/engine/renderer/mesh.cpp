@@ -16,12 +16,18 @@ void Mesh::upload(const std::vector<float>& interleaved) {
                  interleaved.data(), GL_STATIC_DRAW);
 
     const GLsizei stride = FLOATS_PER_VERT * sizeof(float);
+    // loc 0: position (vec3) @ 0
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
     glEnableVertexAttribArray(0);
+    // loc 1: normal (vec3) @ 3
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));
+    // loc 2: uv (vec2) @ 6
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));
     glEnableVertexAttribArray(2);
+    // loc 3: layer (float) @ 8
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)(8 * sizeof(float)));
+    glEnableVertexAttribArray(3);
     glBindVertexArray(0);
 }
 
