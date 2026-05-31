@@ -4,30 +4,29 @@ namespace dc::world {
 
 namespace {
 
-struct Color { float r, g, b; };
-constexpr Color FLOOR_COLOR   {0.30f, 0.27f, 0.24f};
-constexpr Color CEILING_COLOR {0.18f, 0.18f, 0.22f};
-constexpr Color WALL_COLOR    {0.55f, 0.50f, 0.45f};
+constexpr float LAYER_FLOOR   = 0.0f;
+constexpr float LAYER_WALL    = 1.0f;
+constexpr float LAYER_CEILING = 2.0f;
 
-void push_vertex(std::vector<float>& v,
+void push_vertex(std::vector<float>& out,
                  float x, float y, float z,
                  float nx, float ny, float nz,
-                 Color c) {
-    v.insert(v.end(), {x, y, z, nx, ny, nz, c.r, c.g, c.b});
+                 float u, float v, float layer) {
+    out.insert(out.end(), {x, y, z, nx, ny, nz, u, v, layer});
 }
 
-// Emit a quad as two triangles (a,b,c) (a,c,d), winding CCW when viewed from
-// the side the normal points toward.
-void push_quad(std::vector<float>& v,
-               const float a[3], const float b[3],
-               const float c[3], const float d[3],
-               float nx, float ny, float nz, Color col) {
-    push_vertex(v, a[0],a[1],a[2], nx,ny,nz, col);
-    push_vertex(v, b[0],b[1],b[2], nx,ny,nz, col);
-    push_vertex(v, c[0],c[1],c[2], nx,ny,nz, col);
-    push_vertex(v, a[0],a[1],a[2], nx,ny,nz, col);
-    push_vertex(v, c[0],c[1],c[2], nx,ny,nz, col);
-    push_vertex(v, d[0],d[1],d[2], nx,ny,nz, col);
+// Quad with corners p0..p3 in CCW order as seen from the +normal side.
+// UVs: p0=(0,0), p1=(umax,0), p2=(umax,vmax), p3=(0,vmax).
+// Triangles: (p0,p1,p2) and (p0,p2,p3).
+void push_quad(std::vector<float>& out,
+               const float p0[3], const float p1[3], const float p2[3], const float p3[3],
+               float nx, float ny, float nz, float umax, float vmax, float layer) {
+    push_vertex(out, p0[0],p0[1],p0[2], nx,ny,nz, 0.0f, 0.0f, layer);
+    push_vertex(out, p1[0],p1[1],p1[2], nx,ny,nz, umax, 0.0f, layer);
+    push_vertex(out, p2[0],p2[1],p2[2], nx,ny,nz, umax, vmax, layer);
+    push_vertex(out, p0[0],p0[1],p0[2], nx,ny,nz, 0.0f, 0.0f, layer);
+    push_vertex(out, p2[0],p2[1],p2[2], nx,ny,nz, umax, vmax, layer);
+    push_vertex(out, p3[0],p3[1],p3[2], nx,ny,nz, 0.0f, vmax, layer);
 }
 
 } // namespace
@@ -36,42 +35,36 @@ std::vector<float> build_map_mesh(const Map& map) {
     std::vector<float> v;
     const float T = TILE;
     const float H = WALL_HEIGHT;
+    const float VWALL = H / T;   // vertical UV repeat up a wall (keeps texels square)
 
     for (int row = 0; row < map.height; ++row) {
         for (int col = 0; col < map.width; ++col) {
-            const float x0 = col * T,     x1 = (col + 1) * T;
-            const float z0 = row * T,     z1 = (row + 1) * T;
+            const float x0 = col * T, x1 = (col + 1) * T;
+            const float z0 = row * T, z1 = (row + 1) * T;
 
             if (map.at(col, row) == Cell::Open) {
-                // Floor (normal +Y), CCW viewed from above.
-                float fa[3]{x0,0,z0}, fb[3]{x0,0,z1}, fc[3]{x1,0,z1}, fd[3]{x1,0,z0};
-                push_quad(v, fa, fb, fc, fd, 0,1,0, FLOOR_COLOR);
-                // Ceiling (normal -Y), CCW viewed from below.
-                float ca[3]{x0,H,z0}, cb[3]{x1,H,z0}, cc[3]{x1,H,z1}, cd[3]{x0,H,z1};
-                push_quad(v, ca, cb, cc, cd, 0,-1,0, CEILING_COLOR);
+                float f0[3]{x0,0,z0}, f1[3]{x0,0,z1}, f2[3]{x1,0,z1}, f3[3]{x1,0,z0};
+                push_quad(v, f0,f1,f2,f3, 0,1,0, 1.0f, 1.0f, LAYER_FLOOR);
+                float c0[3]{x0,H,z0}, c1[3]{x1,H,z0}, c2[3]{x1,H,z1}, c3[3]{x0,H,z1};
+                push_quad(v, c0,c1,c2,c3, 0,-1,0, 1.0f, 1.0f, LAYER_CEILING);
                 continue;
             }
 
-            // Solid cell: emit a wall quad on each side that borders Open.
-            // -Z face (toward row-1), normal -Z.
-            if (map.at(col, row - 1) == Cell::Open) {
-                float a[3]{x1,0,z0}, b[3]{x1,H,z0}, c[3]{x0,H,z0}, d[3]{x0,0,z0};
-                push_quad(v, a, d, c, b, 0,0,-1, WALL_COLOR);
+            if (map.at(col, row - 1) == Cell::Open) {   // -Z
+                float p0[3]{x1,0,z0}, p1[3]{x0,0,z0}, p2[3]{x0,H,z0}, p3[3]{x1,H,z0};
+                push_quad(v, p0,p1,p2,p3, 0,0,-1, 1.0f, VWALL, LAYER_WALL);
             }
-            // +Z face (toward row+1), normal +Z.
-            if (map.at(col, row + 1) == Cell::Open) {
-                float a[3]{x0,0,z1}, b[3]{x0,H,z1}, c[3]{x1,H,z1}, d[3]{x1,0,z1};
-                push_quad(v, a, d, c, b, 0,0,1, WALL_COLOR);
+            if (map.at(col, row + 1) == Cell::Open) {   // +Z
+                float p0[3]{x0,0,z1}, p1[3]{x1,0,z1}, p2[3]{x1,H,z1}, p3[3]{x0,H,z1};
+                push_quad(v, p0,p1,p2,p3, 0,0,1, 1.0f, VWALL, LAYER_WALL);
             }
-            // -X face (toward col-1), normal -X.
-            if (map.at(col - 1, row) == Cell::Open) {
-                float a[3]{x0,0,z0}, b[3]{x0,H,z0}, c[3]{x0,H,z1}, d[3]{x0,0,z1};
-                push_quad(v, a, d, c, b, -1,0,0, WALL_COLOR);
+            if (map.at(col - 1, row) == Cell::Open) {   // -X
+                float p0[3]{x0,0,z0}, p1[3]{x0,0,z1}, p2[3]{x0,H,z1}, p3[3]{x0,H,z0};
+                push_quad(v, p0,p1,p2,p3, -1,0,0, 1.0f, VWALL, LAYER_WALL);
             }
-            // +X face (toward col+1), normal +X.
-            if (map.at(col + 1, row) == Cell::Open) {
-                float a[3]{x1,0,z1}, b[3]{x1,H,z1}, c[3]{x1,H,z0}, d[3]{x1,0,z0};
-                push_quad(v, a, d, c, b, 1,0,0, WALL_COLOR);
+            if (map.at(col + 1, row) == Cell::Open) {   // +X
+                float p0[3]{x1,0,z1}, p1[3]{x1,0,z0}, p2[3]{x1,H,z0}, p3[3]{x1,H,z1};
+                push_quad(v, p0,p1,p2,p3, 1,0,0, 1.0f, VWALL, LAYER_WALL);
             }
         }
     }
