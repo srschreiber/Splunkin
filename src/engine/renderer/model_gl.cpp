@@ -1,6 +1,5 @@
 #include "engine/renderer/model.h"
 #include <glad/gl.h>
-#include <cstring>
 
 namespace dc::renderer {
 
@@ -8,9 +7,8 @@ void Model::upload(const ModelData& data) {
     destroy();
     parts.reserve(data.parts.size());
     for (const auto& pd : data.parts) {
-        Part part;
+        PartMesh part;
         part.index_count = static_cast<int>(pd.indices.size());
-        std::memcpy(part.node_world, pd.node_world, sizeof(float) * 16);
 
         glGenVertexArrays(1, &part.vao);
         glGenBuffers(1, &part.vbo);

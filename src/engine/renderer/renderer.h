@@ -1,9 +1,11 @@
 #pragma once
 #include <cstdint>
+#include <vector>
 #include <cglm/cglm.h>
 #include "engine/renderer/mesh.h"
 #include "engine/renderer/camera.h"
 #include "engine/renderer/model.h"
+#include "engine/renderer/animator.h"
 
 namespace dc::entity { struct Player; }
 
@@ -22,8 +24,8 @@ struct Renderer {
     void begin_frame(const Camera& camera, const dc::entity::Player& player, int fb_w, int fb_h);
     // Draw the textured map mesh.
     void draw_map(const Mesh& mesh);
-    // Draw a model at `placement` (each part uses placement * node_world), flat color.
-    void draw_model(const Model& model, mat4 placement, vec3 color);
+    // Draw a model: each part i uses placement * part_world[i] (from pose_model), flat color.
+    void draw_model(const Model& model, const std::vector<Mat4>& part_world, mat4 placement, vec3 color);
     void shutdown();
 };
 

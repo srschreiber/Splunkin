@@ -4,8 +4,47 @@
 
 namespace dc::renderer {
 
+namespace {
+
+void read_node_trs(const cgltf_node* node, Node& out) {
+    // Defaults (identity) are already set in Node; apply explicit TRS, or
+    // decompose a baked matrix as a fallback.
+    if (node->has_matrix) {
+        mat4 m;
+        std::memcpy(m, node->matrix, sizeof(float) * 16);
+        vec4 t; mat4 rot; vec3 s;
+        glm_decompose(m, t, rot, s);
+        out.t[0] = t[0]; out.t[1] = t[1]; out.t[2] = t[2];
+        out.s[0] = s[0]; out.s[1] = s[1]; out.s[2] = s[2];
+        glm_mat4_quat(rot, out.r);
+        return;
+    }
+    if (node->has_translation) {
+        out.t[0] = node->translation[0]; out.t[1] = node->translation[1]; out.t[2] = node->translation[2];
+    }
+    if (node->has_rotation) {
+        out.r[0] = node->rotation[0]; out.r[1] = node->rotation[1];
+        out.r[2] = node->rotation[2]; out.r[3] = node->rotation[3];
+    }
+    if (node->has_scale) {
+        out.s[0] = node->scale[0]; out.s[1] = node->scale[1]; out.s[2] = node->scale[2];
+    }
+}
+
+AnimPath to_path(cgltf_animation_path_type p) {
+    switch (p) {
+        case cgltf_animation_path_type_rotation: return AnimPath::Rotation;
+        case cgltf_animation_path_type_scale:    return AnimPath::Scale;
+        default:                                 return AnimPath::Translation;
+    }
+}
+
+} // namespace
+
 bool read_model(const char* path, ModelData& out) {
+    out.nodes.clear();
     out.parts.clear();
+    out.walk = Animation{};
 
     cgltf_options options{};
     cgltf_data* data = nullptr;
@@ -15,16 +54,18 @@ bool read_model(const char* path, ModelData& out) {
         return false;
     }
 
-    for (cgltf_size n = 0; n < data->nodes_count; ++n) {
-        const cgltf_node* node = &data->nodes[n];
-        if (!node->mesh) continue;
+    const cgltf_size node_count = data->nodes_count;
+    out.nodes.resize(node_count);
 
-        float world[16];
-        cgltf_node_transform_world(node, world);
+    for (cgltf_size i = 0; i < node_count; ++i) {
+        const cgltf_node* node = &data->nodes[i];
+        Node& dst = out.nodes[i];
+        read_node_trs(node, dst);
+        dst.parent = node->parent ? static_cast<int>(node->parent - data->nodes) : -1;
 
-        for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
-            const cgltf_primitive* prim = &node->mesh->primitives[p];
-
+        // One primitive per mesh is assumed (true for our asset).
+        if (node->mesh && node->mesh->primitives_count > 0) {
+            const cgltf_primitive* prim = &node->mesh->primitives[0];
             const cgltf_accessor* pos = nullptr;
             const cgltf_accessor* nrm = nullptr;
             const cgltf_accessor* uv  = nullptr;
@@ -34,35 +75,65 @@ bool read_model(const char* path, ModelData& out) {
                 else if (at->type == cgltf_attribute_type_normal) nrm = at->data;
                 else if (at->type == cgltf_attribute_type_texcoord && at->index == 0) uv = at->data;
             }
-            if (!pos) continue;
-
-            PartData part;
-            std::memcpy(part.node_world, world, sizeof(float) * 16);
-
-            const cgltf_size vcount = pos->count;
-            part.vertices.reserve(vcount * 8);
-            for (cgltf_size v = 0; v < vcount; ++v) {
-                float pf[3] = {0, 0, 0}, nf[3] = {0, 1, 0}, tf[2] = {0, 0};
-                cgltf_accessor_read_float(pos, v, pf, 3);
-                if (nrm) cgltf_accessor_read_float(nrm, v, nf, 3);
-                if (uv)  cgltf_accessor_read_float(uv, v, tf, 2);
-                part.vertices.insert(part.vertices.end(),
-                    { pf[0],pf[1],pf[2], nf[0],nf[1],nf[2], tf[0],tf[1] });
+            if (pos) {
+                PartCPU part;
+                const cgltf_size vcount = pos->count;
+                part.vertices.reserve(vcount * 8);
+                for (cgltf_size v = 0; v < vcount; ++v) {
+                    float pf[3] = {0, 0, 0}, nf[3] = {0, 1, 0}, tf[2] = {0, 0};
+                    cgltf_accessor_read_float(pos, v, pf, 3);
+                    if (nrm) cgltf_accessor_read_float(nrm, v, nf, 3);
+                    if (uv)  cgltf_accessor_read_float(uv, v, tf, 2);
+                    part.vertices.insert(part.vertices.end(),
+                        { pf[0],pf[1],pf[2], nf[0],nf[1],nf[2], tf[0],tf[1] });
+                }
+                if (prim->indices) {
+                    const cgltf_size icount = prim->indices->count;
+                    part.indices.reserve(icount);
+                    for (cgltf_size k = 0; k < icount; ++k)
+                        part.indices.push_back(
+                            static_cast<uint32_t>(cgltf_accessor_read_index(prim->indices, k)));
+                } else {
+                    for (cgltf_size k = 0; k < vcount; ++k)
+                        part.indices.push_back(static_cast<uint32_t>(k));
+                }
+                dst.mesh_part = static_cast<int>(out.parts.size());
+                out.parts.push_back(std::move(part));
             }
-
-            if (prim->indices) {
-                const cgltf_size icount = prim->indices->count;
-                part.indices.reserve(icount);
-                for (cgltf_size i = 0; i < icount; ++i)
-                    part.indices.push_back(
-                        static_cast<uint32_t>(cgltf_accessor_read_index(prim->indices, i)));
-            } else {
-                for (cgltf_size i = 0; i < vcount; ++i)
-                    part.indices.push_back(static_cast<uint32_t>(i));
-            }
-
-            out.parts.push_back(std::move(part));
         }
+    }
+
+    // First animation -> the "walk" clip.
+    if (data->animations_count > 0) {
+        const cgltf_animation* anim = &data->animations[0];
+        out.walk.name = anim->name ? anim->name : "";
+        float duration = 0.0f;
+        for (cgltf_size c = 0; c < anim->channels_count; ++c) {
+            const cgltf_animation_channel* ch = &anim->channels[c];
+            if (!ch->target_node || !ch->sampler) continue;
+
+            AnimChannel oc;
+            oc.node = static_cast<int>(ch->target_node - data->nodes);
+            oc.path = to_path(ch->target_path);
+            oc.interp = (ch->sampler->interpolation == cgltf_interpolation_type_step)
+                      ? AnimInterp::Step : AnimInterp::Linear;
+
+            const cgltf_accessor* in = ch->sampler->input;
+            const cgltf_accessor* ov = ch->sampler->output;
+            const int comps = (oc.path == AnimPath::Rotation) ? 4 : 3;
+
+            oc.times.resize(in->count);
+            for (cgltf_size k = 0; k < in->count; ++k) {
+                cgltf_accessor_read_float(in, k, &oc.times[k], 1);
+                if (oc.times[k] > duration) duration = oc.times[k];
+            }
+            oc.values.resize(ov->count * comps);
+            for (cgltf_size k = 0; k < ov->count; ++k)
+                cgltf_accessor_read_float(ov, k, &oc.values[k * comps], comps);
+
+            out.walk.channels.push_back(std::move(oc));
+        }
+        out.walk.duration = duration;
     }
 
     cgltf_free(data);

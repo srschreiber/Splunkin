@@ -1,33 +1,66 @@
 #pragma once
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <cglm/cglm.h>
 
 namespace dc::renderer {
 
-// CPU-side, GL-free. Interleaved vertex = pos(3) + normal(3) + uv(2) = 8 floats.
-struct PartData {
+// --- Animation clip (node TRS keyframes) -----------------------------------
+
+enum class AnimPath { Translation, Rotation, Scale };
+enum class AnimInterp { Linear, Step };
+
+struct AnimChannel {
+    int        node = -1;                  // target node index
+    AnimPath   path = AnimPath::Translation;
+    AnimInterp interp = AnimInterp::Linear;
+    std::vector<float> times;              // keyframe input (seconds), ascending
+    std::vector<float> values;             // flat: 3 floats (T/S) or 4 (R) per keyframe
+};
+
+struct Animation {
+    std::string              name;
+    float                    duration = 0.0f;
+    std::vector<AnimChannel> channels;
+    bool valid() const { return !channels.empty() && duration > 0.0f; }
+};
+
+// --- Scene graph ------------------------------------------------------------
+
+// One node. (t,r,s) is the node's base/local transform; animation overrides it.
+struct Node {
+    vec3   t = {0.0f, 0.0f, 0.0f};
+    versor r = {0.0f, 0.0f, 0.0f, 1.0f};   // identity quaternion (x,y,z,w)
+    vec3   s = {1.0f, 1.0f, 1.0f};
+    int    parent = -1;
+    int    mesh_part = -1;                 // index into ModelData::parts, or -1
+};
+
+// CPU vertex data for one mesh part. Interleaved 8 floats: pos3, normal3, uv2.
+struct PartCPU {
     std::vector<float>    vertices;
     std::vector<uint32_t> indices;
-    mat4                  node_world;   // rest-pose world transform of this part's node
-};
-struct ModelData {
-    std::vector<PartData> parts;
 };
 
-// Parses a .glb/.gltf: every node with a mesh becomes one part per primitive,
-// reading POSITION/NORMAL/TEXCOORD_0 + indices and the node's world transform.
-// Returns false on failure. GL-free.
+// GL-free parse result: scene graph + mesh parts + the (first) animation.
+// parts[i] is drawn at the world transform of the node whose mesh_part == i.
+struct ModelData {
+    std::vector<Node>    nodes;
+    std::vector<PartCPU> parts;
+    Animation            walk;
+};
+
 bool read_model(const char* path, ModelData& out);
 
-// GL resource: one indexed mesh per part. (Defined in model_gl.cpp — later task.)
-struct Part {
+// --- GL resource: one indexed mesh per part (same order as ModelData::parts) -
+
+struct PartMesh {
     uint32_t vao = 0, vbo = 0, ebo = 0;
     int index_count = 0;
-    mat4 node_world;
 };
 struct Model {
-    std::vector<Part> parts;
+    std::vector<PartMesh> parts;
     void upload(const ModelData& data);
     void destroy();
 };

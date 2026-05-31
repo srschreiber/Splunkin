@@ -55,17 +55,20 @@ void Renderer::draw_map(const Mesh& mesh) {
     mesh.draw();
 }
 
-void Renderer::draw_model(const Model& model, mat4 placement, vec3 color) {
+void Renderer::draw_model(const Model& model, const std::vector<Mat4>& part_world,
+                          mat4 placement, vec3 color) {
     glUseProgram(model_program);
     glUniformMatrix4fv(model_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
     glUniform3fv(model_color_loc, 1, color);
-    for (const auto& part : model.parts) {
+    const size_t count = model.parts.size() < part_world.size()
+                       ? model.parts.size() : part_world.size();
+    for (size_t i = 0; i < count; ++i) {
         mat4 nw, m;
-        memcpy(nw, part.node_world, sizeof(float) * 16);
+        memcpy(nw, part_world[i].m, sizeof(float) * 16);
         glm_mat4_mul(placement, nw, m);
         glUniformMatrix4fv(model_model_loc, 1, GL_FALSE, reinterpret_cast<const float*>(m));
-        glBindVertexArray(part.vao);
-        glDrawElements(GL_TRIANGLES, part.index_count, GL_UNSIGNED_INT, nullptr);
+        glBindVertexArray(model.parts[i].vao);
+        glDrawElements(GL_TRIANGLES, model.parts[i].index_count, GL_UNSIGNED_INT, nullptr);
     }
     glBindVertexArray(0);
 }

@@ -4,6 +4,7 @@
 #include "engine/renderer/mesh.h"
 #include "engine/renderer/camera.h"
 #include "engine/renderer/model.h"
+#include "engine/renderer/animator.h"
 #include "engine/entity/player.h"
 #include "engine/world/map.h"
 #include "engine/world/map_mesh.h"
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 static std::string read_file(const char* path) {
     std::ifstream f(path);
@@ -61,6 +63,8 @@ int main(int argc, char** argv) {
     player.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
 
     dc::input::Input input;
+    float anim_time = 0.0f;                       // walk-clip clock (advances while moving)
+    std::vector<dc::renderer::Mat4> part_world;   // posed per-part transforms
     bool running = true;
     uint64_t prev = SDL_GetTicksNS();
     while (running) {
@@ -79,6 +83,11 @@ int main(int argc, char** argv) {
         bool jump = input.key_down(SDL_SCANCODE_SPACE);
         player.update(forward, strafe, jump, dt, *map);
 
+        // Walk animation: advance the clip while moving; rest pose when idle.
+        bool moving = (forward != 0.0f || strafe != 0.0f);
+        if (moving) anim_time += dt; else anim_time = 0.0f;
+        dc::renderer::pose_model(model_data, anim_time, moving, part_world);
+
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
         // the feet rest on the floor; follow the player's vertical position so the
@@ -96,7 +105,7 @@ int main(int argc, char** argv) {
         renderer.begin_frame(camera, player, w, h);
         renderer.draw_map(mesh);
         vec3 player_color = { 0.80f, 0.45f, 0.35f };
-        renderer.draw_model(player_model, placement, player_color);
+        renderer.draw_model(player_model, part_world, placement, player_color);
         window.swap();
 
         if (smoke) { std::printf("smoke: one frame rendered, exiting\n"); break; }
