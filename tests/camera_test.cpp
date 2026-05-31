@@ -1,5 +1,6 @@
 #include "engine/renderer/camera.h"
 #include "engine/entity/player.h"
+#include "engine/world/map.h"
 #include <cassert>
 #include <cstdio>
 #include <cmath>
@@ -20,13 +21,27 @@ int main() {
         assert(approx(proj[2][3], -1.0f));
     }
 
-    // View: player at origin looking +X (yaw=0). A world point ahead (+X) lands
-    // in front of the camera => negative view-space Z.
+    // View: player in the middle of an open room looking +X (yaw=0). The camera
+    // sits behind the player; a world point ahead of the player (+X) lands in
+    // front of the camera => negative view-space Z.
     {
-        Player p;            // position {0,0,0}, yaw 0, pitch 0
+        auto m = dc::world::parse_map(
+            "#####\n"
+            "#...#\n"
+            "#...#\n"
+            "#...#\n"
+            "#####\n");
+        assert(m.has_value());
+
+        Player p;
+        p.position[0] = 5.0f;                     // center-ish open cell (TILE=2)
+        p.position[1] = dc::world::EYE_HEIGHT;
+        p.position[2] = 5.0f;
+        p.yaw = 0.0f;                             // front = +X
+
         mat4 view;
-        cam.view_matrix(view, p);
-        vec4 world = {5.0f, 0.0f, 0.0f, 1.0f}, vp;
+        cam.view_matrix(view, p, *m);
+        vec4 world = { p.position[0] + 5.0f, p.position[1], p.position[2], 1.0f }, vp;
         glm_mat4_mulv(view, world, vp);
         assert(vp[2] < 0.0f);
     }
