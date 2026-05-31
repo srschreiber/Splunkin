@@ -27,4 +27,6 @@ build_and_run "$ROOT/tests/map_test.cpp" "$ROOT/src/engine/world/map.cpp"
 build_and_run "$ROOT/tests/map_mesh_test.cpp" \
   "$ROOT/src/engine/world/map_mesh.cpp" "$ROOT/src/engine/world/map.cpp"
 
+build_and_run "$ROOT/tests/camera_test.cpp" "$ROOT/src/engine/renderer/camera.cpp"
+
 echo "all tests passed"
