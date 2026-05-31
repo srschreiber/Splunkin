@@ -9,6 +9,7 @@ bool Renderer::init() {
     program = load_program("assets/shaders/world.vert", "assets/shaders/world.frag");
     if (!program) return false;
     glEnable(GL_DEPTH_TEST);
+    u_viewproj_loc = glGetUniformLocation(program, "u_viewproj");
     return true;
 }
 
@@ -24,8 +25,7 @@ void Renderer::render(const Mesh& mesh, const Camera& camera, int fb_w, int fb_h
     glm_mat4_mul(proj, view, viewproj);
 
     glUseProgram(program);
-    int loc = glGetUniformLocation(program, "u_viewproj");
-    glUniformMatrix4fv(loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
+    glUniformMatrix4fv(u_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
 
     mesh.draw();
 }

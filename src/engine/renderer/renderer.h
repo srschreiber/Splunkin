@@ -7,6 +7,7 @@ namespace dc::renderer {
 
 struct Renderer {
     uint32_t program = 0;
+    int u_viewproj_loc = -1;
 
     // Loads world.{vert,frag} and enables depth testing. Returns false on failure.
     bool init();

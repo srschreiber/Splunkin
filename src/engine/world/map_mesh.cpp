@@ -56,22 +56,22 @@ std::vector<float> build_map_mesh(const Map& map) {
             // -Z face (toward row-1), normal -Z.
             if (map.at(col, row - 1) == Cell::Open) {
                 float a[3]{x1,0,z0}, b[3]{x1,H,z0}, c[3]{x0,H,z0}, d[3]{x0,0,z0};
-                push_quad(v, a, b, c, d, 0,0,-1, WALL_COLOR);
+                push_quad(v, a, d, c, b, 0,0,-1, WALL_COLOR);
             }
             // +Z face (toward row+1), normal +Z.
             if (map.at(col, row + 1) == Cell::Open) {
                 float a[3]{x0,0,z1}, b[3]{x0,H,z1}, c[3]{x1,H,z1}, d[3]{x1,0,z1};
-                push_quad(v, a, b, c, d, 0,0,1, WALL_COLOR);
+                push_quad(v, a, d, c, b, 0,0,1, WALL_COLOR);
             }
             // -X face (toward col-1), normal -X.
             if (map.at(col - 1, row) == Cell::Open) {
                 float a[3]{x0,0,z0}, b[3]{x0,H,z0}, c[3]{x0,H,z1}, d[3]{x0,0,z1};
-                push_quad(v, a, b, c, d, -1,0,0, WALL_COLOR);
+                push_quad(v, a, d, c, b, -1,0,0, WALL_COLOR);
             }
             // +X face (toward col+1), normal +X.
             if (map.at(col + 1, row) == Cell::Open) {
                 float a[3]{x1,0,z1}, b[3]{x1,H,z1}, c[3]{x1,H,z0}, d[3]{x1,0,z0};
-                push_quad(v, a, b, c, d, 1,0,0, WALL_COLOR);
+                push_quad(v, a, d, c, b, 1,0,0, WALL_COLOR);
             }
         }
     }
