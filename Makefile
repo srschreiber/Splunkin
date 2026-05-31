@@ -1,4 +1,4 @@
-.PHONY: all setup build run clean
+.PHONY: all setup build run clean test
 all: build
 
 setup:
@@ -12,3 +12,6 @@ run:
 
 clean:
 	./scripts/clean.sh
+
+test:
+	./scripts/test.sh

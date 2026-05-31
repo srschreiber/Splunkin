@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ROOT="$(pwd)"
+TP="$ROOT/third_party"
+OUT="$ROOT/build/tests"
+mkdir -p "$OUT"
+
+CXX=${CXX:-clang++}
+STD="-std=c++17"
+INC="-I$ROOT/src -I$TP -I$TP/install/include"
+
+# Each *_test.cpp is compiled with the module sources it needs.
+# Modules under test are GL-free, so no SDL/GL linkage is required.
+build_and_run() { # test_file extra_srcs...
+  local tf="$1"; shift
+  local name; name="$(basename "$tf" .cpp)"
+  local bin="$OUT/$name"
+  "$CXX" $STD $INC "$tf" "$@" -o "$bin"
+  "$bin"
+}
+
+build_and_run "$ROOT/tests/sanity_test.cpp"
+
+echo "all tests passed"
