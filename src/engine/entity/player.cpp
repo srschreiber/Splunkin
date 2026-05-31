@@ -58,7 +58,7 @@ void Player::update(float forward, float strafe, bool jump, float dt,
     const float ceil_limit = dc::world::WALL_HEIGHT - 0.2f;
     if (position[1] > ceil_limit) {
         position[1] = ceil_limit;
-        if (vel_y > 0.0f) vel_y = 0.0f;
+        vel_y = 0.0f;   // head bonk: stop vertical motion
     }
     if (position[1] <= dc::world::EYE_HEIGHT) {
         position[1] = dc::world::EYE_HEIGHT;

@@ -64,6 +64,9 @@ int main(int argc, char** argv) {
         uint64_t now = SDL_GetTicksNS();
         float dt = static_cast<float>(now - prev) / 1.0e9f;
         prev = now;
+        // Clamp dt so a stall can't teleport the player through walls
+        // (collision tests the destination, not the swept path).
+        if (dt > 0.05f) dt = 0.05f;
 
         player.add_look(input.mouse_dx, input.mouse_dy);
         float forward = (input.key_down(SDL_SCANCODE_W) ? 1.0f : 0.0f)
