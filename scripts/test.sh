@@ -22,4 +22,6 @@ build_and_run() { # test_file extra_srcs...
 
 build_and_run "$ROOT/tests/sanity_test.cpp"
 
+build_and_run "$ROOT/tests/map_test.cpp" "$ROOT/src/engine/world/map.cpp"
+
 echo "all tests passed"
