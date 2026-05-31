@@ -79,15 +79,18 @@ int main(int argc, char** argv) {
         bool jump = input.key_down(SDL_SCANCODE_SPACE);
         player.update(forward, strafe, jump, dt, *map);
 
-        // Avatar placement: stand on the floor at the player's XZ, facing player.yaw.
-        // The model's origin sits at its waist (local feet at y~=-1.0), so lift it
-        // so the feet rest on the floor (y=0).
+        // Avatar placement: stand at the player's XZ, facing the look direction.
+        // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
+        // the feet rest on the floor; follow the player's vertical position so the
+        // avatar rises with the camera on a jump.
         const float MODEL_FOOT_LIFT = 1.0f;
+        const float MODEL_YAW_OFFSET = glm_rad(90.0f);  // tune to face forward (try -90 / 0 / 180)
+        float feet_y = (player.position[1] - dc::world::EYE_HEIGHT) + MODEL_FOOT_LIFT;
         mat4 placement;
         glm_mat4_identity(placement);
-        vec3 foot = { player.position[0], MODEL_FOOT_LIFT, player.position[2] };
+        vec3 foot = { player.position[0], feet_y, player.position[2] };
         glm_translate(placement, foot);
-        glm_rotate_y(placement, -player.yaw, placement);  // sign/offset tuned visually
+        glm_rotate_y(placement, -player.yaw + MODEL_YAW_OFFSET, placement);
 
         int w, h; window.framebuffer_size(w, h);
         renderer.begin_frame(camera, player, w, h);
