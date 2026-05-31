@@ -20,7 +20,8 @@ void sample_vec3(const AnimChannel& ch, float t, vec3 out) {
     const float* a = &v[k * 3];
     const float* b = &v[(k + 1) * 3];
     if (ch.interp == AnimInterp::Step) { out[0] = a[0]; out[1] = a[1]; out[2] = a[2]; return; }
-    const float f = (t - ch.times[k]) / (ch.times[k + 1] - ch.times[k]);
+    const float dt = ch.times[k + 1] - ch.times[k];
+    const float f = dt > 0.0f ? (t - ch.times[k]) / dt : 0.0f;
     out[0] = a[0] + (b[0] - a[0]) * f;
     out[1] = a[1] + (b[1] - a[1]) * f;
     out[2] = a[2] + (b[2] - a[2]) * f;
@@ -43,7 +44,8 @@ void sample_quat(const AnimChannel& ch, float t, versor out) {
     glm_quat_init(qa, a[0], a[1], a[2], a[3]);
     glm_quat_init(qb, b[0], b[1], b[2], b[3]);
     if (ch.interp == AnimInterp::Step) { glm_quat_copy(qa, out); return; }
-    const float f = (t - ch.times[k]) / (ch.times[k + 1] - ch.times[k]);
+    const float dt = ch.times[k + 1] - ch.times[k];
+    const float f = dt > 0.0f ? (t - ch.times[k]) / dt : 0.0f;
     glm_quat_slerp(qa, qb, f, out);
 }
 
@@ -92,11 +94,12 @@ void pose_model(const ModelData& model, float t, bool animate,
     for (int i = 0; i < n; ++i) local_matrix(nt[i].v, nr[i].q, ns[i].v, local[i].m);
 
     // Resolve each node's world matrix (parent chain, memoized).
+    constexpr int MAX_DEPTH = 64;   // node hierarchy depth bound
     for (int i = 0; i < n; ++i) {
-        int chain[64];
+        int chain[MAX_DEPTH];
         int sp = 0;
         int cur = i;
-        while (cur != -1 && !done[cur] && sp < 64) { chain[sp++] = cur; cur = model.nodes[cur].parent; }
+        while (cur != -1 && !done[cur] && sp < MAX_DEPTH) { chain[sp++] = cur; cur = model.nodes[cur].parent; }
         while (sp > 0) {
             const int node = chain[--sp];
             const int p = model.nodes[node].parent;

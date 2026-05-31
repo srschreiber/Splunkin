@@ -115,6 +115,9 @@ bool read_model(const char* path, ModelData& out) {
             AnimChannel oc;
             oc.node = static_cast<int>(ch->target_node - data->nodes);
             oc.path = to_path(ch->target_path);
+            // Cubic-spline output stores [inTangent, value, outTangent] per key; we
+            // keep only the value and sample it linearly (tangents dropped).
+            const bool cubic = (ch->sampler->interpolation == cgltf_interpolation_type_cubic_spline);
             oc.interp = (ch->sampler->interpolation == cgltf_interpolation_type_step)
                       ? AnimInterp::Step : AnimInterp::Linear;
 
@@ -122,14 +125,17 @@ bool read_model(const char* path, ModelData& out) {
             const cgltf_accessor* ov = ch->sampler->output;
             const int comps = (oc.path == AnimPath::Rotation) ? 4 : 3;
 
-            oc.times.resize(in->count);
-            for (cgltf_size k = 0; k < in->count; ++k) {
+            const cgltf_size nkeys = in->count;   // one input time per keyframe
+            oc.times.resize(nkeys);
+            for (cgltf_size k = 0; k < nkeys; ++k) {
                 cgltf_accessor_read_float(in, k, &oc.times[k], 1);
                 if (oc.times[k] > duration) duration = oc.times[k];
             }
-            oc.values.resize(ov->count * comps);
-            for (cgltf_size k = 0; k < ov->count; ++k)
-                cgltf_accessor_read_float(ov, k, &oc.values[k * comps], comps);
+            oc.values.resize(nkeys * comps);
+            for (cgltf_size k = 0; k < nkeys; ++k) {
+                const cgltf_size elem = cubic ? (3 * k + 1) : k;   // middle = value
+                cgltf_accessor_read_float(ov, elem, &oc.values[k * comps], comps);
+            }
 
             out.walk.channels.push_back(std::move(oc));
         }
