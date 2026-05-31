@@ -6,42 +6,33 @@
 namespace dc::renderer {
 
 bool Renderer::init() {
-    program = load_program("assets/shaders/tri.vert", "assets/shaders/tri.frag");
+    program = load_program("assets/shaders/world.vert", "assets/shaders/world.frag");
     if (!program) return false;
-
-    // pos.xy, color.rgb
-    const float verts[] = {
-        -0.6f, -0.5f,  1.0f, 0.0f, 0.0f,
-         0.6f, -0.5f,  0.0f, 1.0f, 0.0f,
-         0.0f,  0.6f,  0.0f, 0.0f, 1.0f,
-    };
-    glGenVertexArrays(1, &vao);
-    glGenBuffers(1, &vbo);
-    glBindVertexArray(vao);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(2 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
+    glEnable(GL_DEPTH_TEST);
     return true;
 }
 
-void Renderer::render() {
-    glClearColor(0.08f, 0.08f, 0.12f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
+void Renderer::render(const Mesh& mesh, const Camera& camera, int fb_w, int fb_h) {
+    glViewport(0, 0, fb_w, fb_h);
+    glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    const float aspect = (fb_h > 0) ? static_cast<float>(fb_w) / fb_h : 1.0f;
+    mat4 view, proj, viewproj;
+    camera.view_matrix(view);
+    camera.proj_matrix(proj, aspect);
+    glm_mat4_mul(proj, view, viewproj);
+
     glUseProgram(program);
-    glBindVertexArray(vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
-    glBindVertexArray(0);
+    int loc = glGetUniformLocation(program, "u_viewproj");
+    glUniformMatrix4fv(loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
+
+    mesh.draw();
 }
 
 void Renderer::shutdown() {
-    if (vbo) glDeleteBuffers(1, &vbo);
-    if (vao) glDeleteVertexArrays(1, &vao);
     if (program) glDeleteProgram(program);
-    program = vao = vbo = 0;
+    program = 0;
 }
 
 } // namespace dc::renderer

@@ -1,16 +1,17 @@
 #pragma once
 #include <cstdint>
+#include "engine/renderer/mesh.h"
+#include "engine/renderer/camera.h"
 
 namespace dc::renderer {
 
 struct Renderer {
     uint32_t program = 0;
-    uint32_t vao = 0;
-    uint32_t vbo = 0;
 
-    // Loads the triangle program and uploads geometry. Returns false on failure.
+    // Loads world.{vert,frag} and enables depth testing. Returns false on failure.
     bool init();
-    void render();
+    // Clears, sets the view-projection uniform from the camera, and draws the mesh.
+    void render(const Mesh& mesh, const Camera& camera, int fb_w, int fb_h);
     void shutdown();
 };
 
