@@ -40,4 +40,7 @@ build_and_run "$ROOT/tests/player_test.cpp" \
 
 build_and_run "$ROOT/tests/texture_decode_test.cpp" "$ROOT/src/engine/renderer/stb_image_impl.cpp"
 
+build_and_run "$ROOT/tests/model_load_test.cpp" \
+  "$ROOT/src/engine/renderer/model.cpp" "$ROOT/src/engine/renderer/cgltf_impl.cpp"
+
 echo "all tests passed"
