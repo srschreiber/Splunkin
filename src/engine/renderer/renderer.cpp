@@ -1,5 +1,6 @@
 #include "engine/renderer/renderer.h"
 #include "engine/renderer/shader.h"
+#include "engine/entity/player.h"
 
 #include <glad/gl.h>
 
@@ -8,19 +9,20 @@ namespace dc::renderer {
 bool Renderer::init() {
     program = load_program("assets/shaders/world.vert", "assets/shaders/world.frag");
     if (!program) return false;
-    glEnable(GL_DEPTH_TEST);
     u_viewproj_loc = glGetUniformLocation(program, "u_viewproj");
+    glEnable(GL_DEPTH_TEST);
     return true;
 }
 
-void Renderer::render(const Mesh& mesh, const Camera& camera, int fb_w, int fb_h) {
+void Renderer::render(const Mesh& mesh, const Camera& camera,
+                      const dc::entity::Player& player, int fb_w, int fb_h) {
     glViewport(0, 0, fb_w, fb_h);
     glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const float aspect = (fb_h > 0) ? static_cast<float>(fb_w) / fb_h : 1.0f;
     mat4 view, proj, viewproj;
-    camera.view_matrix(view);
+    camera.view_matrix(view, player);
     camera.proj_matrix(proj, aspect);
     glm_mat4_mul(proj, view, viewproj);
 
@@ -33,6 +35,7 @@ void Renderer::render(const Mesh& mesh, const Camera& camera, int fb_w, int fb_h
 void Renderer::shutdown() {
     if (program) glDeleteProgram(program);
     program = 0;
+    u_viewproj_loc = -1;
 }
 
 } // namespace dc::renderer

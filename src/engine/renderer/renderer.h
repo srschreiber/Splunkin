@@ -3,6 +3,8 @@
 #include "engine/renderer/mesh.h"
 #include "engine/renderer/camera.h"
 
+namespace dc::entity { struct Player; }
+
 namespace dc::renderer {
 
 struct Renderer {
@@ -11,8 +13,9 @@ struct Renderer {
 
     // Loads world.{vert,frag} and enables depth testing. Returns false on failure.
     bool init();
-    // Clears, sets the view-projection uniform from the camera, and draws the mesh.
-    void render(const Mesh& mesh, const Camera& camera, int fb_w, int fb_h);
+    // Clears, sets the view-projection uniform from camera+player, draws the mesh.
+    void render(const Mesh& mesh, const Camera& camera,
+                const dc::entity::Player& player, int fb_w, int fb_h);
     void shutdown();
 };
 
