@@ -47,7 +47,7 @@ int main() {
         for (std::size_t k = 0; k < VPQ; ++k) {
             const float u = verts[q + k*FPV + 6];
             const float vv = verts[q + k*FPV + 7];
-            assert(u >= 0.0f && u <= 1.5f);
+            assert(u >= 0.0f && u <= 1.0f);   // u never tiles (catches a u/v swap)
             assert(vv >= 0.0f && vv <= 1.5f);
         }
     }

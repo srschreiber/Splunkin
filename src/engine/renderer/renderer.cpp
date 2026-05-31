@@ -18,7 +18,7 @@ bool Renderer::init() {
         "assets/textures/stoneceiling0.png",
     };
     texture = load_texture_array(paths, 3);
-    if (!texture) return false;
+    if (!texture) { shutdown(); return false; }  // don't leak the linked program
 
     glUseProgram(program);
     glUniform1i(glGetUniformLocation(program, "u_tex"), 0);  // sampler uses texture unit 0
