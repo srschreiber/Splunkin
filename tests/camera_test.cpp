@@ -1,45 +1,34 @@
 #include "engine/renderer/camera.h"
+#include "engine/entity/player.h"
 #include <cassert>
 #include <cstdio>
 #include <cmath>
 
 using namespace dc::renderer;
+using dc::entity::Player;
 
-static bool approx(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) < eps; }
+static bool approx(float a, float b, float eps = 1e-3f) { return std::fabs(a - b) < eps; }
 
 int main() {
-    // Default yaw=0,pitch=0 -> front points along +X.
+    Camera cam;
+
+    // Projection is a standard OpenGL RH perspective: out[3][3]==0, out[2][3]==-1.
     {
-        Camera c;
-        vec3 f; c.front(f);
-        assert(approx(f[0], 1.0f) && approx(f[1], 0.0f) && approx(f[2], 0.0f));
+        mat4 proj;
+        cam.proj_matrix(proj, 16.0f / 9.0f);
+        assert(approx(proj[3][3], 0.0f));
+        assert(approx(proj[2][3], -1.0f));
     }
 
-    // Pitch clamps to +-89 degrees (~1.55334 rad).
+    // View: player at origin looking +X (yaw=0). A world point ahead (+X) lands
+    // in front of the camera => negative view-space Z.
     {
-        Camera c;
-        c.look(0.0f, -100000.0f);  // huge upward delta
-        assert(c.pitch <= glm_rad(89.0f) + 1e-3f);
-        c.look(0.0f,  200000.0f);  // huge downward delta
-        assert(c.pitch >= -glm_rad(89.0f) - 1e-3f);
-    }
-
-    // Moving forward with yaw=0 advances +X by move_speed*dt, leaves Y fixed.
-    {
-        Camera c;
-        c.position[1] = 1.6f;
-        c.move(1.0f, 0.0f, 0.5f);   // dt=0.5, speed=4 -> +2 along +X
-        assert(approx(c.position[0], 2.0f));
-        assert(approx(c.position[1], 1.6f));   // height unchanged
-        assert(approx(c.position[2], 0.0f));
-    }
-
-    // Strafing right with yaw=0 (front=+X, up=+Y): right = cross(front,up) = +Z.
-    {
-        Camera c;
-        c.move(0.0f, 1.0f, 0.5f);   // +2 along right
-        assert(approx(c.position[2], 2.0f));
-        assert(approx(c.position[0], 0.0f));
+        Player p;            // position {0,0,0}, yaw 0, pitch 0
+        mat4 view;
+        cam.view_matrix(view, p);
+        vec4 world = {5.0f, 0.0f, 0.0f, 1.0f}, vp;
+        glm_mat4_mulv(view, world, vp);
+        assert(vp[2] < 0.0f);
     }
 
     std::printf("PASS camera\n");

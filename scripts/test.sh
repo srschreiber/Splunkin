@@ -27,7 +27,9 @@ build_and_run "$ROOT/tests/map_test.cpp" "$ROOT/src/engine/world/map.cpp"
 build_and_run "$ROOT/tests/map_mesh_test.cpp" \
   "$ROOT/src/engine/world/map_mesh.cpp" "$ROOT/src/engine/world/map.cpp"
 
-build_and_run "$ROOT/tests/camera_test.cpp" "$ROOT/src/engine/renderer/camera.cpp"
+build_and_run "$ROOT/tests/camera_test.cpp" \
+  "$ROOT/src/engine/renderer/camera.cpp" "$ROOT/src/engine/entity/player.cpp" \
+  "$ROOT/src/engine/world/collision.cpp" "$ROOT/src/engine/world/map.cpp"
 
 build_and_run "$ROOT/tests/collision_test.cpp" \
   "$ROOT/src/engine/world/collision.cpp" "$ROOT/src/engine/world/map.cpp"
