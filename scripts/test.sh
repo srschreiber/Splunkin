@@ -32,4 +32,8 @@ build_and_run "$ROOT/tests/camera_test.cpp" "$ROOT/src/engine/renderer/camera.cp
 build_and_run "$ROOT/tests/collision_test.cpp" \
   "$ROOT/src/engine/world/collision.cpp" "$ROOT/src/engine/world/map.cpp"
 
+build_and_run "$ROOT/tests/player_test.cpp" \
+  "$ROOT/src/engine/entity/player.cpp" "$ROOT/src/engine/world/collision.cpp" \
+  "$ROOT/src/engine/world/map.cpp"
+
 echo "all tests passed"
