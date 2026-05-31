@@ -3,11 +3,13 @@
 #include "engine/renderer/renderer.h"
 #include "engine/renderer/mesh.h"
 #include "engine/renderer/camera.h"
+#include "engine/renderer/model.h"
 #include "engine/entity/player.h"
 #include "engine/world/map.h"
 #include "engine/world/map_mesh.h"
 
 #include <SDL3/SDL.h>
+#include <cglm/cglm.h>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -29,13 +31,13 @@ int main(int argc, char** argv) {
     }
 
     std::string text = read_file(map_path);
-    if (text.empty()) {
-        std::fprintf(stderr, "could not read map: %s\n", map_path);
-        return 1;
-    }
+    if (text.empty()) { std::fprintf(stderr, "could not read map: %s\n", map_path); return 1; }
     auto map = dc::world::parse_map(text);
-    if (!map) {
-        std::fprintf(stderr, "could not parse map: %s\n", map_path);
+    if (!map) { std::fprintf(stderr, "could not parse map: %s\n", map_path); return 1; }
+
+    dc::renderer::ModelData model_data;
+    if (!dc::renderer::read_model("assets/models/player.glb", model_data)) {
+        std::fprintf(stderr, "could not load model: assets/models/player.glb\n");
         return 1;
     }
 
@@ -47,6 +49,9 @@ int main(int argc, char** argv) {
 
     dc::renderer::Mesh mesh;
     mesh.upload(dc::world::build_map_mesh(*map));
+
+    dc::renderer::Model player_model;
+    player_model.upload(model_data);
 
     dc::renderer::Camera camera;
 
@@ -64,8 +69,6 @@ int main(int argc, char** argv) {
         uint64_t now = SDL_GetTicksNS();
         float dt = static_cast<float>(now - prev) / 1.0e9f;
         prev = now;
-        // Clamp dt so a stall can't teleport the player through walls
-        // (collision tests the destination, not the swept path).
         if (dt > 0.05f) dt = 0.05f;
 
         player.add_look(input.mouse_dx, input.mouse_dy);
@@ -76,13 +79,24 @@ int main(int argc, char** argv) {
         bool jump = input.key_down(SDL_SCANCODE_SPACE);
         player.update(forward, strafe, jump, dt, *map);
 
+        // Avatar placement: stand on the floor at the player's XZ, facing player.yaw.
+        mat4 placement;
+        glm_mat4_identity(placement);
+        vec3 foot = { player.position[0], 0.0f, player.position[2] };
+        glm_translate(placement, foot);
+        glm_rotate_y(placement, -player.yaw, placement);  // sign/offset tuned visually
+
         int w, h; window.framebuffer_size(w, h);
-        renderer.render(mesh, camera, player, w, h);
+        renderer.begin_frame(camera, player, w, h);
+        renderer.draw_map(mesh);
+        vec3 player_color = { 0.80f, 0.45f, 0.35f };
+        renderer.draw_model(player_model, placement, player_color);
         window.swap();
 
         if (smoke) { std::printf("smoke: one frame rendered, exiting\n"); break; }
     }
 
+    player_model.destroy();
     mesh.destroy();
     renderer.shutdown();
     window.shutdown();
