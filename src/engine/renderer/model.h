@@ -9,7 +9,7 @@ namespace dc::renderer {
 struct PartData {
     std::vector<float>    vertices;
     std::vector<uint32_t> indices;
-    mutable mat4          node_world;   // rest-pose world transform; mutable so cglm's non-const API can accept it through a const ref
+    mat4                  node_world;   // rest-pose world transform of this part's node
 };
 struct ModelData {
     std::vector<PartData> parts;

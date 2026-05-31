@@ -80,9 +80,12 @@ int main(int argc, char** argv) {
         player.update(forward, strafe, jump, dt, *map);
 
         // Avatar placement: stand on the floor at the player's XZ, facing player.yaw.
+        // The model's origin sits at its waist (local feet at y~=-1.0), so lift it
+        // so the feet rest on the floor (y=0).
+        const float MODEL_FOOT_LIFT = 1.0f;
         mat4 placement;
         glm_mat4_identity(placement);
-        vec3 foot = { player.position[0], 0.0f, player.position[2] };
+        vec3 foot = { player.position[0], MODEL_FOOT_LIFT, player.position[2] };
         glm_translate(placement, foot);
         glm_rotate_y(placement, -player.yaw, placement);  // sign/offset tuned visually
 

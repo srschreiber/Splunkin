@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstddef>
+#include <cstring>
 
 using namespace dc::renderer;
 
@@ -20,7 +21,9 @@ int main() {
         for (std::size_t v = 0; v < vcount; ++v) {
             vec4 p = { part.vertices[v*8+0], part.vertices[v*8+1], part.vertices[v*8+2], 1.0f };
             vec4 w;
-            glm_mat4_mulv(part.node_world, p, w);
+            mat4 nw;
+            std::memcpy(nw, part.node_world, sizeof(nw));   // copy: cglm's mulv wants non-const
+            glm_mat4_mulv(nw, p, w);
             if (w[1] < miny) miny = w[1];
             if (w[1] > maxy) maxy = w[1];
             if (w[0] < minx) minx = w[0];
@@ -28,6 +31,8 @@ int main() {
         }
     }
     const float height = maxy - miny;
+    std::printf("model bbox: y[%.3f, %.3f] height=%.3f  x[%.3f, %.3f]\n",
+                miny, maxy, height, minx, maxx);
     assert(height > 1.0f && height < 2.5f);   // ~1.8 tall
     assert(maxx > minx);                       // non-degenerate
 
