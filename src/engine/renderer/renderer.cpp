@@ -1,5 +1,6 @@
 #include "engine/renderer/renderer.h"
 #include "engine/renderer/shader.h"
+#include "engine/renderer/texture.h"
 #include "engine/entity/player.h"
 
 #include <glad/gl.h>
@@ -10,6 +11,18 @@ bool Renderer::init() {
     program = load_program("assets/shaders/world.vert", "assets/shaders/world.frag");
     if (!program) return false;
     u_viewproj_loc = glGetUniformLocation(program, "u_viewproj");
+
+    const char* paths[3] = {
+        "assets/textures/stonefloor0.png",
+        "assets/textures/stonewall0.png",
+        "assets/textures/stoneceiling0.png",
+    };
+    texture = load_texture_array(paths, 3);
+    if (!texture) return false;
+
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_tex"), 0);  // sampler uses texture unit 0
+
     glEnable(GL_DEPTH_TEST);
     return true;
 }
@@ -29,12 +42,17 @@ void Renderer::render(const Mesh& mesh, const Camera& camera,
     glUseProgram(program);
     glUniformMatrix4fv(u_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
 
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+
     mesh.draw();
 }
 
 void Renderer::shutdown() {
+    if (texture) glDeleteTextures(1, &texture);
     if (program) glDeleteProgram(program);
     program = 0;
+    texture = 0;
     u_viewproj_loc = -1;
 }
 

@@ -9,11 +9,11 @@ namespace dc::renderer {
 
 struct Renderer {
     uint32_t program = 0;
+    uint32_t texture = 0;          // GL_TEXTURE_2D_ARRAY
     int u_viewproj_loc = -1;
 
-    // Loads world.{vert,frag} and enables depth testing. Returns false on failure.
+    // Loads world.{vert,frag}, the texture array, enables depth testing. False on failure.
     bool init();
-    // Clears, sets the view-projection uniform from camera+player, draws the mesh.
     void render(const Mesh& mesh, const Camera& camera,
                 const dc::entity::Player& player, int fb_w, int fb_h);
     void shutdown();
