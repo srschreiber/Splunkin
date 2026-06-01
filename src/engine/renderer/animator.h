@@ -25,7 +25,12 @@ struct AnimLayer {
 // With no layers you get the rest pose. `out_part_world` is sized to
 // model.parts.size(); out_part_world[i] is the transform for the part whose
 // node has mesh_part == i.
+//
+// Optionally, if `attach_node >= 0` and `out_attach != nullptr`, writes that
+// node's world matrix into *out_attach — used as an attachment "socket" (e.g.
+// the head bone) to hang separate models (a helmet) off an animated bone.
 void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
-                float head_pitch, std::vector<Mat4>& out_part_world);
+                float head_pitch, std::vector<Mat4>& out_part_world,
+                int attach_node = -1, Mat4* out_attach = nullptr);
 
 } // namespace dc::renderer

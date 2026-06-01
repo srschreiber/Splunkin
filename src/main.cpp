@@ -56,6 +56,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    dc::renderer::ModelData helmet_data;
+    if (!dc::renderer::read_model("assets/models/helmet.glb", helmet_data)) {
+        std::fprintf(stderr, "could not load model: assets/models/helmet.glb\n");
+        return 1;
+    }
+
     dc::platform::Window window;
     if (!window.init("dungeoncrawl")) return 1;
 
@@ -70,6 +76,25 @@ int main(int argc, char** argv) {
 
     dc::renderer::Model chest_model;
     chest_model.upload(chest_data);
+
+    dc::renderer::Model helmet_model;
+    helmet_model.upload(helmet_data);
+
+    // The helmet is attached to the player's head bone. Precompute the helmet
+    // mesh's transform *relative to its head bone* (its node's local TRS) — a
+    // constant offset. Each frame we draw it at: player_placement * headWorld * offset.
+    std::vector<dc::renderer::Mat4> helmet_offset(1);
+    glm_mat4_identity(helmet_offset[0].m);
+    for (const auto& nd : helmet_data.nodes) {
+        if (nd.mesh_part < 0) continue;                 // the helmet's one mesh node
+        mat4 T, R, S, tmp;
+        glm_translate_make(T, const_cast<float*>(nd.t));
+        versor rq; glm_quat_copy(const_cast<float*>(nd.r), rq); glm_quat_mat4(rq, R);
+        glm_scale_make(S, const_cast<float*>(nd.s));
+        glm_mat4_mul(T, R, tmp);
+        glm_mat4_mul(tmp, S, helmet_offset[0].m);
+        break;
+    }
 
     // Spawn a chest entity per 'C' tile in the map.
     std::vector<Chest> chests;
@@ -161,7 +186,11 @@ int main(int argc, char** argv) {
         if (moving)   layers.push_back({ &model_data.walk,  anim_time,  -1 });
         if (punching) layers.push_back({ &model_data.punch, punch_time, model_data.arm_l_node });
         if (blocking) layers.push_back({ &model_data.block, block_time, model_data.arm_r_node });  // block masked to the right arm
-        dc::renderer::pose_model(model_data, layers, player.pitch, part_world);
+        // Pose the player, and also grab the head bone's world matrix as a socket
+        // for the helmet.
+        dc::renderer::Mat4 head_world;
+        dc::renderer::pose_model(model_data, layers, player.pitch, part_world,
+                                 model_data.head_node, &head_world);
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
@@ -181,6 +210,13 @@ int main(int argc, char** argv) {
         renderer.draw_map(mesh);
         vec3 player_color = { 0.80f, 0.45f, 0.35f };
         renderer.draw_model(player_model, part_world, placement, player_color);
+
+        // Helmet: attached to the head bone socket. Its world = placement * headWorld
+        // * offset, so it rides head-look/walk/jump for free. White tint -> material color.
+        mat4 helmet_place;
+        glm_mat4_mul(placement, head_world.m, helmet_place);
+        vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
+        renderer.draw_model(helmet_model, helmet_offset, helmet_place, helmet_color);
 
         // Draw each chest, lid posed by its open_t (open clip only animates the lid).
         // White tint -> the per-part material colors from the .glb show through unchanged.
@@ -202,6 +238,7 @@ int main(int argc, char** argv) {
     }
 
     chest_model.destroy();
+    helmet_model.destroy();
     player_model.destroy();
     mesh.destroy();
     renderer.shutdown();

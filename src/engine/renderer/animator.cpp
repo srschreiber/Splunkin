@@ -65,7 +65,8 @@ struct Q  { versor q; };
 } // namespace
 
 void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
-                float head_pitch, std::vector<Mat4>& out_part_world) {
+                float head_pitch, std::vector<Mat4>& out_part_world,
+                int attach_node, Mat4* out_attach) {
     const int n = static_cast<int>(model.nodes.size());
 
     // Working TRS per node = base (rest), then each layer overrides.
@@ -132,6 +133,11 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
             done[node] = 1;
         }
     }
+
+    // Optional attachment socket: a chosen bone's world matrix (e.g. the head),
+    // so a separate model (helmet) can be hung off it.
+    if (out_attach && attach_node >= 0 && attach_node < n)
+        glm_mat4_copy(world[attach_node].m, out_attach->m);
 
     out_part_world.assign(model.parts.size(), Mat4{});
     for (auto& pw : out_part_world) glm_mat4_identity(pw.m);
