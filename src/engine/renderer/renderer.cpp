@@ -35,14 +35,14 @@ bool Renderer::init() {
 }
 
 void Renderer::begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player,
-                           int fb_w, int fb_h) {
+                           float dt, int fb_w, int fb_h) {
     glViewport(0, 0, fb_w, fb_h);
     glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const float aspect = (fb_h > 0) ? static_cast<float>(fb_w) / fb_h : 1.0f;
     mat4 view, proj;
-    camera.view_matrix(view, player, map);
+    camera.view_matrix(view, player, map, dt);
     camera.proj_matrix(proj, aspect);
     glm_mat4_mul(proj, view, viewproj);
 }

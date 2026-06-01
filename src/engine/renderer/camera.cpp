@@ -1,13 +1,14 @@
 #include "engine/renderer/camera.h"
 #include "engine/entity/player.h"
 #include "engine/world/collision.h"
+#include <cmath>
 
 namespace dc::renderer {
 
 // creates a matrix that transforms world coordinates into view space. Third-person:
 // the eye sits `distance` units behind the player along the look direction, looking
 // forward through the player.
-void Camera::view_matrix(mat4 out, dc::entity::Player& p, dc::world::Map& map) {
+void Camera::view_matrix(mat4 out, dc::entity::Player& p, dc::world::Map& map, float dt) {
     vec3 f;  p.front(f);
     vec3 up = {0.0f, 1.0f, 0.0f};
     vec3 eye = { p.position[0] - f[0] * distance,
@@ -37,11 +38,19 @@ void Camera::view_matrix(mat4 out, dc::entity::Player& p, dc::world::Map& map) {
         }
     }
 
-    // Now we shift the last_safe_eye towards the current eye, so that if we get stuck in a wall, the camera will smoothly move to the last safe position instead of snapping.
-    const float smooth_factor = 0.1f;
-    glm_vec3_lerp(last_safe_eye, eye, smooth_factor, last_safe_eye);
+    // Ease the rendered camera toward the target `eye` so wall-clamping glides
+    // instead of snapping. Time-based so the feel is the same at any frame rate;
+    // snap on the very first frame so we don't slide in from the origin.
+    const float smooth_speed = 10.0f;                       // higher = snappier
+    const float factor = 1.0f - std::exp(-smooth_speed * dt);
+    if (!eye_initialized) {
+        glm_vec3_copy(eye, smoothed_eye);
+        eye_initialized = true;
+    } else {
+        glm_vec3_lerp(smoothed_eye, eye, factor, smoothed_eye);
+    }
 
-    glm_look(last_safe_eye, f, up, out);
+    glm_look(smoothed_eye, f, up, out);
 }
 
 // creates a perspective projection matrix with the given aspect ratio

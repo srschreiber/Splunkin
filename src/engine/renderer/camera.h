@@ -12,9 +12,10 @@ struct Camera {
     float near_z = 0.05f;
     float far_z  = 100.0f;
     float distance = 1.0f;       // third-person: how far the eye sits behind the player
-    vec3 last_safe_eye = {0.0f, 0.0f, 0.0f};   // for smooth camera movement when clipping against walls
+    vec3 smoothed_eye = {0.0f, 0.0f, 0.0f};   // exponentially-smoothed camera position
+    bool eye_initialized = false;             // snap on the first frame, then smooth
 
-    void view_matrix(mat4 out, dc::entity::Player& p, dc::world::Map& map);
+    void view_matrix(mat4 out, dc::entity::Player& p, dc::world::Map& map, float dt);
     void proj_matrix(mat4 out, float aspect) const;
 };
 

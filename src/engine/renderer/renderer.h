@@ -21,7 +21,7 @@ struct Renderer {
 
     bool init();
     // Set viewport, clear color+depth, compute the frame's view-projection.
-    void begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player, int fb_w, int fb_h);
+    void begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player, float dt, int fb_w, int fb_h);
     // Draw the textured map mesh.
     void draw_map(const Mesh& mesh);
     // Draw a model: each part i uses placement * part_world[i] (from pose_model), flat color.

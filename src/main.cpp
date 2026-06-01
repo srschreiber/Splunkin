@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
         glm_rotate_y(placement, -player.yaw + MODEL_YAW_OFFSET, placement);
 
         int w, h; window.framebuffer_size(w, h);
-        renderer.begin_frame(*map, camera, player, w, h);
+        renderer.begin_frame(*map, camera, player, dt, w, h);
         renderer.draw_map(mesh);
         vec3 player_color = { 0.80f, 0.45f, 0.35f };
         renderer.draw_model(player_model, part_world, placement, player_color);

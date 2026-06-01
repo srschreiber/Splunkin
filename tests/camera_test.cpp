@@ -40,7 +40,7 @@ int main() {
         p.yaw = 0.0f;                             // front = +X
 
         mat4 view;
-        cam.view_matrix(view, p, *m);
+        cam.view_matrix(view, p, *m, 0.016f);   // first call snaps smoothed_eye = eye
         vec4 world = { p.position[0] + 5.0f, p.position[1], p.position[2], 1.0f }, vp;
         glm_mat4_mulv(view, world, vp);
         assert(vp[2] < 0.0f);
