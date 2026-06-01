@@ -24,4 +24,8 @@ bool Input::key_down(int scancode) const {
     return state[scancode];
 }
 
+bool Input::mouse_down(int button) const {
+    return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(button)) != 0;
+}
+
 } // namespace dc::input

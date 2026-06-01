@@ -95,6 +95,7 @@ bool read_model(const char* path, ModelData& out) {
     out.parts.clear();
     out.walk = Animation{};
     out.punch = Animation{};
+    out.block = Animation{};
 
     cgltf_options options{};
     cgltf_data* data = nullptr;
@@ -156,6 +157,7 @@ bool read_model(const char* path, ModelData& out) {
     // Named bones we drive specially.
     out.head_node  = find_bone(data, "head");   // head-look
     out.arm_l_node = find_bone(data, "armL");    // punch layer is masked to this bone
+    out.arm_r_node = find_bone(data, "armR");    // block layer is masked to this bone
 
     // Read every animation; route the ones we know by name.
     for (cgltf_size i = 0; i < data->animations_count; ++i) {
@@ -163,6 +165,7 @@ bool read_model(const char* path, ModelData& out) {
         Animation clip = read_animation(data, anim);
         if (clip.name == "walk")       out.walk = std::move(clip);
         else if (clip.name == "punch") out.punch = std::move(clip);
+        else if (clip.name == "block") out.block = std::move(clip);  // example of a block layer that masks no bones
     }
 
     cgltf_free(data);

@@ -65,7 +65,9 @@ int main(int argc, char** argv) {
     dc::input::Input input;
     float anim_time = 0.0f;                       // walk-clip clock (advances while moving)
     float punch_time = 0.0f;                      // punch-clip clock (advances while punching)
+    float block_time = 0.0f;                      // block-clip clock (advances while blocking)
     bool  punching = false;
+    bool  blocking = false;
     std::vector<dc::renderer::Mat4> part_world;   // posed per-part transforms
     std::vector<dc::renderer::AnimLayer> layers;  // reused each frame
     bool running = true;
@@ -90,12 +92,18 @@ int main(int argc, char** argv) {
         bool moving = (forward != 0.0f || strafe != 0.0f);
         if (moving) anim_time += dt; else anim_time = 0.0f;
 
-        // Punch (F): one-shot — start on press, advance until the clip finishes.
-        if (input.key_down(SDL_SCANCODE_F) && !punching) { punching = true; punch_time = 0.0f; }
+        // Punch (left mouse): one-shot — start on press, advance until the clip finishes.
+        const float PUNCH_SPEED = 1.5f;   // play the punch 1.5x faster than authored
+        if (input.mouse_down(SDL_BUTTON_LEFT) && !punching) { punching = true; punch_time = 0.0f; }
         if (punching) {
-            punch_time += dt;
+            punch_time += dt * PUNCH_SPEED;
             if (!model_data.punch.valid() || punch_time >= model_data.punch.duration) punching = false;
         }
+
+        // Block (right mouse): held — advance the clip while down, hold the pose
+        // (sampling clamps at the last keyframe), reset when released.
+        blocking = input.mouse_down(SDL_BUTTON_RIGHT);
+        if (blocking) block_time += dt; else block_time = 0.0f;
 
         // Build the animation layers for this frame: walk drives the body, punch
         // is masked to the armL bone so you can punch while walking. (No layers
@@ -103,6 +111,7 @@ int main(int argc, char** argv) {
         layers.clear();
         if (moving)   layers.push_back({ &model_data.walk,  anim_time,  -1 });
         if (punching) layers.push_back({ &model_data.punch, punch_time, model_data.arm_l_node });
+        if (blocking) layers.push_back({ &model_data.block, block_time, model_data.arm_r_node });  // block masked to the right arm
         dc::renderer::pose_model(model_data, layers, player.pitch, part_world);
 
         // Avatar placement: stand at the player's XZ, facing the look direction.

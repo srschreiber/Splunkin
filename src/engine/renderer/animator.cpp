@@ -83,7 +83,7 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
     for (const auto& layer : layers) {
         if (!layer.clip || !layer.clip->valid()) continue;
         const float dur = layer.clip->duration;
-        float ct = std::fmod(layer.time, dur);
+        float ct = (dur > 0.0f) ? std::fmod(layer.time, dur) : 0.0f;  // single-frame clip -> hold
         if (ct < 0.0f) ct += dur;
         for (const auto& ch : layer.clip->channels) {
             if (ch.node < 0 || ch.node >= n) continue;

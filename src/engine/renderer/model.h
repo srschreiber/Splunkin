@@ -23,7 +23,8 @@ struct Animation {
     std::string              name;
     float                    duration = 0.0f;
     std::vector<AnimChannel> channels;
-    bool valid() const { return !channels.empty() && duration > 0.0f; }
+    // A single-keyframe clip (duration 0) is a valid static hold pose.
+    bool valid() const { return !channels.empty(); }
 };
 
 // --- Scene graph ------------------------------------------------------------
@@ -51,8 +52,10 @@ struct ModelData {
     std::vector<PartCPU> parts;
     Animation            walk;
     Animation            punch;
+    Animation           block;  // example of a block animation layer that masks no bones
     int head_node  = -1;   // for head-look, the "head" bone
     int arm_l_node = -1;   // the "armL" bone — punch is masked to it so you can walk + punch
+    int arm_r_node = -1;   // the "armR" bone — block is masked to it so you can block + punch + walk
 };
 
 bool read_model(const char* path, ModelData& out);
