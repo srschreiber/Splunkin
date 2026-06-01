@@ -70,6 +70,7 @@ void Renderer::draw_model(const Model& model, const std::vector<Mat4>& part_worl
         const vec3& pc = model.parts[i].color;
         float c[3] = { pc[0] * color[0], pc[1] * color[1], pc[2] * color[2] };
         glUniform3fv(model_color_loc, 1, c);
+        // use vao which also references the uploaded ebo/vbo and the format
         glBindVertexArray(model.parts[i].vao);
         glDrawElements(GL_TRIANGLES, model.parts[i].index_count, GL_UNSIGNED_INT, nullptr);
     }

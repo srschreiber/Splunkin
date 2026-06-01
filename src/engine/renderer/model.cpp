@@ -134,15 +134,19 @@ bool read_model(const char* path, ModelData& out) {
                     const cgltf_float* bcf = prim->material->pbr_metallic_roughness.base_color_factor;
                     part.color[0] = bcf[0]; part.color[1] = bcf[1]; part.color[2] = bcf[2];
                 }
+                // Interleave the glTF's separate POSITION/NORMAL/TEXCOORD_0 accessors
+                // into one flat array: 8 floats per vertex = pos(3), normal(3), uv(2).
+                // THIS ORDER defines the vertex byte layout — it must match the VAO
+                // attribute offsets in model_gl.cpp and the model.vert input locations.
                 const cgltf_size vcount = pos->count;
                 part.vertices.reserve(vcount * 8);
                 for (cgltf_size v = 0; v < vcount; ++v) {
-                    float pf[3] = {0, 0, 0}, nf[3] = {0, 1, 0}, tf[2] = {0, 0};
-                    cgltf_accessor_read_float(pos, v, pf, 3);
-                    if (nrm) cgltf_accessor_read_float(nrm, v, nf, 3);
-                    if (uv)  cgltf_accessor_read_float(uv, v, tf, 2);
+                    float pf[3] = {0, 0, 0}, nf[3] = {0, 1, 0}, tf[2] = {0, 0};  // defaults if missing
+                    cgltf_accessor_read_float(pos, v, pf, 3);                     // position
+                    if (nrm) cgltf_accessor_read_float(nrm, v, nf, 3);           // normal
+                    if (uv)  cgltf_accessor_read_float(uv, v, tf, 2);            // uv
                     part.vertices.insert(part.vertices.end(),
-                        { pf[0],pf[1],pf[2], nf[0],nf[1],nf[2], tf[0],tf[1] });
+                        { pf[0],pf[1],pf[2],  nf[0],nf[1],nf[2],  tf[0],tf[1] }); // pos | normal | uv
                 }
                 if (prim->indices) {
                     const cgltf_size icount = prim->indices->count;
