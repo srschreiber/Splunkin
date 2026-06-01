@@ -183,7 +183,8 @@ int main(int argc, char** argv) {
         renderer.draw_model(player_model, part_world, placement, player_color);
 
         // Draw each chest, lid posed by its open_t (open clip only animates the lid).
-        vec3 chest_color = { 0.55f, 0.38f, 0.18f };
+        // White tint -> the per-part material colors from the .glb show through unchanged.
+        vec3 chest_color = { 1.0f, 1.0f, 1.0f };
         for (const auto& ch : chests) {
             std::vector<dc::renderer::AnimLayer> cl = {{ &chest_data.open, ch.open_t, -1, false }};  // one-shot: hold open
             dc::renderer::pose_model(chest_data, cl, 0.0f, chest_part_world);

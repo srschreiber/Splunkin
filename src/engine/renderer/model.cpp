@@ -130,6 +130,10 @@ bool read_model(const char* path, ModelData& out) {
             }
             if (pos) {
                 PartCPU part;
+                if (prim->material && prim->material->has_pbr_metallic_roughness) {
+                    const cgltf_float* bcf = prim->material->pbr_metallic_roughness.base_color_factor;
+                    part.color[0] = bcf[0]; part.color[1] = bcf[1]; part.color[2] = bcf[2];
+                }
                 const cgltf_size vcount = pos->count;
                 part.vertices.reserve(vcount * 8);
                 for (cgltf_size v = 0; v < vcount; ++v) {

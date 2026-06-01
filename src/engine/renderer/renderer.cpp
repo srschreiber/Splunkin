@@ -59,7 +59,6 @@ void Renderer::draw_model(const Model& model, const std::vector<Mat4>& part_worl
                           mat4 placement, vec3 color) {
     glUseProgram(model_program);
     glUniformMatrix4fv(model_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
-    glUniform3fv(model_color_loc, 1, color);
     const size_t count = model.parts.size() < part_world.size()
                        ? model.parts.size() : part_world.size();
     for (size_t i = 0; i < count; ++i) {
@@ -67,6 +66,10 @@ void Renderer::draw_model(const Model& model, const std::vector<Mat4>& part_worl
         memcpy(nw, part_world[i].m, sizeof(float) * 16);
         glm_mat4_mul(placement, nw, m);
         glUniformMatrix4fv(model_model_loc, 1, GL_FALSE, reinterpret_cast<const float*>(m));
+        // per-part material color, modulated by the caller's tint
+        const vec3& pc = model.parts[i].color;
+        float c[3] = { pc[0] * color[0], pc[1] * color[1], pc[2] * color[2] };
+        glUniform3fv(model_color_loc, 1, c);
         glBindVertexArray(model.parts[i].vao);
         glDrawElements(GL_TRIANGLES, model.parts[i].index_count, GL_UNSIGNED_INT, nullptr);
     }
