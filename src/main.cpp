@@ -192,7 +192,7 @@ int main(int argc, char** argv) {
             glm_mat4_identity(cplace);
             vec3 cpos = { (ch.col + 0.5f) * dc::world::TILE, 0.0f, (ch.row + 0.5f) * dc::world::TILE };
             glm_translate(cplace, cpos);            // move to the tile (origin at the chest's base)
-            vec3 cscale = { 0.5f, 0.5f, 0.5f };
+            vec3 cscale = { 0.75f, 0.75f, 0.75f };
             glm_scale(cplace, cscale);              // half size, scaled around its base -> stays on floor
             renderer.draw_model(chest_model, chest_part_world, cplace, chest_color);
         }
