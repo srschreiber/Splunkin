@@ -65,7 +65,7 @@ struct Q  { versor q; };
 } // namespace
 
 void pose_model(const ModelData& model, float t, bool animate,
-                std::vector<Mat4>& out_part_world) {
+                std::vector<Mat4>& out_part_world, float head_pitch) {
     const int n = static_cast<int>(model.nodes.size());
 
     // Working TRS per node = base, then animation overrides.
@@ -87,6 +87,20 @@ void pose_model(const ModelData& model, float t, bool animate,
             else if (ch.path == AnimPath::Scale)    sample_vec3(ch, ct, ns[ch.node].v);
             else                                    sample_vec3(ch, ct, nt[ch.node].v);
         }
+    }
+
+    // head rotation
+    if (model.head_node >= 0 && model.head_node < n) {
+        float hp = head_pitch;
+        const float limit = glm_rad(65.0f);
+        if (hp < -limit) hp = -limit;
+        if (hp > limit) hp = limit;
+
+        vec3 axis = {1.0f, 0.0f, 0.0f};
+        versor pitch_q, result;
+        glm_quatv(pitch_q, -hp, axis);
+        glm_quat_mul(pitch_q, nr[model.head_node].q, result);
+        glm_quat_copy(result, nr[model.head_node].q);
     }
 
     std::vector<Mat4> local(n), world(n);

@@ -13,6 +13,6 @@ struct Mat4 { mat4 m; };
 // `out_part_world` is sized to model.parts.size(); out_part_world[i] is the
 // transform for the part whose node has mesh_part == i.
 void pose_model(const ModelData& model, float t, bool animate,
-                std::vector<Mat4>& out_part_world);
+                std::vector<Mat4>& out_part_world, float head_pitch = 0.0f);
 
 } // namespace dc::renderer

@@ -59,6 +59,11 @@ bool read_model(const char* path, ModelData& out) {
 
     for (cgltf_size i = 0; i < node_count; ++i) {
         const cgltf_node* node = &data->nodes[i];
+
+        // capture head node index
+        if (std::strcmp(node->name, "head") == 0 && !node->mesh) {
+            out.head_node = static_cast<int>(i);
+        }
         Node& dst = out.nodes[i];
         read_node_trs(node, dst);
         dst.parent = node->parent ? static_cast<int>(node->parent - data->nodes) : -1;
@@ -143,6 +148,7 @@ bool read_model(const char* path, ModelData& out) {
     }
 
     cgltf_free(data);
+    std::printf("head_node = %d\n", out.head_node);
     return !out.parts.empty();
 }
 

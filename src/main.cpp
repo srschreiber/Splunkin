@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
         // Walk animation: advance the clip while moving; rest pose when idle.
         bool moving = (forward != 0.0f || strafe != 0.0f);
         if (moving) anim_time += dt; else anim_time = 0.0f;
-        dc::renderer::pose_model(model_data, anim_time, moving, part_world);
+        dc::renderer::pose_model(model_data, anim_time, moving, part_world, player.pitch);
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so

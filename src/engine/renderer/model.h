@@ -29,6 +29,7 @@ struct Animation {
 // --- Scene graph ------------------------------------------------------------
 
 // One node. (t,r,s) is the node's base/local transform; animation overrides it.
+// Basically a blender bone
 struct Node {
     vec3   t = {0.0f, 0.0f, 0.0f};
     versor r = {0.0f, 0.0f, 0.0f, 1.0f};   // identity quaternion (x,y,z,w)
@@ -49,6 +50,7 @@ struct ModelData {
     std::vector<Node>    nodes;
     std::vector<PartCPU> parts;
     Animation            walk;
+    int head_node = -1;   // for camera tracking, usually the "head" bone
 };
 
 bool read_model(const char* path, ModelData& out);
