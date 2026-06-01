@@ -20,9 +20,9 @@ int main() {
         assert(part.vertices.size() % 8 == 0);
     }
 
-    // Rest-pose world transforms (animate=false), one per part.
+    // Rest-pose world transforms (no layers), one per part.
     std::vector<Mat4> rest;
-    pose_model(md, 0.0f, false, rest);
+    pose_model(md, {}, 0.0f, rest);
     assert(rest.size() == md.parts.size());
 
     // Whole-model bounding box at rest, transforming each part's verts by its

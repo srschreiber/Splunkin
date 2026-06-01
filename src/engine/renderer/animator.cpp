@@ -64,11 +64,11 @@ struct Q  { versor q; };
 
 } // namespace
 
-void pose_model(const ModelData& model, float t, bool animate,
-                std::vector<Mat4>& out_part_world, float head_pitch) {
+void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
+                float head_pitch, std::vector<Mat4>& out_part_world) {
     const int n = static_cast<int>(model.nodes.size());
 
-    // Working TRS per node = base, then animation overrides.
+    // Working TRS per node = base (rest), then each layer overrides.
     std::vector<V3> nt(n), ns(n);
     std::vector<Q>  nr(n);
     for (int i = 0; i < n; ++i) {
@@ -77,15 +77,20 @@ void pose_model(const ModelData& model, float t, bool animate,
         glm_quat_copy(const_cast<float*>(model.nodes[i].r), nr[i].q);
     }
 
-    if (animate && model.walk.valid()) {
-        const float dur = model.walk.duration;
-        float ct = std::fmod(t, dur);
+    // Apply each layer in order; later layers win per bone. A layer with
+    // only_node >= 0 writes just that one bone, so a masked punch leaves the
+    // rest of the body on the layers below it (e.g. the walk).
+    for (const auto& layer : layers) {
+        if (!layer.clip || !layer.clip->valid()) continue;
+        const float dur = layer.clip->duration;
+        float ct = std::fmod(layer.time, dur);
         if (ct < 0.0f) ct += dur;
-        for (const auto& ch : model.walk.channels) {
+        for (const auto& ch : layer.clip->channels) {
             if (ch.node < 0 || ch.node >= n) continue;
-            if (ch.path == AnimPath::Rotation)      sample_quat(ch, ct, nr[ch.node].q);
-            else if (ch.path == AnimPath::Scale)    sample_vec3(ch, ct, ns[ch.node].v);
-            else                                    sample_vec3(ch, ct, nt[ch.node].v);
+            if (layer.only_node >= 0 && ch.node != layer.only_node) continue;
+            if (ch.path == AnimPath::Rotation)   sample_quat(ch, ct, nr[ch.node].q);
+            else if (ch.path == AnimPath::Scale) sample_vec3(ch, ct, ns[ch.node].v);
+            else                                 sample_vec3(ch, ct, nt[ch.node].v);
         }
     }
 
@@ -98,7 +103,7 @@ void pose_model(const ModelData& model, float t, bool animate,
 
         vec3 axis = {1.0f, 0.0f, 0.0f};
         versor pitch_q, result;
-        glm_quatv(pitch_q, -hp, axis);
+        glm_quatv(pitch_q, hp, axis);
         glm_quat_mul(pitch_q, nr[model.head_node].q, result);
         glm_quat_copy(result, nr[model.head_node].q);
     }

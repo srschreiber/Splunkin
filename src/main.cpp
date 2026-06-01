@@ -64,7 +64,10 @@ int main(int argc, char** argv) {
 
     dc::input::Input input;
     float anim_time = 0.0f;                       // walk-clip clock (advances while moving)
+    float punch_time = 0.0f;                      // punch-clip clock (advances while punching)
+    bool  punching = false;
     std::vector<dc::renderer::Mat4> part_world;   // posed per-part transforms
+    std::vector<dc::renderer::AnimLayer> layers;  // reused each frame
     bool running = true;
     uint64_t prev = SDL_GetTicksNS();
     while (running) {
@@ -83,17 +86,31 @@ int main(int argc, char** argv) {
         bool jump = input.key_down(SDL_SCANCODE_SPACE);
         player.update(forward, strafe, jump, dt, *map);
 
-        // Walk animation: advance the clip while moving; rest pose when idle.
+        // Walk clock: advance while moving, reset when idle.
         bool moving = (forward != 0.0f || strafe != 0.0f);
         if (moving) anim_time += dt; else anim_time = 0.0f;
-        dc::renderer::pose_model(model_data, anim_time, moving, part_world, player.pitch);
+
+        // Punch (F): one-shot — start on press, advance until the clip finishes.
+        if (input.key_down(SDL_SCANCODE_F) && !punching) { punching = true; punch_time = 0.0f; }
+        if (punching) {
+            punch_time += dt;
+            if (!model_data.punch.valid() || punch_time >= model_data.punch.duration) punching = false;
+        }
+
+        // Build the animation layers for this frame: walk drives the body, punch
+        // is masked to the armL bone so you can punch while walking. (No layers
+        // when idle -> rest pose.)
+        layers.clear();
+        if (moving)   layers.push_back({ &model_data.walk,  anim_time,  -1 });
+        if (punching) layers.push_back({ &model_data.punch, punch_time, model_data.arm_l_node });
+        dc::renderer::pose_model(model_data, layers, player.pitch, part_world);
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
         // the feet rest on the floor; follow the player's vertical position so the
         // avatar rises with the camera on a jump.
         const float MODEL_FOOT_LIFT = 1.0f;
-        const float MODEL_YAW_OFFSET = glm_rad(90.0f);  // tune to face forward (try -90 / 0 / 180)
+        const float MODEL_YAW_OFFSET = glm_rad(-90.0f);  // tune to face forward (try -90 / 0 / 180)
         float feet_y = (player.position[1] - dc::world::EYE_HEIGHT) + MODEL_FOOT_LIFT;
         mat4 placement;
         glm_mat4_identity(placement);

@@ -50,7 +50,9 @@ struct ModelData {
     std::vector<Node>    nodes;
     std::vector<PartCPU> parts;
     Animation            walk;
-    int head_node = -1;   // for camera tracking, usually the "head" bone
+    Animation            punch;
+    int head_node  = -1;   // for head-look, the "head" bone
+    int arm_l_node = -1;   // the "armL" bone — punch is masked to it so you can walk + punch
 };
 
 bool read_model(const char* path, ModelData& out);

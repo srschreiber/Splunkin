@@ -39,12 +39,62 @@ AnimPath to_path(cgltf_animation_path_type p) {
     }
 }
 
+// Reads one glTF animation into our Animation (node TRS keyframes).
+Animation read_animation(const cgltf_data* data, const cgltf_animation* anim) {
+    Animation out;
+    out.name = anim->name ? anim->name : "";
+    float duration = 0.0f;
+    for (cgltf_size c = 0; c < anim->channels_count; ++c) {
+        const cgltf_animation_channel* ch = &anim->channels[c];
+        if (!ch->target_node || !ch->sampler) continue;
+
+        AnimChannel oc;
+        oc.node = static_cast<int>(ch->target_node - data->nodes);
+        oc.path = to_path(ch->target_path);
+        // Cubic-spline output stores [inTangent, value, outTangent] per key; we
+        // keep only the value and sample it linearly (tangents dropped).
+        const bool cubic = (ch->sampler->interpolation == cgltf_interpolation_type_cubic_spline);
+        oc.interp = (ch->sampler->interpolation == cgltf_interpolation_type_step)
+                  ? AnimInterp::Step : AnimInterp::Linear;
+
+        const cgltf_accessor* in = ch->sampler->input;
+        const cgltf_accessor* ov = ch->sampler->output;
+        const int comps = (oc.path == AnimPath::Rotation) ? 4 : 3;
+
+        const cgltf_size nkeys = in->count;   // one input time per keyframe
+        oc.times.resize(nkeys);
+        for (cgltf_size k = 0; k < nkeys; ++k) {
+            cgltf_accessor_read_float(in, k, &oc.times[k], 1);
+            if (oc.times[k] > duration) duration = oc.times[k];
+        }
+        oc.values.resize(nkeys * comps);
+        for (cgltf_size k = 0; k < nkeys; ++k) {
+            const cgltf_size elem = cubic ? (3 * k + 1) : k;   // middle = value
+            cgltf_accessor_read_float(ov, elem, &oc.values[k * comps], comps);
+        }
+        out.channels.push_back(std::move(oc));
+    }
+    out.duration = duration;
+    return out;
+}
+
+// The bone node named `name` (a bone has no mesh of its own), or -1.
+int find_bone(const cgltf_data* data, const char* name) {
+    for (cgltf_size i = 0; i < data->nodes_count; ++i) {
+        const cgltf_node* node = &data->nodes[i];
+        if (node->name && std::strcmp(node->name, name) == 0 && !node->mesh)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
 } // namespace
 
 bool read_model(const char* path, ModelData& out) {
     out.nodes.clear();
     out.parts.clear();
     out.walk = Animation{};
+    out.punch = Animation{};
 
     cgltf_options options{};
     cgltf_data* data = nullptr;
@@ -59,11 +109,6 @@ bool read_model(const char* path, ModelData& out) {
 
     for (cgltf_size i = 0; i < node_count; ++i) {
         const cgltf_node* node = &data->nodes[i];
-
-        // capture head node index
-        if (std::strcmp(node->name, "head") == 0 && !node->mesh) {
-            out.head_node = static_cast<int>(i);
-        }
         Node& dst = out.nodes[i];
         read_node_trs(node, dst);
         dst.parent = node->parent ? static_cast<int>(node->parent - data->nodes) : -1;
@@ -108,47 +153,19 @@ bool read_model(const char* path, ModelData& out) {
         }
     }
 
-    // First animation -> the "walk" clip.
-    if (data->animations_count > 0) {
-        const cgltf_animation* anim = &data->animations[0];
-        out.walk.name = anim->name ? anim->name : "";
-        float duration = 0.0f;
-        for (cgltf_size c = 0; c < anim->channels_count; ++c) {
-            const cgltf_animation_channel* ch = &anim->channels[c];
-            if (!ch->target_node || !ch->sampler) continue;
+    // Named bones we drive specially.
+    out.head_node  = find_bone(data, "head");   // head-look
+    out.arm_l_node = find_bone(data, "armL");    // punch layer is masked to this bone
 
-            AnimChannel oc;
-            oc.node = static_cast<int>(ch->target_node - data->nodes);
-            oc.path = to_path(ch->target_path);
-            // Cubic-spline output stores [inTangent, value, outTangent] per key; we
-            // keep only the value and sample it linearly (tangents dropped).
-            const bool cubic = (ch->sampler->interpolation == cgltf_interpolation_type_cubic_spline);
-            oc.interp = (ch->sampler->interpolation == cgltf_interpolation_type_step)
-                      ? AnimInterp::Step : AnimInterp::Linear;
-
-            const cgltf_accessor* in = ch->sampler->input;
-            const cgltf_accessor* ov = ch->sampler->output;
-            const int comps = (oc.path == AnimPath::Rotation) ? 4 : 3;
-
-            const cgltf_size nkeys = in->count;   // one input time per keyframe
-            oc.times.resize(nkeys);
-            for (cgltf_size k = 0; k < nkeys; ++k) {
-                cgltf_accessor_read_float(in, k, &oc.times[k], 1);
-                if (oc.times[k] > duration) duration = oc.times[k];
-            }
-            oc.values.resize(nkeys * comps);
-            for (cgltf_size k = 0; k < nkeys; ++k) {
-                const cgltf_size elem = cubic ? (3 * k + 1) : k;   // middle = value
-                cgltf_accessor_read_float(ov, elem, &oc.values[k * comps], comps);
-            }
-
-            out.walk.channels.push_back(std::move(oc));
-        }
-        out.walk.duration = duration;
+    // Read every animation; route the ones we know by name.
+    for (cgltf_size i = 0; i < data->animations_count; ++i) {
+        const cgltf_animation* anim = &data->animations[i];
+        Animation clip = read_animation(data, anim);
+        if (clip.name == "walk")       out.walk = std::move(clip);
+        else if (clip.name == "punch") out.punch = std::move(clip);
     }
 
     cgltf_free(data);
-    std::printf("head_node = %d\n", out.head_node);
     return !out.parts.empty();
 }
 

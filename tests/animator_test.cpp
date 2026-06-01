@@ -17,23 +17,30 @@ int main() {
 
     std::vector<Mat4> rest, mid, loop0, loopd;
 
-    // Rest pose: one matrix per part, all finite.
-    pose_model(md, 0.0f, false, rest);
+    // No layers -> rest pose. One matrix per part, all finite.
+    pose_model(md, {}, 0.0f, rest);
     assert(rest.size() == md.parts.size());
     for (const auto& M : rest)
         for (int e = 0; e < 16; ++e) assert(std::isfinite(elem(M, e)));
 
-    // Animation has a visible effect: mid-clip differs from rest for some part.
-    pose_model(md, md.walk.duration * 0.5f, true, mid);
+    // A walk layer mid-clip differs from rest for some part (animation has effect).
+    {
+        std::vector<AnimLayer> layers = {{ &md.walk, md.walk.duration * 0.5f, -1 }};
+        pose_model(md, layers, 0.0f, mid);
+    }
     bool differs = false;
     for (std::size_t i = 0; i < rest.size() && !differs; ++i)
         for (int e = 0; e < 16; ++e)
             if (std::fabs(elem(rest[i], e) - elem(mid[i], e)) > 1e-4f) { differs = true; break; }
     assert(differs);
 
-    // The clip loops: pose(t) == pose(t + duration).
-    pose_model(md, 0.1f, true, loop0);
-    pose_model(md, 0.1f + md.walk.duration, true, loopd);
+    // The walk clip loops: pose(t) == pose(t + duration).
+    {
+        std::vector<AnimLayer> a = {{ &md.walk, 0.1f, -1 }};
+        std::vector<AnimLayer> b = {{ &md.walk, 0.1f + md.walk.duration, -1 }};
+        pose_model(md, a, 0.0f, loop0);
+        pose_model(md, b, 0.0f, loopd);
+    }
     assert(loop0.size() == loopd.size());
     for (std::size_t i = 0; i < loop0.size(); ++i)
         for (int e = 0; e < 16; ++e)
