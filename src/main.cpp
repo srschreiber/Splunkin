@@ -24,6 +24,13 @@ static std::string read_file(const char* path) {
     std::stringstream ss; ss << f.rdbuf(); return ss.str();
 }
 
+// A placed chest. One-way: once opened, the lid stays open.
+struct Chest {
+    int   col = 0, row = 0;
+    float open_t = 0.0f;    // time into the open clip (0 = closed)
+    bool  opened = false;
+};
+
 int main(int argc, char** argv) {
     bool smoke = false;
     const char* map_path = "assets/maps/test.txt";
@@ -43,6 +50,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    dc::renderer::ModelData chest_data;
+    if (!dc::renderer::read_model("assets/models/chest.glb", chest_data)) {
+        std::fprintf(stderr, "could not load model: assets/models/chest.glb\n");
+        return 1;
+    }
+
     dc::platform::Window window;
     if (!window.init("dungeoncrawl")) return 1;
 
@@ -54,6 +67,13 @@ int main(int argc, char** argv) {
 
     dc::renderer::Model player_model;
     player_model.upload(model_data);
+
+    dc::renderer::Model chest_model;
+    chest_model.upload(chest_data);
+
+    // Spawn a chest entity per 'C' tile in the map.
+    std::vector<Chest> chests;
+    for (const auto& cs : map->chests) chests.push_back({ cs.col, cs.row });
 
     dc::renderer::Camera camera;
 
@@ -68,8 +88,10 @@ int main(int argc, char** argv) {
     float block_time = 0.0f;                      // block-clip clock (advances while blocking)
     bool  punching = false;
     bool  blocking = false;
-    std::vector<dc::renderer::Mat4> part_world;   // posed per-part transforms
-    std::vector<dc::renderer::AnimLayer> layers;  // reused each frame
+    std::vector<dc::renderer::Mat4> part_world;        // posed per-part transforms (player)
+    std::vector<dc::renderer::Mat4> chest_part_world;  // posed per-part transforms (a chest)
+    std::vector<dc::renderer::AnimLayer> layers;       // reused each frame
+    bool e_prev = false;                               // for edge-triggered interact
     bool running = true;
     uint64_t prev = SDL_GetTicksNS();
     while (running) {
@@ -105,6 +127,33 @@ int main(int argc, char** argv) {
         blocking = input.mouse_down(SDL_BUTTON_RIGHT);
         if (blocking) block_time += dt; else block_time = 0.0f;
 
+        // Interact (E, edge-triggered): open the nearest closed chest within reach.
+        bool e_now = input.key_down(SDL_SCANCODE_E);
+        if (e_now && !e_prev) {
+            const float reach = 3.0f;            // world units
+            int best = -1;
+            float best_d2 = reach * reach;
+            for (std::size_t i = 0; i < chests.size(); ++i) {
+                if (chests[i].opened) continue;
+                float cx = (chests[i].col + 0.5f) * dc::world::TILE;
+                float cz = (chests[i].row + 0.5f) * dc::world::TILE;
+                float dx = cx - player.position[0], dz = cz - player.position[2];
+                float d2 = dx * dx + dz * dz;
+                if (d2 < best_d2) { best_d2 = d2; best = static_cast<int>(i); }
+            }
+            if (best >= 0) chests[best].opened = true;   // one-way open
+        }
+        e_prev = e_now;
+
+        // Advance each opened chest's lid toward fully open (then hold).
+        const float chest_dur = chest_data.open.valid() ? chest_data.open.duration : 0.0f;
+        for (auto& ch : chests) {
+            if (ch.opened && ch.open_t < chest_dur) {
+                ch.open_t += dt;
+                if (ch.open_t > chest_dur) ch.open_t = chest_dur;
+            }
+        }
+
         // Build the animation layers for this frame: walk drives the body, punch
         // is masked to the armL bone so you can punch while walking. (No layers
         // when idle -> rest pose.)
@@ -132,11 +181,26 @@ int main(int argc, char** argv) {
         renderer.draw_map(mesh);
         vec3 player_color = { 0.80f, 0.45f, 0.35f };
         renderer.draw_model(player_model, part_world, placement, player_color);
+
+        // Draw each chest, lid posed by its open_t (open clip only animates the lid).
+        vec3 chest_color = { 0.55f, 0.38f, 0.18f };
+        for (const auto& ch : chests) {
+            std::vector<dc::renderer::AnimLayer> cl = {{ &chest_data.open, ch.open_t, -1, false }};  // one-shot: hold open
+            dc::renderer::pose_model(chest_data, cl, 0.0f, chest_part_world);
+            mat4 cplace;
+            glm_mat4_identity(cplace);
+            vec3 cpos = { (ch.col + 0.5f) * dc::world::TILE, 0.0f, (ch.row + 0.5f) * dc::world::TILE };
+            glm_translate(cplace, cpos);            // move to the tile (origin at the chest's base)
+            vec3 cscale = { 0.5f, 0.5f, 0.5f };
+            glm_scale(cplace, cscale);              // half size, scaled around its base -> stays on floor
+            renderer.draw_model(chest_model, chest_part_world, cplace, chest_color);
+        }
         window.swap();
 
         if (smoke) { std::printf("smoke: one frame rendered, exiting\n"); break; }
     }
 
+    chest_model.destroy();
     player_model.destroy();
     mesh.destroy();
     renderer.shutdown();

@@ -49,6 +49,8 @@ std::optional<Map> parse_map(const std::string& text) {
                 m.spawn_col = col;
                 m.spawn_row = row;
                 spawn_set = true;
+            } else if (c == 'C') {
+                m.chests.push_back({col, row});
             }
         }
     }

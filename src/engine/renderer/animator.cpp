@@ -83,8 +83,13 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
     for (const auto& layer : layers) {
         if (!layer.clip || !layer.clip->valid()) continue;
         const float dur = layer.clip->duration;
-        float ct = (dur > 0.0f) ? std::fmod(layer.time, dur) : 0.0f;  // single-frame clip -> hold
-        if (ct < 0.0f) ct += dur;
+        float ct;
+        if (layer.loop) {
+            ct = (dur > 0.0f) ? std::fmod(layer.time, dur) : 0.0f;  // wrap (single-frame -> hold)
+            if (ct < 0.0f) ct += dur;
+        } else {
+            ct = layer.time;   // one-shot: the sampler clamps to the first/last keyframe
+        }
         for (const auto& ch : layer.clip->channels) {
             if (ch.node < 0 || ch.node >= n) continue;
             if (layer.only_node >= 0 && ch.node != layer.only_node) continue;

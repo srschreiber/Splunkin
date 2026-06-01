@@ -13,8 +13,9 @@ struct Mat4 { mat4 m; };
 // bone (e.g. punch -> just the arm), so other bones keep the layers below it.
 struct AnimLayer {
     const Animation* clip = nullptr;
-    float            time = 0.0f;     // seconds into the clip (looped over its duration)
+    float            time = 0.0f;     // seconds into the clip
     int              only_node = -1;  // -1 = all bones the clip animates; else just this bone
+    bool             loop = true;     // true: wrap time over duration; false: hold first/last frame
 };
 
 // Computes the world transform of each mesh part by:

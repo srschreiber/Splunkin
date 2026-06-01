@@ -96,6 +96,8 @@ bool read_model(const char* path, ModelData& out) {
     out.walk = Animation{};
     out.punch = Animation{};
     out.block = Animation{};
+    out.open = Animation{};
+    out.close = Animation{};
 
     cgltf_options options{};
     cgltf_data* data = nullptr;
@@ -166,6 +168,8 @@ bool read_model(const char* path, ModelData& out) {
         if (clip.name == "walk")       out.walk = std::move(clip);
         else if (clip.name == "punch") out.punch = std::move(clip);
         else if (clip.name == "block") out.block = std::move(clip);  // example of a block layer that masks no bones
+        else if (clip.name == "open")  out.open = std::move(clip);
+        else if (clip.name == "close") out.close = std::move(clip);
     }
 
     cgltf_free(data);
