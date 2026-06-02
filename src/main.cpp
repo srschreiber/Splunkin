@@ -62,6 +62,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    dc::renderer::ModelData shield_data;
+    if (!dc::renderer::read_model("assets/models/shield.glb", shield_data)) {
+        std::fprintf(stderr, "could not load model: assets/models/shield.glb\n");
+        return 1;
+    }
+
     dc::platform::Window window;
     if (!window.init("dungeoncrawl")) return 1;
 
@@ -80,21 +86,14 @@ int main(int argc, char** argv) {
     dc::renderer::Model helmet_model;
     helmet_model.upload(helmet_data);
 
-    // The helmet is attached to the player's head bone. Precompute the helmet
-    // mesh's transform *relative to its head bone* (its node's local TRS) — a
-    // constant offset. Each frame we draw it at: player_placement * headWorld * offset.
-    std::vector<dc::renderer::Mat4> helmet_offset(1);
-    glm_mat4_identity(helmet_offset[0].m);
-    for (const auto& nd : helmet_data.nodes) {
-        if (nd.mesh_part < 0) continue;                 // the helmet's one mesh node
-        mat4 T, R, S, tmp;
-        glm_translate_make(T, const_cast<float*>(nd.t));
-        versor rq; glm_quat_copy(const_cast<float*>(nd.r), rq); glm_quat_mat4(rq, R);
-        glm_scale_make(S, const_cast<float*>(nd.s));
-        glm_mat4_mul(T, R, tmp);
-        glm_mat4_mul(tmp, S, helmet_offset[0].m);
-        break;
-    }
+    dc::renderer::Model shield_model;
+    shield_model.upload(shield_data);
+
+    // Equipment is attached to a player bone (helmet -> head, shield -> hand).
+    // Each item's mesh-node-local TRS is its constant offset relative to that
+    // bone; each frame we draw it at: player_placement * boneWorld * offset.
+    auto helmet_offset = dc::renderer::mesh_offsets(helmet_data);
+    auto shield_offset = dc::renderer::mesh_offsets(shield_data);
 
     // Spawn a chest entity per 'C' tile in the map.
     std::vector<Chest> chests;
@@ -185,12 +184,13 @@ int main(int argc, char** argv) {
         layers.clear();
         if (moving)   layers.push_back({ &model_data.walk,  anim_time,  -1 });
         if (punching) layers.push_back({ &model_data.punch, punch_time, model_data.arm_l_node });
-        if (blocking) layers.push_back({ &model_data.block, block_time, model_data.arm_r_node });  // block masked to the right arm
+        if (blocking) layers.push_back({ &model_data.block, block_time, model_data.arm_r_node, false });  // right arm, one-shot: play to end and hold (no loop)
         // Pose the player, and also grab the head bone's world matrix as a socket
         // for the helmet.
         dc::renderer::Mat4 head_world;
+        dc::renderer::Mat4 r_hand_world;
         dc::renderer::pose_model(model_data, layers, player.pitch, part_world,
-                                 model_data.head_node, &head_world);
+                                 { model_data.head_node, model_data.hand_r_node }, { &head_world, &r_hand_world });
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
@@ -218,6 +218,11 @@ int main(int argc, char** argv) {
         vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
         renderer.draw_model(helmet_model, helmet_offset, helmet_place, helmet_color);
 
+        // Shield: attached to right hand bone
+        mat4 shield_place;
+        glm_mat4_mul(placement, r_hand_world.m, shield_place);
+        vec3 shield_color = { 0.5f, 0.5f, 0.8f };
+        renderer.draw_model(shield_model, shield_offset, shield_place, shield_color);
         // Draw each chest, lid posed by its open_t (open clip only animates the lid).
         // White tint -> the per-part material colors from the .glb show through unchanged.
         vec3 chest_color = { 1.0f, 1.0f, 1.0f };
@@ -239,6 +244,7 @@ int main(int argc, char** argv) {
 
     chest_model.destroy();
     helmet_model.destroy();
+    shield_model.destroy();
     player_model.destroy();
     mesh.destroy();
     renderer.shutdown();

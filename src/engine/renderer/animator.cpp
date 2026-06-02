@@ -49,6 +49,17 @@ void sample_quat(const AnimChannel& ch, float t, versor out) {
     glm_quat_slerp(qa, qb, f, out);
 }
 
+// True if `node` is `root` or any descendant of it (walk up the parent chain).
+// Lets a layer mask to a whole limb by naming its root bone (armR -> the whole
+// right arm: upperArmR, lowerArmR, handR, ...).
+bool node_in_subtree(const ModelData& model, int node, int root) {
+    while (node != -1) {
+        if (node == root) return true;
+        node = model.nodes[node].parent;
+    }
+    return false;
+}
+
 void local_matrix(const vec3 t, const versor r, const vec3 s, mat4 out) {
     mat4 T, R, S, tmp;
     glm_translate_make(T, const_cast<float*>(t));
@@ -66,7 +77,7 @@ struct Q  { versor q; };
 
 void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
                 float head_pitch, std::vector<Mat4>& out_part_world,
-                int attach_node, Mat4* out_attach) {
+                std::vector<int> attach_nodes, std::vector<Mat4*> out_attach) {
     const int n = static_cast<int>(model.nodes.size());
 
     // Working TRS per node = base (rest), then each layer overrides.
@@ -93,7 +104,9 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
         }
         for (const auto& ch : layer.clip->channels) {
             if (ch.node < 0 || ch.node >= n) continue;
-            if (layer.only_node >= 0 && ch.node != layer.only_node) continue;
+            // Masked layer: apply only to the named bone and its descendants
+            // (e.g. armR -> the whole right arm, so the elbow/wrist bend too).
+            if (layer.only_node >= 0 && !node_in_subtree(model, ch.node, layer.only_node)) continue;
             if (ch.path == AnimPath::Rotation)   sample_quat(ch, ct, nr[ch.node].q);
             else if (ch.path == AnimPath::Scale) sample_vec3(ch, ct, ns[ch.node].v);
             else                                 sample_vec3(ch, ct, nt[ch.node].v);
@@ -136,8 +149,13 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
 
     // Optional attachment socket: a chosen bone's world matrix (e.g. the head),
     // so a separate model (helmet) can be hung off it.
-    if (out_attach && attach_node >= 0 && attach_node < n)
-        glm_mat4_copy(world[attach_node].m, out_attach->m);
+    if (out_attach.size() > 0) {
+        for (size_t i = 0; i < attach_nodes.size(); ++i) {
+            int attach_node = attach_nodes[i];
+            if (attach_node >= 0 && attach_node < n)
+                glm_mat4_copy(world[attach_node].m, out_attach[i]->m);
+        }
+    }
 
     out_part_world.assign(model.parts.size(), Mat4{});
     for (auto& pw : out_part_world) glm_mat4_identity(pw.m);
@@ -146,6 +164,18 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
         if (mp >= 0 && mp < static_cast<int>(out_part_world.size()))
             glm_mat4_copy(world[i].m, out_part_world[mp].m);
     }
+}
+
+std::vector<Mat4> mesh_offsets(const ModelData& model) {
+    std::vector<Mat4> out(model.parts.size());
+    for (auto& m : out) glm_mat4_identity(m.m);
+    // Each mesh node's local TRS is its placement relative to its parent bone —
+    // the constant offset we want for hanging this part off that bone.
+    for (const auto& nd : model.nodes) {
+        if (nd.mesh_part < 0 || nd.mesh_part >= static_cast<int>(out.size())) continue;
+        local_matrix(nd.t, nd.r, nd.s, out[nd.mesh_part].m);
+    }
+    return out;
 }
 
 } // namespace dc::renderer
