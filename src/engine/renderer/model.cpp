@@ -116,20 +116,24 @@ bool read_model(const char* path, ModelData& out) {
         read_node_trs(node, dst);
         dst.parent = node->parent ? static_cast<int>(node->parent - data->nodes) : -1;
 
-        // One primitive per mesh is assumed (true for our asset).
-        if (node->mesh && node->mesh->primitives_count > 0) {
-            const cgltf_primitive* prim = &node->mesh->primitives[0];
-            const cgltf_accessor* pos = nullptr;
-            const cgltf_accessor* nrm = nullptr;
-            const cgltf_accessor* uv  = nullptr;
-            for (cgltf_size a = 0; a < prim->attributes_count; ++a) {
-                const cgltf_attribute* at = &prim->attributes[a];
-                if (at->type == cgltf_attribute_type_position) pos = at->data;
-                else if (at->type == cgltf_attribute_type_normal) nrm = at->data;
-                else if (at->type == cgltf_attribute_type_texcoord && at->index == 0) uv = at->data;
-            }
-            if (pos) {
+        // A mesh may have several primitives — one per material (e.g. a flame
+        // built from "fire red", "fire orange", ...). Each becomes its own part,
+        // all sharing this node's transform.
+        if (node->mesh) {
+            for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
+                const cgltf_primitive* prim = &node->mesh->primitives[p];
+                const cgltf_accessor* pos = nullptr;
+                const cgltf_accessor* nrm = nullptr;
+                const cgltf_accessor* uv  = nullptr;
+                for (cgltf_size a = 0; a < prim->attributes_count; ++a) {
+                    const cgltf_attribute* at = &prim->attributes[a];
+                    if (at->type == cgltf_attribute_type_position) pos = at->data;
+                    else if (at->type == cgltf_attribute_type_normal) nrm = at->data;
+                    else if (at->type == cgltf_attribute_type_texcoord && at->index == 0) uv = at->data;
+                }
+                if (!pos) continue;
                 PartCPU part;
+                part.node = static_cast<int>(i);
                 if (prim->material && prim->material->has_pbr_metallic_roughness) {
                     const cgltf_float* bcf = prim->material->pbr_metallic_roughness.base_color_factor;
                     part.color[0] = bcf[0]; part.color[1] = bcf[1]; part.color[2] = bcf[2];
@@ -168,7 +172,6 @@ bool read_model(const char* path, ModelData& out) {
                     for (cgltf_size k = 0; k < vcount; ++k)
                         part.indices.push_back(static_cast<uint32_t>(k));
                 }
-                dst.mesh_part = static_cast<int>(out.parts.size());
                 out.parts.push_back(std::move(part));
             }
         }

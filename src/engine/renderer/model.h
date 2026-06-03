@@ -36,7 +36,6 @@ struct Node {
     versor r = {0.0f, 0.0f, 0.0f, 1.0f};   // identity quaternion (x,y,z,w)
     vec3   s = {1.0f, 1.0f, 1.0f};
     int    parent = -1;
-    int    mesh_part = -1;                 // index into ModelData::parts, or -1
 };
 
 // CPU vertex data for one mesh part. Interleaved 8 floats: pos3, normal3, uv2.
@@ -45,10 +44,12 @@ struct PartCPU {
     std::vector<uint32_t> indices;
     vec3                  color    = {1.0f, 1.0f, 1.0f};   // material base color (white if none)
     vec3                  emissive = {0.0f, 0.0f, 0.0f};   // emissiveFactor * emissive_strength (self-lit)
+    int                   node     = -1;                   // which scene node this part belongs to
 };
 
 // GL-free parse result: scene graph + mesh parts + the (first) animation.
-// parts[i] is drawn at the world transform of the node whose mesh_part == i.
+// parts[i] is drawn at the world transform of nodes[parts[i].node]. (A node with
+// several materials yields several parts, all sharing that node's transform.)
 struct ModelData {
     std::vector<Node>    nodes;
     std::vector<PartCPU> parts;

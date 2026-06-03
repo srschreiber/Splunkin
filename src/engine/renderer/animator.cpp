@@ -157,23 +157,26 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
         }
     }
 
+    // Each part is drawn at the world transform of the node it belongs to.
     out_part_world.assign(model.parts.size(), Mat4{});
-    for (auto& pw : out_part_world) glm_mat4_identity(pw.m);
-    for (int i = 0; i < n; ++i) {
-        const int mp = model.nodes[i].mesh_part;
-        if (mp >= 0 && mp < static_cast<int>(out_part_world.size()))
-            glm_mat4_copy(world[i].m, out_part_world[mp].m);
+    for (std::size_t i = 0; i < model.parts.size(); ++i) {
+        const int nd = model.parts[i].node;
+        if (nd >= 0 && nd < n) glm_mat4_copy(world[nd].m, out_part_world[i].m);
+        else                   glm_mat4_identity(out_part_world[i].m);
     }
 }
 
 std::vector<Mat4> mesh_offsets(const ModelData& model) {
     std::vector<Mat4> out(model.parts.size());
-    for (auto& m : out) glm_mat4_identity(m.m);
-    // Each mesh node's local TRS is its placement relative to its parent bone —
+    // Each part's node-local TRS is its placement relative to its parent bone —
     // the constant offset we want for hanging this part off that bone.
-    for (const auto& nd : model.nodes) {
-        if (nd.mesh_part < 0 || nd.mesh_part >= static_cast<int>(out.size())) continue;
-        local_matrix(nd.t, nd.r, nd.s, out[nd.mesh_part].m);
+    const int nn = static_cast<int>(model.nodes.size());
+    for (std::size_t i = 0; i < model.parts.size(); ++i) {
+        const int nd = model.parts[i].node;
+        if (nd >= 0 && nd < nn)
+            local_matrix(model.nodes[nd].t, model.nodes[nd].r, model.nodes[nd].s, out[i].m);
+        else
+            glm_mat4_identity(out[i].m);
     }
     return out;
 }
