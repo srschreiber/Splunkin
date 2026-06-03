@@ -14,18 +14,30 @@ namespace dc::renderer {
 struct Renderer {
     uint32_t world_program = 0;   // textured map
     uint32_t model_program = 0;   // flat-lit model
+    uint32_t particle_program = 0;// additive billboards
     uint32_t texture = 0;         // GL_TEXTURE_2D_ARRAY for the map
     int world_viewproj_loc = -1;
-    int model_viewproj_loc = -1, model_model_loc = -1, model_color_loc = -1;
+    int model_viewproj_loc = -1, model_model_loc = -1, model_color_loc = -1, model_emissive_loc = -1;
+    int particle_viewproj_loc = -1;
+    // Point-light uniforms (one nearest torch), looked up per program.
+    int world_light_pos_loc = -1, world_light_color_loc = -1, world_light_radius_loc = -1;
+    int model_light_pos_loc = -1, model_light_color_loc = -1, model_light_radius_loc = -1;
+    uint32_t particle_vao = 0, particle_vbo = 0;
     mat4 viewproj;                // computed each frame in begin_frame
+    vec3 cam_right = {1.0f, 0.0f, 0.0f};  // camera basis (world space), for billboards
+    vec3 cam_up    = {0.0f, 1.0f, 0.0f};
 
     bool init();
-    // Set viewport, clear color+depth, compute the frame's view-projection.
+    // Set viewport, clear color+depth, compute the frame's view-projection + camera basis.
     void begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player, float dt, int fb_w, int fb_h);
+    // Set the single point light for this frame on both lit programs. color=0 -> no torch.
+    void set_light(const vec3 pos, const vec3 color, float radius);
     // Draw the textured map mesh.
     void draw_map(const Mesh& mesh);
     // Draw a model: each part i uses placement * part_world[i] (from pose_model), flat color.
     void draw_model(const Model& model, const std::vector<Mat4>& part_world, mat4 placement, vec3 color);
+    // Draw pre-billboarded particle vertices (7 floats each: pos3 + rgba). Additive, depth-write off.
+    void draw_particles(const std::vector<float>& verts);
     void shutdown();
 };
 

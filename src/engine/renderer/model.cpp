@@ -134,6 +134,16 @@ bool read_model(const char* path, ModelData& out) {
                     const cgltf_float* bcf = prim->material->pbr_metallic_roughness.base_color_factor;
                     part.color[0] = bcf[0]; part.color[1] = bcf[1]; part.color[2] = bcf[2];
                 }
+                if (prim->material) {
+                    // Emissive: emissiveFactor scaled by the KHR_materials_emissive_strength
+                    // extension if present. Makes self-lit parts (a torch flame) glow.
+                    const cgltf_float* ef = prim->material->emissive_factor;
+                    float strength = prim->material->has_emissive_strength
+                                   ? prim->material->emissive_strength.emissive_strength : 1.0f;
+                    part.emissive[0] = ef[0] * strength;
+                    part.emissive[1] = ef[1] * strength;
+                    part.emissive[2] = ef[2] * strength;
+                }
                 // Interleave the glTF's separate POSITION/NORMAL/TEXCOORD_0 accessors
                 // into one flat array: 8 floats per vertex = pos(3), normal(3), uv(2).
                 // THIS ORDER defines the vertex byte layout — it must match the VAO

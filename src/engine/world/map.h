@@ -12,7 +12,12 @@ inline constexpr float EYE_HEIGHT  = 1.6f;  // camera height above floor
 
 enum class Cell : uint8_t { Open, Solid };
 
+// Which way a wall torch faces — toward the adjacent open cell. (North = -Z.)
+enum class Dir : uint8_t { North, East, South, West };
+
 struct ChestSpawn { int col = 0; int row = 0; };
+// A torch mounted on a wall cell, its flame facing `dir` into the open cell there.
+struct TorchSpawn { int col = 0; int row = 0; Dir dir = Dir::North; };
 
 struct Map {
     int width = 0;
@@ -21,13 +26,15 @@ struct Map {
     int spawn_col = 0;
     int spawn_row = 0;
     std::vector<ChestSpawn> chests;   // tiles marked 'C'
+    std::vector<TorchSpawn> torches;  // wall cells marked N/E/S/W
 
     // Returns Solid for out-of-bounds (so the world is treated as closed).
     Cell at(int col, int row) const;
 };
 
 // Parses an ASCII grid. '#'=Solid, '.'/' '=Open, '@'=Open + spawn (first wins),
-// 'C'=Open + chest spawn.
+// 'C'=Open + chest spawn. 'N'/'E'/'S'/'W'=Solid wall + a torch facing that way
+// (the letter is the direction the flame points, into the adjacent open cell).
 // Ragged rows padded with Open to the longest line. Empty input -> nullopt.
 // No '@' -> spawn = first Open cell (row-major), or (0,0) if none.
 std::optional<Map> parse_map(const std::string& text);

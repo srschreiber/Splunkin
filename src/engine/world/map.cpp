@@ -43,7 +43,9 @@ std::optional<Map> parse_map(const std::string& text) {
         const std::string& l = lines[row];
         for (int col = 0; col < width; ++col) {
             char c = (col < static_cast<int>(l.size())) ? l[col] : ' ';
-            Cell cell = (c == '#') ? Cell::Solid : Cell::Open;
+            // N/E/S/W are wall cells that also carry a torch, so they're Solid.
+            bool is_torch = (c == 'N' || c == 'E' || c == 'S' || c == 'W');
+            Cell cell = (c == '#' || is_torch) ? Cell::Solid : Cell::Open;
             m.cells[static_cast<std::size_t>(row) * width + col] = cell;
             if (c == '@' && !spawn_set) {
                 m.spawn_col = col;
@@ -51,6 +53,10 @@ std::optional<Map> parse_map(const std::string& text) {
                 spawn_set = true;
             } else if (c == 'C') {
                 m.chests.push_back({col, row});
+            } else if (is_torch) {
+                Dir d = (c == 'N') ? Dir::North : (c == 'E') ? Dir::East
+                      : (c == 'S') ? Dir::South : Dir::West;
+                m.torches.push_back({col, row, d});
             }
         }
     }

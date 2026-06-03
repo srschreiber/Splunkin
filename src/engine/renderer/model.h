@@ -43,7 +43,8 @@ struct Node {
 struct PartCPU {
     std::vector<float>    vertices;
     std::vector<uint32_t> indices;
-    vec3                  color = {1.0f, 1.0f, 1.0f};   // material base color (white if none)
+    vec3                  color    = {1.0f, 1.0f, 1.0f};   // material base color (white if none)
+    vec3                  emissive = {0.0f, 0.0f, 0.0f};   // emissiveFactor * emissive_strength (self-lit)
 };
 
 // GL-free parse result: scene graph + mesh parts + the (first) animation.
@@ -70,7 +71,8 @@ bool read_model(const char* path, ModelData& out);
 struct PartMesh {
     uint32_t vao = 0, vbo = 0, ebo = 0;
     int index_count = 0;
-    vec3 color = {1.0f, 1.0f, 1.0f};   // material base color
+    vec3 color    = {1.0f, 1.0f, 1.0f};   // material base color
+    vec3 emissive = {0.0f, 0.0f, 0.0f};   // self-lit term (added unattenuated in the shader)
 };
 struct Model {
     std::vector<PartMesh> parts;

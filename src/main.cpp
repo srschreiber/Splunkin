@@ -8,6 +8,8 @@
 #include "engine/entity/player.h"
 #include "engine/world/map.h"
 #include "engine/world/map_mesh.h"
+#include "engine/world/torch.h"
+#include "engine/fx/particles.h"
 
 #include <SDL3/SDL.h>
 #include <cglm/cglm.h>
@@ -68,6 +70,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    dc::renderer::ModelData torch_data;
+    if (!dc::renderer::read_model("assets/models/torch.glb", torch_data)) {
+        std::fprintf(stderr, "could not load model: assets/models/torch.glb\n");
+        return 1;
+    }
+
     dc::platform::Window window;
     if (!window.init("dungeoncrawl")) return 1;
 
@@ -89,6 +97,9 @@ int main(int argc, char** argv) {
     dc::renderer::Model shield_model;
     shield_model.upload(shield_data);
 
+    dc::renderer::Model torch_model;
+    torch_model.upload(torch_data);
+
     // Equipment is attached to a player bone (helmet -> head, shield -> hand).
     // Each item's mesh-node-local TRS is its constant offset relative to that
     // bone; each frame we draw it at: player_placement * boneWorld * offset.
@@ -98,6 +109,45 @@ int main(int argc, char** argv) {
     // Spawn a chest entity per 'C' tile in the map.
     std::vector<Chest> chests;
     for (const auto& cs : map->chests) chests.push_back({ cs.col, cs.row });
+
+    // Spawn a torch per wall-torch tile: precompute its placement + flame point,
+    // and give each its own particle emitter.
+    struct Torch {
+        mat4 placement;
+        vec3 flame_pos;
+        dc::fx::ParticleSystem ps;
+    };
+    // The torch is a static model — pose it once at rest for drawing.
+    std::vector<dc::renderer::Mat4> torch_part_world;
+    dc::renderer::pose_model(torch_data, {}, 0.0f, torch_part_world);
+
+    // Flame anchor: the centroid of the torch's emissive parts, in model-local
+    // space (so light + particles sit at the actual flame, whatever its scale).
+    vec3 flame_anchor = { 0.0f, 0.0f, 0.0f };
+    int  flame_parts = 0;
+    for (std::size_t i = 0; i < torch_data.parts.size(); ++i) {
+        const auto& p = torch_data.parts[i];
+        if (p.emissive[0] + p.emissive[1] + p.emissive[2] <= 0.0f) continue;  // flame parts only
+        vec3 c = { 0.0f, 0.0f, 0.0f };
+        const std::size_t nv = p.vertices.size() / 8;
+        for (std::size_t v = 0; v < nv; ++v) {
+            c[0] += p.vertices[v * 8 + 0]; c[1] += p.vertices[v * 8 + 1]; c[2] += p.vertices[v * 8 + 2];
+        }
+        if (nv) { c[0] /= nv; c[1] /= nv; c[2] /= nv; }
+        vec3 cw; glm_mat4_mulv3(torch_part_world[i].m, c, 1.0f, cw);   // part-local -> model-local
+        flame_anchor[0] += cw[0]; flame_anchor[1] += cw[1]; flame_anchor[2] += cw[2];
+        ++flame_parts;
+    }
+    if (flame_parts) { flame_anchor[0] /= flame_parts; flame_anchor[1] /= flame_parts; flame_anchor[2] /= flame_parts; }
+
+    std::vector<Torch> torches;
+    for (const auto& ts : map->torches) {
+        Torch t;
+        dc::world::torch_placement(ts.col, ts.row, ts.dir, t.placement);
+        glm_mat4_mulv3(t.placement, flame_anchor, 1.0f, t.flame_pos);   // model-local -> world
+        torches.push_back(std::move(t));
+    }
+    std::vector<float> particle_verts;   // rebuilt each frame for draw_particles
 
     dc::renderer::Camera camera;
 
@@ -178,6 +228,29 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Update torch particles (each flame flickers on its own phase) and pick
+        // the torch nearest the player as this frame's single point light.
+        const float t_now = static_cast<float>(now) / 1.0e9f;
+        const float LIGHT_RADIUS = 7.0f;
+        const vec3  LIGHT_BASE = { 1.4f, 0.8f, 0.4f };   // warm; scaled by flicker
+        vec3  light_pos = { 0.0f, -1000.0f, 0.0f };
+        vec3  light_color = { 0.0f, 0.0f, 0.0f };        // no torch -> dark
+        float best_d2 = 1e30f;
+        for (std::size_t i = 0; i < torches.size(); ++i) {
+            float fl = dc::fx::flicker(t_now + static_cast<float>(i) * 1.7f);
+            torches[i].ps.update(dt, torches[i].flame_pos, fl);
+            float dx = torches[i].flame_pos[0] - player.position[0];
+            float dz = torches[i].flame_pos[2] - player.position[2];
+            float d2 = dx * dx + dz * dz;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                glm_vec3_copy(torches[i].flame_pos, light_pos);
+                light_color[0] = LIGHT_BASE[0] * fl;
+                light_color[1] = LIGHT_BASE[1] * fl;
+                light_color[2] = LIGHT_BASE[2] * fl;
+            }
+        }
+
         // Build the animation layers for this frame: walk drives the body, punch
         // is masked to the armL bone so you can punch while walking. (No layers
         // when idle -> rest pose.)
@@ -207,6 +280,7 @@ int main(int argc, char** argv) {
 
         int w, h; window.framebuffer_size(w, h);
         renderer.begin_frame(*map, camera, player, dt, w, h);
+        renderer.set_light(light_pos, light_color, LIGHT_RADIUS);
         renderer.draw_map(mesh);
         vec3 player_color = { 0.80f, 0.45f, 0.35f };
         renderer.draw_model(player_model, part_world, placement, player_color);
@@ -237,6 +311,21 @@ int main(int argc, char** argv) {
             glm_scale(cplace, cscale);              // half size, scaled around its base -> stays on floor
             renderer.draw_model(chest_model, chest_part_world, cplace, chest_color);
         }
+
+        // Draw torch models (opaque, posed once at rest above). The flame part
+        // glows via its emissive material.
+        vec3 torch_tint = { 1.0f, 1.0f, 1.0f };
+        for (const auto& tr : torches)
+            renderer.draw_model(torch_model, torch_part_world, const_cast<vec4*>(tr.placement), torch_tint);
+
+        // Particle pass last: build camera-facing billboards for every flame and
+        // draw them additively over the opaque scene.
+        const float PARTICLE_SIZE = 0.12f;
+        particle_verts.clear();
+        for (const auto& tr : torches)
+            dc::fx::append_billboards(tr.ps, renderer.cam_right, renderer.cam_up, PARTICLE_SIZE, particle_verts);
+        renderer.draw_particles(particle_verts);
+
         window.swap();
 
         if (smoke) { std::printf("smoke: one frame rendered, exiting\n"); break; }
@@ -245,6 +334,7 @@ int main(int argc, char** argv) {
     chest_model.destroy();
     helmet_model.destroy();
     shield_model.destroy();
+    torch_model.destroy();
     player_model.destroy();
     mesh.destroy();
     renderer.shutdown();

@@ -41,6 +41,19 @@ int main() {
     assert(m3->chests.size() == 1);
     assert(m3->chests[0].col == 1 && m3->chests[0].row == 1);
 
+    // N/E/S/W are Solid wall cells that each record a torch facing that way.
+    auto m4 = parse_map(
+        "NESW\n"
+        "....\n");
+    assert(m4.has_value());
+    assert(m4->at(0, 0) == Cell::Solid);    // torch cells are walls
+    assert(m4->at(3, 0) == Cell::Solid);
+    assert(m4->torches.size() == 4);
+    assert(m4->torches[0].dir == Dir::North && m4->torches[0].col == 0);
+    assert(m4->torches[1].dir == Dir::East);
+    assert(m4->torches[2].dir == Dir::South);
+    assert(m4->torches[3].dir == Dir::West && m4->torches[3].col == 3);
+
     std::printf("PASS map\n");
     return 0;
 }

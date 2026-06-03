@@ -6,10 +6,12 @@ layout (location = 3) in float a_layer;
 uniform mat4 u_viewproj;
 out vec3 v_normal;
 out vec2 v_uv;
+out vec3 v_worldpos;
 flat out float v_layer;
 void main() {
     v_normal = a_normal;
     v_uv = a_uv;
+    v_worldpos = a_pos;           // map verts are already in world space
     v_layer = a_layer;
     gl_Position = u_viewproj * vec4(a_pos, 1.0);
 }

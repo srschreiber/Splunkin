@@ -14,6 +14,7 @@ void Model::upload(const ModelData& data) {
         PartMesh part;
         part.index_count = static_cast<int>(pd.indices.size());
         part.color[0] = pd.color[0]; part.color[1] = pd.color[1]; part.color[2] = pd.color[2];
+        part.emissive[0] = pd.emissive[0]; part.emissive[1] = pd.emissive[1]; part.emissive[2] = pd.emissive[2];
 
         glGenVertexArrays(1, &part.vao);
         glGenBuffers(1, &part.vbo);
