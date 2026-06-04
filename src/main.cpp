@@ -76,6 +76,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    dc::renderer::ModelData sword_data;
+    if (!dc::renderer::read_model("assets/models/sword.glb", sword_data)) {
+        std::fprintf(stderr, "could not load model: assets/models/sword.glb\n");
+        return 1;
+    }
+
     dc::platform::Window window;
     if (!window.init("dungeoncrawl")) return 1;
 
@@ -97,6 +103,9 @@ int main(int argc, char** argv) {
     dc::renderer::Model shield_model;
     shield_model.upload(shield_data);
 
+    dc::renderer::Model sword_model;
+    sword_model.upload(sword_data); 
+
     dc::renderer::Model torch_model;
     torch_model.upload(torch_data);
 
@@ -105,6 +114,7 @@ int main(int argc, char** argv) {
     // bone; each frame we draw it at: player_placement * boneWorld * offset.
     auto helmet_offset = dc::renderer::mesh_offsets(helmet_data);
     auto shield_offset = dc::renderer::mesh_offsets(shield_data);
+    auto sword_offset  = dc::renderer::mesh_offsets(sword_data);
 
     // Spawn a chest entity per 'C' tile in the map.
     std::vector<Chest> chests;
@@ -261,9 +271,10 @@ int main(int argc, char** argv) {
         // Pose the player, and also grab the head bone's world matrix as a socket
         // for the helmet.
         dc::renderer::Mat4 head_world;
+        dc::renderer::Mat4 l_hand_world;
         dc::renderer::Mat4 r_hand_world;
         dc::renderer::pose_model(model_data, layers, player.pitch, part_world,
-                                 { model_data.head_node, model_data.hand_r_node }, { &head_world, &r_hand_world });
+                                 { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node }, { &head_world, &l_hand_world, &r_hand_world });
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
@@ -291,6 +302,13 @@ int main(int argc, char** argv) {
         glm_mat4_mul(placement, head_world.m, helmet_place);
         vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
         renderer.draw_model(helmet_model, helmet_offset, helmet_place, helmet_color);
+
+        // Sword: attached to left hand bone
+        mat4 sword_place;
+        // move into hand position
+        glm_mat4_mul(placement, l_hand_world.m, sword_place);
+        vec3 sword_color = { 0.8f, 0.8f, 0.9f };
+        renderer.draw_model(sword_model, sword_offset, sword_place, sword_color);
 
         // Shield: attached to right hand bone
         mat4 shield_place;
