@@ -140,6 +140,27 @@ void Renderer::draw_particles(const std::vector<float>& verts) {
     glBindVertexArray(0);
 }
 
+void Renderer::draw_hud(const std::vector<float>& verts) {
+    if (verts.empty()) return;
+    glUseProgram(particle_program);
+    mat4 id; glm_mat4_identity(id);   // NDC straight through (a_pos already in clip space)
+    glUniformMatrix4fv(particle_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(id));
+
+    glBindVertexArray(particle_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, particle_vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                 verts.data(), GL_STREAM_DRAW);
+
+    // HUD draws on top with normal alpha blending and no depth.
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 7));
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glBindVertexArray(0);
+}
+
 void Renderer::shutdown() {
     if (texture) glDeleteTextures(1, &texture);
     if (particle_vbo) glDeleteBuffers(1, &particle_vbo);

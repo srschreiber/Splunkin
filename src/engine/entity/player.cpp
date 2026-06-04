@@ -36,7 +36,7 @@ void Player::update(float forward, float strafe, bool jump, float dt,
     glm_vec3_scale(right, strafe,  tmp); glm_vec3_add(delta, tmp, delta);
     if (glm_vec3_norm(delta) > 1e-6f) {
         glm_vec3_normalize(delta);
-        glm_vec3_scale(delta, MOVE_SPEED * dt, delta);
+        glm_vec3_scale(delta, speed * dt, delta);
     } else {
         delta[0] = delta[1] = delta[2] = 0.0f;
     }

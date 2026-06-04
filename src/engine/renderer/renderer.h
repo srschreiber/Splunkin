@@ -38,6 +38,9 @@ struct Renderer {
     void draw_model(const Model& model, const std::vector<Mat4>& part_world, mat4 placement, vec3 color);
     // Draw pre-billboarded particle vertices (7 floats each: pos3 + rgba). Additive, depth-write off.
     void draw_particles(const std::vector<float>& verts);
+    // Draw 2D HUD triangles in NDC (7 floats each: pos3 + rgba). Alpha-blended, no depth.
+    // Reuses the particle program with an identity view-projection.
+    void draw_hud(const std::vector<float>& verts);
     void shutdown();
 };
 

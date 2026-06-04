@@ -36,6 +36,11 @@ build_and_run "$ROOT/tests/combat_test.cpp" \
   "$ROOT/src/engine/entity/enemy.cpp" "$ROOT/src/engine/world/pathfind.cpp" \
   "$ROOT/src/engine/world/collision.cpp" "$ROOT/src/engine/world/map.cpp"
 
+build_and_run "$ROOT/tests/spawner_test.cpp" \
+  "$ROOT/src/engine/entity/spawner.cpp" "$ROOT/src/engine/entity/enemy.cpp" \
+  "$ROOT/src/engine/world/pathfind.cpp" "$ROOT/src/engine/world/collision.cpp" \
+  "$ROOT/src/engine/world/map.cpp"
+
 build_and_run "$ROOT/tests/map_mesh_test.cpp" \
   "$ROOT/src/engine/world/map_mesh.cpp" "$ROOT/src/engine/world/map.cpp"
 

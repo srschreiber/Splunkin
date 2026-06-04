@@ -8,6 +8,7 @@
 #include "engine/entity/player.h"
 #include "engine/entity/entity.h"
 #include "engine/entity/enemy.h"
+#include "engine/entity/spawner.h"
 #include "engine/world/map.h"
 #include "engine/world/map_mesh.h"
 #include "engine/world/torch.h"
@@ -169,6 +170,16 @@ int main(int argc, char** argv) {
         entities.spawn_enemy((es.col + 0.5f) * dc::world::TILE, (es.row + 0.5f) * dc::world::TILE);
     std::vector<dc::renderer::Mat4> enemy_part_world;   // scratch, reused per enemy
 
+    // One demo spawner at the map center, trickling enemies onto open floor.
+    std::vector<dc::entity::Spawner> spawners;
+    {
+        dc::entity::Spawner sp;
+        sp.pos[0] = map->width  * 0.5f * dc::world::TILE;
+        sp.pos[2] = map->height * 0.5f * dc::world::TILE;
+        sp.radius = 4.0f; sp.rate = 0.5f; sp.max_alive = 8;
+        spawners.push_back(sp);
+    }
+
     dc::renderer::Camera camera;
 
     dc::entity::Player player;
@@ -207,24 +218,31 @@ int main(int argc, char** argv) {
         float strafe  = (input.key_down(SDL_SCANCODE_D) ? 1.0f : 0.0f)
                       - (input.key_down(SDL_SCANCODE_A) ? 1.0f : 0.0f);
         bool jump = input.key_down(SDL_SCANCODE_SPACE);
+        bool moving = (forward != 0.0f || strafe != 0.0f);
+        // Run while holding Shift (needs stamina). Drains stamina (applied below).
+        bool running = moving && player.stamina > 0.0f && input.key_down(SDL_SCANCODE_LSHIFT);
+        player.speed = running ? dc::entity::RUN_SPEED : dc::entity::MOVE_SPEED;
         player.update(forward, strafe, jump, dt, *map);
 
-        // Walk clock: advance while moving, reset when idle.
-        bool moving = (forward != 0.0f || strafe != 0.0f);
-        if (moving) anim_time += dt; else anim_time = 0.0f;
+        // Walk clock: advance while moving (faster while running), reset when idle.
+        if (moving) anim_time += dt * (running ? 1.7f : 1.0f); else anim_time = 0.0f;
 
-        // Block held (right mouse): only with a shield. You can't block and swing at
-        // once, so holding block also forbids starting a swing (checked below).
-        bool block_held = player.shield.has_value() && input.mouse_down(SDL_BUTTON_RIGHT);
+        // Block held (right mouse): needs a shield and some stamina. You can't block
+        // and swing at once, so holding block also forbids starting a swing (below).
+        bool block_held = player.shield.has_value() && player.stamina > 0.0f
+                        && input.mouse_down(SDL_BUTTON_RIGHT);
 
-        // Attack (left mouse): one-shot swing, gated by the weapon's cooldown and by
-        // not blocking. The weapon sets playback speed and cooldown; fists fall back.
+        // Attack (left mouse): one-shot swing, gated by cooldown, not-blocking, and
+        // enough stamina. Weapon sets playback/cooldown/cost; fists fall back.
         const float PUNCH_STRIKE = 0.18f;  // when in the clip the hit lands (clip seconds)
-        const float atk_speed  = player.weapon ? player.weapon->attack_speed : dc::entity::UNARMED_ATTACK_SPEED;
-        const float atk_cd_dur = player.weapon ? player.weapon->cooldown     : dc::entity::UNARMED_COOLDOWN;
+        const float atk_speed  = player.weapon ? player.weapon->attack_speed     : dc::entity::UNARMED_ATTACK_SPEED;
+        const float atk_cd_dur = player.weapon ? player.weapon->cooldown         : dc::entity::UNARMED_COOLDOWN;
+        const float swing_cost = player.weapon ? player.weapon->stamina_per_swing : dc::entity::UNARMED_STAMINA;
         if (attack_cd > 0.0f) attack_cd -= dt;
-        if (input.mouse_down(SDL_BUTTON_LEFT) && !punching && !block_held && attack_cd <= 0.0f) {
+        if (input.mouse_down(SDL_BUTTON_LEFT) && !punching && !block_held
+            && attack_cd <= 0.0f && player.stamina >= swing_cost) {
             punching = true; punch_time = 0.0f; punch_struck = false;
+            player.stamina -= swing_cost;   // spend stamina on the swing
         }
         bool player_strike = false;        // true only on the frame the swing connects
         if (punching) {
@@ -244,6 +262,14 @@ int main(int argc, char** argv) {
         if (blocking) block_time += dt * block_speed; else block_time = 0.0f;
         bool block_ready = blocking && model_data.block.valid()
                          && block_time >= model_data.block.duration;   // shield fully up
+
+        // Stamina: blocking and running drain it (and pause regen); otherwise it
+        // regenerates. Running dry drops the shield / blocks swings / ends the run.
+        if (blocking)      player.stamina -= player.shield->stamina_per_sec * dt;
+        else if (running)  player.stamina -= dc::entity::RUN_STAMINA_PER_SEC * dt;
+        else               player.stamina += player.stamina_regen * dt;
+        if (player.stamina > player.stamina_max) player.stamina = player.stamina_max;
+        if (player.stamina < 0.0f) player.stamina = 0.0f;
 
         // Interact (E, edge-triggered): open the nearest closed chest within reach.
         bool e_now = input.key_down(SDL_SCANCODE_E);
@@ -343,6 +369,13 @@ int main(int argc, char** argv) {
         player.knock_vel[2] += hit.knock[2];
         if (hit.hit) player.hit_flash = dc::entity::FLASH_TIME;   // only UNBLOCKED hits flash red
         if (player.hit_flash > 0.0f) player.hit_flash -= dt;
+        if (hit.blocked && player.shield) {                      // absorbing a hit costs stamina
+            player.stamina -= player.shield->stamina_per_hit;
+            if (player.stamina < 0.0f) player.stamina = 0.0f;
+        }
+
+        // Spawners trickle new enemies onto valid floor within their disc.
+        for (auto& sp : spawners) sp.update(dt, entities, *map);
 
         // Build the animation layers for this frame: walk drives the body, punch
         // is masked to the armL bone so you can punch while walking. (No layers
@@ -485,6 +518,8 @@ int main(int argc, char** argv) {
                     draw_cone(en.position[0], en.position[2], en.attack_yaw,
                               std::acos(dc::entity::ENEMY_ATTACK_CONE), dc::entity::ENEMY_ATTACK_REACH,
                               1.0f, 0.55f, 0.1f);
+            for (const auto& sp : spawners)                                              // spawn zones: green disc
+                draw_cone(sp.pos[0], sp.pos[2], 0.0f, 3.14159265f, sp.radius, 0.1f, 0.9f, 0.2f);
         }
         renderer.draw_particles(particle_verts);
 
@@ -494,9 +529,26 @@ int main(int argc, char** argv) {
             const char* atk = punching ? "SWING" : "-";
             const char* blk = block_ready ? "BLOCK" : (blocking ? "raising" : "-");
             std::snprintf(buf, sizeof buf,
-                          "dungeoncrawl  [DBG]  hp:%.0f  enemies:%zu  atk:%s  shield:%s  cd:%.2f",
-                          player.health, entities.items.size(), atk, blk, attack_cd);
+                          "dungeoncrawl  [DBG]  hp:%.0f  stam:%.0f  enemies:%zu  atk:%s  shield:%s  cd:%.2f",
+                          player.health, player.stamina, entities.items.size(), atk, blk, attack_cd);
             window.set_title(buf);
+        }
+
+        // HUD: green stamina bar, bottom-left (NDC rects via the reused particle shader).
+        {
+            std::vector<float> hud;
+            auto hud_rect = [&](float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
+                hud.insert(hud.end(), {
+                    x0,y0,0.0f, r,g,b,a,  x1,y0,0.0f, r,g,b,a,  x1,y1,0.0f, r,g,b,a,
+                    x0,y0,0.0f, r,g,b,a,  x1,y1,0.0f, r,g,b,a,  x0,y1,0.0f, r,g,b,a });
+            };
+            const float x0 = -0.96f, x1 = -0.56f, y0 = -0.93f, y1 = -0.89f;
+            hud_rect(x0, y0, x1, y1, 0.05f, 0.05f, 0.05f, 0.6f);            // dark backing
+            float frac = player.stamina_max > 0.0f ? player.stamina / player.stamina_max : 0.0f;
+            if (frac < 0.0f) frac = 0.0f;
+            if (frac > 1.0f) frac = 1.0f;
+            hud_rect(x0, y0, x0 + (x1 - x0) * frac, y1, 0.2f, 0.9f, 0.3f, 0.95f);  // green fill
+            renderer.draw_hud(hud);
         }
 
         window.swap();
