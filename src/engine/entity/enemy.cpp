@@ -80,14 +80,25 @@ EnemyHitPlayer update_enemies(EntityList& list, const dc::world::Map& map,
                 e.attack_time += dt;
                 if (e.attack_time >= ENEMY_ATTACK_WINDUP) {
                     float dmg = e.stats.attack_damage;
-                    if (pc.blocking) dmg *= BLOCK_MITIGATION;   // blocking soaks most of it
+                    float kb  = knock_amount(e.stats.knockback, pc.weight);
+                    // Directional shield block: only when blocking AND the attacker
+                    // is within the shield's frontal cone. Subtracts block_power
+                    // from the damage and soaks most of the knockback.
+                    bool blocked = false;
+                    if (pc.blocking && dist > 1e-4f) {
+                        const float front = (-dx / dist) * fwd_x + (-dz / dist) * fwd_z;
+                        if (front >= pc.block_cos) {
+                            dmg -= pc.block_power; if (dmg < 0.0f) dmg = 0.0f;
+                            kb  *= BLOCK_KNOCK_ABSORB;
+                            blocked = true;
+                        }
+                    }
                     out.damage += dmg;
-                    out.hit = true;
-                    // Shove the player away from this enemy.
-                    if (dist > 1e-4f) {
-                        const float kb = knock_amount(e.stats.knockback, pc.weight);
-                        out.knock[0] += (-dx / dist) * kb;
-                        out.knock[2] += (-dz / dist) * kb;
+                    if (blocked) out.blocked = true;     // shield ate it -> no red flash
+                    else         out.hit = true;         // took it on the chin -> red flash
+                    if (dist > 1e-4f) {                  // shove the player AWAY from this enemy
+                        out.knock[0] += (dx / dist) * kb;
+                        out.knock[2] += (dz / dist) * kb;
                     }
                     e.attacking = false;
                     e.attack_cd = ENEMY_ATTACK_INTERVAL;

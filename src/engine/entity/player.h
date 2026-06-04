@@ -25,6 +25,7 @@ struct Player {
     float health = PLAYER_MAX_HEALTH;      // clamps at 0 (no death screen yet)
     // combat: attack_damage/knockback used when striking, weight resists incoming knockback
     Stats stats = { PLAYER_MAX_HEALTH, 12.0f, 10.0f, 5.0f };
+    float shield_block = 6.0f;             // damage the equipped shield subtracts on a frontal block
     vec3  knock_vel = {0.0f, 0.0f, 0.0f};  // horizontal knockback velocity (decays in update)
     float hit_flash = 0.0f;                // red-flash timer (decayed by main)
 

@@ -18,6 +18,7 @@ int main() {
     pc.yaw = 0.0f; pc.blocking = false; pc.strike = false;
     pc.strike_reach = 1.8f; pc.strike_cos = 0.4f; pc.strike_damage = 12.0f;
     pc.strike_knockback = 10.0f; pc.weight = 5.0f;
+    pc.block_cos = 0.3f; pc.block_power = 6.0f;
     const int pcol = static_cast<int>(pc.pos[0] / TILE);
     const int prow = static_cast<int>(pc.pos[2] / TILE);
 

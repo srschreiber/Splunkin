@@ -16,7 +16,7 @@ inline constexpr float ENEMY_ATTACK_RANGE    = 1.3f;   // stop & attack within t
 inline constexpr float ENEMY_ATTACK_INTERVAL = 1.2f;   // seconds between attacks
 inline constexpr float ENEMY_ATTACK_WINDUP   = 0.4f;   // swing time before the hit lands
 inline constexpr float ENEMY_STAGGER_SPEED   = 0.5f;   // above this knock speed, AI is suppressed
-inline constexpr float BLOCK_MITIGATION      = 0.15f;  // fraction of damage taken while blocking
+inline constexpr float BLOCK_KNOCK_ABSORB    = 0.2f;   // knockback kept when a hit is blocked
 
 // The player's state this frame, for combat resolution.
 struct PlayerCombat {
@@ -29,14 +29,19 @@ struct PlayerCombat {
     float strike_damage;
     float strike_knockback;  // the player's knockback stat (applied to enemies hit)
     float weight;            // the player's weight (resists incoming knockback)
+    // Shield: a blocked hit (attacker within the frontal cone) takes
+    // max(0, damage - block_power) and most of its knockback absorbed.
+    float block_cos;         // cos(half-angle) of the shield's frontal arc
+    float block_power;       // damage the shield subtracts when it blocks
 };
 
 // What the enemy tick did to the player (so the caller can apply it — keeps the
 // sim pure and the result serializable).
 struct EnemyHitPlayer {
-    float damage = 0.0f;
-    vec3  knock  = {0.0f, 0.0f, 0.0f};   // impulse to add to the player's knock_vel
-    bool  hit    = false;                // landed a hit this frame (trigger the flash)
+    float damage  = 0.0f;
+    vec3  knock   = {0.0f, 0.0f, 0.0f};  // impulse to add to the player's knock_vel
+    bool  hit     = false;               // an UNBLOCKED hit landed (-> red flash)
+    bool  blocked = false;               // a hit was absorbed by the shield (-> no red flash)
 };
 
 // Advance all enemies one tick: resolve the player's strike (damage + knockback +

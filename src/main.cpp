@@ -16,6 +16,7 @@
 
 #include <SDL3/SDL.h>
 #include <cglm/cglm.h>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -187,6 +188,8 @@ int main(int argc, char** argv) {
     std::vector<dc::renderer::AnimLayer> layers;       // reused each frame
     bool e_prev = false;                               // for edge-triggered interact
     bool g_prev = false;                               // edge-triggered debug enemy spawn
+    bool v_prev = false;                               // edge-triggered debug-cone toggle
+    bool debug_cone = false;                           // draw the shield block cone
     bool running = true;
     uint64_t prev = SDL_GetTicksNS();
     while (running) {
@@ -283,6 +286,11 @@ int main(int argc, char** argv) {
         }
         g_prev = g_now;
 
+        // Debug: V toggles drawing the shield block cone.
+        bool v_now = input.key_down(SDL_SCANCODE_V);
+        if (v_now && !v_prev) debug_cone = !debug_cone;
+        v_prev = v_now;
+
         // Enemies: flow-field from the player's tile, then step the enemy sim.
         int pcol = static_cast<int>(player.position[0] / dc::world::TILE);
         int prow = static_cast<int>(player.position[2] / dc::world::TILE);
@@ -297,14 +305,14 @@ int main(int argc, char** argv) {
         pc.strike_damage    = player.stats.attack_damage;
         pc.strike_knockback = player.stats.knockback;
         pc.weight           = player.stats.weight;
+        pc.block_cos        = 0.6f;                    // arccos(.6) ~53 deg half-cone for the shield block
+        pc.block_power      = player.shield_block;
         dc::entity::EnemyHitPlayer hit = dc::entity::update_enemies(entities, *map, flow, pc, dt);
         player.health -= hit.damage;
         if (player.health < 0.0f) player.health = 0.0f;
-        if (hit.hit) {
-            player.knock_vel[0] += hit.knock[0];        // integrated (with collision) in player.update next frame
-            player.knock_vel[2] += hit.knock[2];
-            player.hit_flash = dc::entity::FLASH_TIME;
-        }
+        player.knock_vel[0] += hit.knock[0];            // integrated (with collision) in player.update next frame
+        player.knock_vel[2] += hit.knock[2];
+        if (hit.hit) player.hit_flash = dc::entity::FLASH_TIME;   // only UNBLOCKED hits flash red
         if (player.hit_flash > 0.0f) player.hit_flash -= dt;
 
         // Build the animation layers for this frame: walk drives the body, punch
@@ -414,6 +422,26 @@ int main(int argc, char** argv) {
         particle_verts.clear();
         for (const auto& tr : torches)
             dc::fx::append_billboards(tr.ps, renderer.cam_right, renderer.cam_up, PARTICLE_SIZE, particle_verts);
+
+        // Debug: draw the shield block cone as a flat fan on the floor in front of
+        // the player (reuses the additive particle pass: 7 floats/vertex pos+rgba).
+        if (debug_cone) {
+            const float cy = 0.05f;                       // just above the floor
+            const float half = std::acos(pc.block_cos);   // block_cos -> half-angle
+            const float radius = pc.strike_reach;
+            const int   segs = 18;
+            auto push = [&](float x, float z) {
+                particle_verts.insert(particle_verts.end(),
+                    { x, cy, z, 0.2f, 0.5f, 1.0f, 0.25f });   // translucent blue
+            };
+            for (int s = 0; s < segs; ++s) {
+                float a0 = (player.yaw - half) + (2.0f * half) * (s)     / segs;
+                float a1 = (player.yaw - half) + (2.0f * half) * (s + 1) / segs;
+                push(player.position[0], player.position[2]);                       // apex
+                push(player.position[0] + std::cos(a0) * radius, player.position[2] + std::sin(a0) * radius);
+                push(player.position[0] + std::cos(a1) * radius, player.position[2] + std::sin(a1) * radius);
+            }
+        }
         renderer.draw_particles(particle_verts);
 
         window.swap();
