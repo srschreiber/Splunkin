@@ -23,6 +23,9 @@ struct Window {
     // Current framebuffer size in pixels (Retina-correct).
     void framebuffer_size(int& w, int& h) const;
 
+    // Set the window title bar text (used as a lightweight debug readout).
+    void set_title(const char* title);
+
     void swap();
     void shutdown();
 };

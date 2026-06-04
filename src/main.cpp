@@ -183,6 +183,7 @@ int main(int argc, char** argv) {
     bool  punching = false;
     bool  blocking = false;
     bool  punch_struck = false;                        // strike lands once per punch
+    float attack_cd = 0.0f;                            // weapon cooldown between swings
     std::vector<dc::renderer::Mat4> part_world;        // posed per-part transforms (player)
     std::vector<dc::renderer::Mat4> chest_part_world;  // posed per-part transforms (a chest)
     std::vector<dc::renderer::AnimLayer> layers;       // reused each frame
@@ -212,21 +213,37 @@ int main(int argc, char** argv) {
         bool moving = (forward != 0.0f || strafe != 0.0f);
         if (moving) anim_time += dt; else anim_time = 0.0f;
 
-        // Punch (left mouse): one-shot — start on press, advance until the clip finishes.
-        const float PUNCH_SPEED  = 1.5f;   // play the punch 1.5x faster than authored
-        const float PUNCH_STRIKE = 0.18f;  // when in the swing the hit lands (clip seconds)
-        if (input.mouse_down(SDL_BUTTON_LEFT) && !punching) { punching = true; punch_time = 0.0f; punch_struck = false; }
-        bool player_strike = false;        // true only on the frame the punch connects
+        // Block held (right mouse): only with a shield. You can't block and swing at
+        // once, so holding block also forbids starting a swing (checked below).
+        bool block_held = player.shield.has_value() && input.mouse_down(SDL_BUTTON_RIGHT);
+
+        // Attack (left mouse): one-shot swing, gated by the weapon's cooldown and by
+        // not blocking. The weapon sets playback speed and cooldown; fists fall back.
+        const float PUNCH_STRIKE = 0.18f;  // when in the clip the hit lands (clip seconds)
+        const float atk_speed  = player.weapon ? player.weapon->attack_speed : dc::entity::UNARMED_ATTACK_SPEED;
+        const float atk_cd_dur = player.weapon ? player.weapon->cooldown     : dc::entity::UNARMED_COOLDOWN;
+        if (attack_cd > 0.0f) attack_cd -= dt;
+        if (input.mouse_down(SDL_BUTTON_LEFT) && !punching && !block_held && attack_cd <= 0.0f) {
+            punching = true; punch_time = 0.0f; punch_struck = false;
+        }
+        bool player_strike = false;        // true only on the frame the swing connects
         if (punching) {
-            punch_time += dt * PUNCH_SPEED;
+            punch_time += dt * atk_speed;
             if (!punch_struck && punch_time >= PUNCH_STRIKE) { player_strike = true; punch_struck = true; }
-            if (!model_data.punch.valid() || punch_time >= model_data.punch.duration) punching = false;
+            if (!model_data.punch.valid() || punch_time >= model_data.punch.duration) {
+                punching = false;
+                attack_cd = atk_cd_dur;    // begin the cooldown once the swing ends
+            }
         }
 
-        // Block (right mouse): held — advance the clip while down, hold the pose
-        // (sampling clamps at the last keyframe), reset when released.
-        blocking = input.mouse_down(SDL_BUTTON_RIGHT);
-        if (blocking) block_time += dt; else block_time = 0.0f;
+        // Block animation: raise the shield while held (and not mid-swing). It only
+        // actually mitigates once the raise finishes (block_time reaches the clip end);
+        // block_speed scales how fast it gets there, so timing matters.
+        const float block_speed = player.shield ? player.shield->block_speed : 1.0f;
+        blocking = block_held && !punching;                 // animating the raise/hold
+        if (blocking) block_time += dt * block_speed; else block_time = 0.0f;
+        bool block_ready = blocking && model_data.block.valid()
+                         && block_time >= model_data.block.duration;   // shield fully up
 
         // Interact (E, edge-triggered): open the nearest closed chest within reach.
         bool e_now = input.key_down(SDL_SCANCODE_E);
@@ -286,9 +303,9 @@ int main(int argc, char** argv) {
         }
         g_prev = g_now;
 
-        // Debug: V toggles drawing the shield block cone.
+        // Debug: V toggles the combat cones + the title-bar readout.
         bool v_now = input.key_down(SDL_SCANCODE_V);
-        if (v_now && !v_prev) debug_cone = !debug_cone;
+        if (v_now && !v_prev) { debug_cone = !debug_cone; if (!debug_cone) window.set_title("dungeoncrawl"); }
         v_prev = v_now;
 
         // Enemies: flow-field from the player's tile, then step the enemy sim.
@@ -298,15 +315,27 @@ int main(int argc, char** argv) {
         dc::entity::PlayerCombat pc{};
         glm_vec3_copy(player.position, pc.pos);
         pc.yaw = player.yaw;
-        pc.blocking = blocking;
         pc.strike = player_strike;
-        pc.strike_reach = 1.8f;
-        pc.strike_cos = 0.4f;                          // ~66 deg half-cone in front
-        pc.strike_damage    = player.stats.attack_damage;
         pc.strike_knockback = player.stats.knockback;
         pc.weight           = player.stats.weight;
-        pc.block_cos        = 0.6f;                    // arccos(.6) ~53 deg half-cone for the shield block
-        pc.block_power      = player.shield_block;
+        // Weapon drives damage/reach/cone; fall back to fists when unarmed.
+        if (player.weapon) {
+            pc.strike_damage = player.stats.attack_damage + player.weapon->attack_bonus;
+            pc.strike_reach  = player.weapon->reach;
+            pc.strike_cos    = player.weapon->cone_cos;
+        } else {
+            pc.strike_damage = player.stats.attack_damage;
+            pc.strike_reach  = dc::entity::UNARMED_REACH;
+            pc.strike_cos    = dc::entity::UNARMED_CONE;
+        }
+        // Shield drives blocking; only mitigates once fully raised (block_ready).
+        if (player.shield) {
+            pc.blocking    = block_ready;
+            pc.block_cos   = player.shield->block_cos;
+            pc.block_power = player.shield->block_power;
+        } else {
+            pc.blocking = false;   // no shield -> can't block
+        }
         dc::entity::EnemyHitPlayer hit = dc::entity::update_enemies(entities, *map, flow, pc, dt);
         player.health -= hit.damage;
         if (player.health < 0.0f) player.health = 0.0f;
@@ -361,18 +390,21 @@ int main(int argc, char** argv) {
         vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
         renderer.draw_model(helmet_model, helmet_offset, helmet_place, helmet_color);
 
-        // Sword: attached to left hand bone
-        mat4 sword_place;
-        // move into hand position
-        glm_mat4_mul(placement, l_hand_world.m, sword_place);
-        vec3 sword_color = { 0.8f, 0.8f, 0.9f };
-        renderer.draw_model(sword_model, sword_offset, sword_place, sword_color);
+        // Sword: drawn only when a weapon is equipped, attached to the left hand bone.
+        if (player.weapon) {
+            mat4 sword_place;
+            glm_mat4_mul(placement, l_hand_world.m, sword_place);
+            vec3 sword_color = { 0.8f, 0.8f, 0.9f };
+            renderer.draw_model(sword_model, sword_offset, sword_place, sword_color);
+        }
 
-        // Shield: attached to right hand bone
-        mat4 shield_place;
-        glm_mat4_mul(placement, r_hand_world.m, shield_place);
-        vec3 shield_color = { 0.5f, 0.5f, 0.8f };
-        renderer.draw_model(shield_model, shield_offset, shield_place, shield_color);
+        // Shield: drawn only when a shield is equipped, attached to the right hand bone.
+        if (player.shield) {
+            mat4 shield_place;
+            glm_mat4_mul(placement, r_hand_world.m, shield_place);
+            vec3 shield_color = { 0.5f, 0.5f, 0.8f };
+            renderer.draw_model(shield_model, shield_offset, shield_place, shield_color);
+        }
         // Draw each chest, lid posed by its open_t (open clip only animates the lid).
         // White tint -> the per-part material colors from the .glb show through unchanged.
         vec3 chest_color = { 1.0f, 1.0f, 1.0f };
@@ -423,26 +455,49 @@ int main(int argc, char** argv) {
         for (const auto& tr : torches)
             dc::fx::append_billboards(tr.ps, renderer.cam_right, renderer.cam_up, PARTICLE_SIZE, particle_verts);
 
-        // Debug: draw the shield block cone as a flat fan on the floor in front of
-        // the player (reuses the additive particle pass: 7 floats/vertex pos+rgba).
+        // Debug: draw the combat cones as flat fans on the floor in front of the
+        // player (reuses the additive particle pass: 7 floats/vertex pos+rgba).
+        // Red = sword/attack arc; blue = shield block arc.
         if (debug_cone) {
             const float cy = 0.05f;                       // just above the floor
-            const float half = std::acos(pc.block_cos);   // block_cos -> half-angle
-            const float radius = pc.strike_reach;
-            const int   segs = 18;
-            auto push = [&](float x, float z) {
-                particle_verts.insert(particle_verts.end(),
-                    { x, cy, z, 0.2f, 0.5f, 1.0f, 0.25f });   // translucent blue
+            auto draw_cone = [&](float cx, float cz, float center_yaw, float half, float radius,
+                                 float r, float g, float b) {
+                const int segs = 18;
+                auto push = [&](float x, float z) {
+                    particle_verts.insert(particle_verts.end(), { x, cy, z, r, g, b, 0.22f });
+                };
+                for (int s = 0; s < segs; ++s) {
+                    float a0 = (center_yaw - half) + (2.0f * half) * (s)     / segs;
+                    float a1 = (center_yaw - half) + (2.0f * half) * (s + 1) / segs;
+                    push(cx, cz);                                                       // apex
+                    push(cx + std::cos(a0) * radius, cz + std::sin(a0) * radius);
+                    push(cx + std::cos(a1) * radius, cz + std::sin(a1) * radius);
+                }
             };
-            for (int s = 0; s < segs; ++s) {
-                float a0 = (player.yaw - half) + (2.0f * half) * (s)     / segs;
-                float a1 = (player.yaw - half) + (2.0f * half) * (s + 1) / segs;
-                push(player.position[0], player.position[2]);                       // apex
-                push(player.position[0] + std::cos(a0) * radius, player.position[2] + std::sin(a0) * radius);
-                push(player.position[0] + std::cos(a1) * radius, player.position[2] + std::sin(a1) * radius);
-            }
+            if (punching)                                                               // attack: red, only mid-swing
+                draw_cone(player.position[0], player.position[2], player.yaw,
+                          std::acos(pc.strike_cos), pc.strike_reach, 0.9f, 0.15f, 0.15f);
+            if (blocking)                                                               // block: blue, while raising/raised
+                draw_cone(player.position[0], player.position[2], player.yaw,
+                          std::acos(pc.block_cos), pc.strike_reach * 0.9f, 0.2f, 0.5f, 1.0f);
+            for (const auto& en : entities.items)                                       // enemy swings: orange
+                if (en.type == dc::entity::EntityType::Enemy && en.attacking)
+                    draw_cone(en.position[0], en.position[2], en.attack_yaw,
+                              std::acos(dc::entity::ENEMY_ATTACK_CONE), dc::entity::ENEMY_ATTACK_REACH,
+                              1.0f, 0.55f, 0.1f);
         }
         renderer.draw_particles(particle_verts);
+
+        // Debug readout in the title bar (cheap stand-in for on-screen text).
+        if (debug_cone) {
+            char buf[160];
+            const char* atk = punching ? "SWING" : "-";
+            const char* blk = block_ready ? "BLOCK" : (blocking ? "raising" : "-");
+            std::snprintf(buf, sizeof buf,
+                          "dungeoncrawl  [DBG]  hp:%.0f  enemies:%zu  atk:%s  shield:%s  cd:%.2f",
+                          player.health, entities.items.size(), atk, blk, attack_cd);
+            window.set_title(buf);
+        }
 
         window.swap();
 

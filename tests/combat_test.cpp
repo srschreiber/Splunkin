@@ -75,6 +75,22 @@ int main() {
     assert(l3.items.empty());
     assert(hits <= 4);   // 30 hp / 12 dmg -> 3 hits
 
+    // Committed facing: leaving the enemy's cone/reach during its wind-up whiffs.
+    EntityList ld;
+    ld.spawn_enemy(pc.pos[0] + 1.0f, pc.pos[2]);   // in range -> will start a swing
+    for (int i = 0; i < 200 && !ld.items[0].attacking; ++i) {
+        FlowField f = compute_flow(*m, pcol, prow);
+        update_enemies(ld, *m, f, pc, 0.016f);     // player stays put until it commits
+    }
+    assert(!ld.items.empty() && ld.items[0].attacking);   // swing committed
+    PlayerCombat moved = pc; moved.pos[2] += 5.0f;         // sidestep far before the strike
+    float whiff = 0.0f;
+    for (int i = 0; i < 60; ++i) {
+        FlowField f = compute_flow(*m, pcol, prow);
+        whiff += update_enemies(ld, *m, f, moved, 0.016f).damage;
+    }
+    assert(whiff == 0.0f);   // the committed swing missed
+
     std::printf("PASS combat\n");
     return 0;
 }

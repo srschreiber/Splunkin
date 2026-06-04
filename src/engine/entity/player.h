@@ -1,5 +1,6 @@
 #pragma once
 #include <cglm/cglm.h>
+#include <optional>
 #include "engine/world/map.h"
 #include "engine/entity/entity.h"
 
@@ -16,6 +17,31 @@ static_assert(dc::world::EYE_HEIGHT < dc::world::WALL_HEIGHT - 0.2f,
 
 inline constexpr float PLAYER_MAX_HEALTH = 100.0f;
 
+// A shield's defensive stats. A frontal blocked hit takes max(0, dmg - block_power);
+// block_cos is cos(half-angle) of the arc it covers (smaller cos = wider arc).
+struct Shield {
+    float block_power = 6.0f;    // damage subtracted on a frontal block
+    float block_cos   = 0.6f;    // arccos(.6) ~53 deg half-cone
+    float block_speed = 1.0f;    // raise-animation playback multiplier (lower = slower to ready)
+};
+
+// A weapon's offensive stats. Its attack_bonus is ADDED to the player's base
+// (unarmed) attack; reach/cone define the swing arc — every enemy inside is hit.
+struct Weapon {
+    float attack_bonus  = 10.0f;  // added to the player's base attack_damage
+    float reach         = 1.9f;   // swing reach (world units)
+    float cone_cos      = 0.35f;  // arccos(.35) ~70 deg half-arc
+    float attack_speed  = 0.7f;   // swing-animation playback multiplier (lower = slower)
+    float cooldown      = 0.25f;  // seconds after a swing before the next is allowed
+};
+
+// Unarmed (fists) fallback when no weapon is equipped: short, narrow, base damage,
+// quick light jabs.
+inline constexpr float UNARMED_REACH        = 1.2f;
+inline constexpr float UNARMED_CONE         = 0.5f;   // arccos(.5) = 60 deg half-arc
+inline constexpr float UNARMED_ATTACK_SPEED = 1.2f;
+inline constexpr float UNARMED_COOLDOWN     = 0.15f;
+
 struct Player {
     vec3  position = {0.0f, 0.0f, 0.0f};   // EYE position (authoritative)
     float yaw   = 0.0f;                    // radians
@@ -24,8 +50,9 @@ struct Player {
     bool  on_ground = true;
     float health = PLAYER_MAX_HEALTH;      // clamps at 0 (no death screen yet)
     // combat: attack_damage/knockback used when striking, weight resists incoming knockback
-    Stats stats = { PLAYER_MAX_HEALTH, 12.0f, 10.0f, 5.0f };
-    float shield_block = 6.0f;             // damage the equipped shield subtracts on a frontal block
+    Stats stats = { PLAYER_MAX_HEALTH, 5.0f, 10.0f, 5.0f };  // attack_damage = base/unarmed
+    std::optional<Shield> shield = Shield{};   // equipped shield (nullopt = none)
+    std::optional<Weapon> weapon = Weapon{};   // equipped weapon (nullopt = fists)
     vec3  knock_vel = {0.0f, 0.0f, 0.0f};  // horizontal knockback velocity (decays in update)
     float hit_flash = 0.0f;                // red-flash timer (decayed by main)
 

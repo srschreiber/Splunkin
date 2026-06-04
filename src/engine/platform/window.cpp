@@ -59,6 +59,10 @@ void Window::framebuffer_size(int& w, int& h) const {
     SDL_GetWindowSizeInPixels(sdl_window, &w, &h);
 }
 
+void Window::set_title(const char* title) {
+    if (sdl_window) SDL_SetWindowTitle(sdl_window, title);
+}
+
 void Window::swap() { SDL_GL_SwapWindow(sdl_window); }
 
 void Window::shutdown() {

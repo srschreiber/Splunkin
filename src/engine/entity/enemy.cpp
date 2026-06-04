@@ -69,38 +69,43 @@ EnemyHitPlayer update_enemies(EntityList& list, const dc::world::Map& map,
         const float dx = pc.pos[0] - e.position[0];
         const float dz = pc.pos[2] - e.position[2];
         const float dist = std::sqrt(dx * dx + dz * dz);
-        if (dist > 1e-4f) e.yaw = std::atan2(dz, dx);   // face the player
+        if (!e.attacking && dist > 1e-4f) e.yaw = std::atan2(dz, dx);   // track, but commit during a swing
 
-        if (dist <= ENEMY_ATTACK_RANGE) {
-            // In range: attack on a cooldown; the hit lands mid-swing.
+        if (dist <= ENEMY_ATTACK_RANGE || e.attacking) {
+            // In range: attack on a cooldown; the hit lands mid-swing. The swing's
+            // facing is committed at its start, so the player can sidestep out of
+            // the cone (or back out of reach) during the wind-up to dodge.
             e.anim_time = 0.0f;
             if (e.attack_cd > 0.0f) e.attack_cd -= dt;
-            if (!e.attacking && e.attack_cd <= 0.0f) { e.attacking = true; e.attack_time = 0.0f; }
+            if (!e.attacking && e.attack_cd <= 0.0f) {
+                e.attacking = true; e.attack_time = 0.0f;
+                e.attack_yaw = e.yaw;            // commit facing toward the player now
+            }
             if (e.attacking) {
                 e.attack_time += dt;
                 if (e.attack_time >= ENEMY_ATTACK_WINDUP) {
-                    float dmg = e.stats.attack_damage;
-                    float kb  = knock_amount(e.stats.knockback, pc.weight);
-                    // Directional shield block: only when blocking AND the attacker
-                    // is within the shield's frontal cone. Subtracts block_power
-                    // from the damage and soaks most of the knockback.
-                    bool blocked = false;
-                    if (pc.blocking && dist > 1e-4f) {
+                    // Does the committed swing actually connect? (cone + reach)
+                    const float afx = std::cos(e.attack_yaw), afz = std::sin(e.attack_yaw);
+                    const bool in_cone = dist > 1e-4f && dist <= ENEMY_ATTACK_REACH
+                                       && ((dx / dist) * afx + (dz / dist) * afz) >= ENEMY_ATTACK_CONE;
+                    if (in_cone) {
+                        float dmg = e.stats.attack_damage;
+                        float kb  = knock_amount(e.stats.knockback, pc.weight);
+                        // Directional shield block: blocking AND attacker in the shield's cone.
+                        bool blocked = false;
                         const float front = (-dx / dist) * fwd_x + (-dz / dist) * fwd_z;
-                        if (front >= pc.block_cos) {
+                        if (pc.blocking && front >= pc.block_cos) {
                             dmg -= pc.block_power; if (dmg < 0.0f) dmg = 0.0f;
                             kb  *= BLOCK_KNOCK_ABSORB;
                             blocked = true;
                         }
-                    }
-                    out.damage += dmg;
-                    if (blocked) out.blocked = true;     // shield ate it -> no red flash
-                    else         out.hit = true;         // took it on the chin -> red flash
-                    if (dist > 1e-4f) {                  // shove the player AWAY from this enemy
-                        out.knock[0] += (dx / dist) * kb;
+                        out.damage += dmg;
+                        if (blocked) out.blocked = true;     // shield ate it -> no red flash
+                        else         out.hit = true;         // took it on the chin -> red flash
+                        out.knock[0] += (dx / dist) * kb;    // shove the player AWAY from this enemy
                         out.knock[2] += (dz / dist) * kb;
                     }
-                    e.attacking = false;
+                    e.attacking = false;                     // swing over (hit or whiff)
                     e.attack_cd = ENEMY_ATTACK_INTERVAL;
                 }
             }

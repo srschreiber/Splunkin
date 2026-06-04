@@ -38,6 +38,7 @@ struct Entity {
     bool  attacking   = false;
     float attack_time = 0.0f;   // into the attack swing
     float attack_cd   = 0.0f;   // time until the next attack is allowed
+    float attack_yaw  = 0.0f;   // facing committed at the swing's start (for the hit cone)
 
     // committed next path cell (so flow-following doesn't jitter each frame)
     int  tgt_col = -1, tgt_row = -1;
