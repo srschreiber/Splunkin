@@ -6,9 +6,12 @@
 #include "engine/renderer/model.h"
 #include "engine/renderer/animator.h"
 #include "engine/entity/player.h"
+#include "engine/entity/entity.h"
+#include "engine/entity/enemy.h"
 #include "engine/world/map.h"
 #include "engine/world/map_mesh.h"
 #include "engine/world/torch.h"
+#include "engine/world/pathfind.h"
 #include "engine/fx/particles.h"
 
 #include <SDL3/SDL.h>
@@ -159,6 +162,12 @@ int main(int argc, char** argv) {
     }
     std::vector<float> particle_verts;   // rebuilt each frame for draw_particles
 
+    // Dynamic entities (enemies for now). Spawn one per 'X' tile in the map.
+    dc::entity::EntityList entities;
+    for (const auto& es : map->enemies)
+        entities.spawn_enemy((es.col + 0.5f) * dc::world::TILE, (es.row + 0.5f) * dc::world::TILE);
+    std::vector<dc::renderer::Mat4> enemy_part_world;   // scratch, reused per enemy
+
     dc::renderer::Camera camera;
 
     dc::entity::Player player;
@@ -172,10 +181,12 @@ int main(int argc, char** argv) {
     float block_time = 0.0f;                      // block-clip clock (advances while blocking)
     bool  punching = false;
     bool  blocking = false;
+    bool  punch_struck = false;                        // strike lands once per punch
     std::vector<dc::renderer::Mat4> part_world;        // posed per-part transforms (player)
     std::vector<dc::renderer::Mat4> chest_part_world;  // posed per-part transforms (a chest)
     std::vector<dc::renderer::AnimLayer> layers;       // reused each frame
     bool e_prev = false;                               // for edge-triggered interact
+    bool g_prev = false;                               // edge-triggered debug enemy spawn
     bool running = true;
     uint64_t prev = SDL_GetTicksNS();
     while (running) {
@@ -199,10 +210,13 @@ int main(int argc, char** argv) {
         if (moving) anim_time += dt; else anim_time = 0.0f;
 
         // Punch (left mouse): one-shot — start on press, advance until the clip finishes.
-        const float PUNCH_SPEED = 1.5f;   // play the punch 1.5x faster than authored
-        if (input.mouse_down(SDL_BUTTON_LEFT) && !punching) { punching = true; punch_time = 0.0f; }
+        const float PUNCH_SPEED  = 1.5f;   // play the punch 1.5x faster than authored
+        const float PUNCH_STRIKE = 0.18f;  // when in the swing the hit lands (clip seconds)
+        if (input.mouse_down(SDL_BUTTON_LEFT) && !punching) { punching = true; punch_time = 0.0f; punch_struck = false; }
+        bool player_strike = false;        // true only on the frame the punch connects
         if (punching) {
             punch_time += dt * PUNCH_SPEED;
+            if (!punch_struck && punch_time >= PUNCH_STRIKE) { player_strike = true; punch_struck = true; }
             if (!model_data.punch.valid() || punch_time >= model_data.punch.duration) punching = false;
         }
 
@@ -261,6 +275,38 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Debug: G spawns an enemy a couple tiles in front of the player.
+        bool g_now = input.key_down(SDL_SCANCODE_G);
+        if (g_now && !g_prev) {
+            vec3 f; player.front(f);
+            entities.spawn_enemy(player.position[0] + f[0] * 2.0f, player.position[2] + f[2] * 2.0f);
+        }
+        g_prev = g_now;
+
+        // Enemies: flow-field from the player's tile, then step the enemy sim.
+        int pcol = static_cast<int>(player.position[0] / dc::world::TILE);
+        int prow = static_cast<int>(player.position[2] / dc::world::TILE);
+        dc::world::FlowField flow = dc::world::compute_flow(*map, pcol, prow);
+        dc::entity::PlayerCombat pc{};
+        glm_vec3_copy(player.position, pc.pos);
+        pc.yaw = player.yaw;
+        pc.blocking = blocking;
+        pc.strike = player_strike;
+        pc.strike_reach = 1.8f;
+        pc.strike_cos = 0.4f;                          // ~66 deg half-cone in front
+        pc.strike_damage    = player.stats.attack_damage;
+        pc.strike_knockback = player.stats.knockback;
+        pc.weight           = player.stats.weight;
+        dc::entity::EnemyHitPlayer hit = dc::entity::update_enemies(entities, *map, flow, pc, dt);
+        player.health -= hit.damage;
+        if (player.health < 0.0f) player.health = 0.0f;
+        if (hit.hit) {
+            player.knock_vel[0] += hit.knock[0];        // integrated (with collision) in player.update next frame
+            player.knock_vel[2] += hit.knock[2];
+            player.hit_flash = dc::entity::FLASH_TIME;
+        }
+        if (player.hit_flash > 0.0f) player.hit_flash -= dt;
+
         // Build the animation layers for this frame: walk drives the body, punch
         // is masked to the armL bone so you can punch while walking. (No layers
         // when idle -> rest pose.)
@@ -294,6 +340,10 @@ int main(int argc, char** argv) {
         renderer.set_light(light_pos, light_color, LIGHT_RADIUS);
         renderer.draw_map(mesh);
         vec3 player_color = { 0.80f, 0.45f, 0.35f };
+        if (player.hit_flash > 0.0f) {                 // flash red when hit
+            vec3 red = { 1.0f, 0.1f, 0.1f };
+            glm_vec3_lerp(player_color, red, player.hit_flash / dc::entity::FLASH_TIME, player_color);
+        }
         renderer.draw_model(player_model, part_world, placement, player_color);
 
         // Helmet: attached to the head bone socket. Its world = placement * headWorld
@@ -330,6 +380,28 @@ int main(int argc, char** argv) {
             renderer.draw_model(chest_model, chest_part_world, cplace, chest_color);
         }
 
+        // Draw enemies — reuse the player model, tinted green, posed by their
+        // own walk/attack clocks and facing the player.
+        vec3 enemy_color = { 0.25f, 0.80f, 0.30f };
+        for (const auto& en : entities.items) {
+            if (en.type != dc::entity::EntityType::Enemy) continue;
+            std::vector<dc::renderer::AnimLayer> el;
+            if (en.attacking)        el.push_back({ &model_data.punch, en.attack_time, model_data.arm_l_node });
+            else if (en.anim_time > 0.0f) el.push_back({ &model_data.walk, en.anim_time, -1 });
+            dc::renderer::pose_model(model_data, el, 0.0f, enemy_part_world);
+            mat4 eplace;
+            glm_mat4_identity(eplace);
+            vec3 epos = { en.position[0], MODEL_FOOT_LIFT, en.position[2] };
+            glm_translate(eplace, epos);
+            glm_rotate_y(eplace, -en.yaw + MODEL_YAW_OFFSET, eplace);
+            vec3 col; glm_vec3_copy(enemy_color, col);
+            if (en.hit_flash > 0.0f) {                 // flash red when struck
+                vec3 red = { 1.0f, 0.1f, 0.1f };
+                glm_vec3_lerp(col, red, en.hit_flash / dc::entity::FLASH_TIME, col);
+            }
+            renderer.draw_model(player_model, enemy_part_world, eplace, col);
+        }
+
         // Draw torch models (opaque, posed once at rest above). The flame part
         // glows via its emissive material.
         vec3 torch_tint = { 1.0f, 1.0f, 1.0f };
@@ -354,6 +426,7 @@ int main(int argc, char** argv) {
     shield_model.destroy();
     torch_model.destroy();
     player_model.destroy();
+    sword_model.destroy();
     mesh.destroy();
     renderer.shutdown();
     window.shutdown();

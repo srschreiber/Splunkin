@@ -41,11 +41,21 @@ void Player::update(float forward, float strafe, bool jump, float dt,
         delta[0] = delta[1] = delta[2] = 0.0f;
     }
 
+    // --- Knockback impulse (decays), added to the move; per-axis wall slide ---
+    delta[0] += knock_vel[0] * dt;
+    delta[2] += knock_vel[2] * dt;
+
     // --- Per-axis slide against the map ---
     if (!dc::world::circle_hits_solid(map, position[0] + delta[0], position[2], PLAYER_RADIUS))
         position[0] += delta[0];
+    else knock_vel[0] = 0.0f;   // hit a wall: kill that knockback axis
     if (!dc::world::circle_hits_solid(map, position[0], position[2] + delta[2], PLAYER_RADIUS))
         position[2] += delta[2];
+    else knock_vel[2] = 0.0f;
+
+    const float kdamp = std::exp(-KNOCK_DAMP * dt);
+    knock_vel[0] *= kdamp;
+    knock_vel[2] *= kdamp;
 
     // --- Vertical: gravity + jump ---
     if (jump && on_ground) {

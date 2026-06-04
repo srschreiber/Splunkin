@@ -29,6 +29,13 @@ build_and_run "$ROOT/tests/torch_test.cpp" \
 
 build_and_run "$ROOT/tests/particles_test.cpp" "$ROOT/src/engine/fx/particles.cpp"
 
+build_and_run "$ROOT/tests/pathfind_test.cpp" \
+  "$ROOT/src/engine/world/pathfind.cpp" "$ROOT/src/engine/world/map.cpp"
+
+build_and_run "$ROOT/tests/combat_test.cpp" \
+  "$ROOT/src/engine/entity/enemy.cpp" "$ROOT/src/engine/world/pathfind.cpp" \
+  "$ROOT/src/engine/world/collision.cpp" "$ROOT/src/engine/world/map.cpp"
+
 build_and_run "$ROOT/tests/map_mesh_test.cpp" \
   "$ROOT/src/engine/world/map_mesh.cpp" "$ROOT/src/engine/world/map.cpp"
 

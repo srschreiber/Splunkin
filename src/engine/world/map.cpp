@@ -53,6 +53,8 @@ std::optional<Map> parse_map(const std::string& text) {
                 spawn_set = true;
             } else if (c == 'C') {
                 m.chests.push_back({col, row});
+            } else if (c == 'X') {
+                m.enemies.push_back({col, row});
             } else if (is_torch) {
                 Dir d = (c == 'N') ? Dir::North : (c == 'E') ? Dir::East
                       : (c == 'S') ? Dir::South : Dir::West;
