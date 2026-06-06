@@ -145,4 +145,29 @@ EnemyHitPlayer update_enemies(EntityList& list, const dc::world::Map& map,
     return out;
 }
 
+void radius_attack(EntityList& list, const vec3 center, float radius,
+                   float damage, float knockback, std::vector<uint32_t>& already_hit) {
+    const float r2 = radius * radius;
+    for (auto& e : list.items) {
+        if (!e.alive || e.type != EntityType::Enemy) continue;
+        // skip enemies already hit this pass
+        bool seen = false;
+        for (uint32_t id : already_hit) if (id == e.id) { seen = true; break; }
+        if (seen) continue;
+
+        const float dx = e.position[0] - center[0];
+        const float dz = e.position[2] - center[2];
+        const float d2 = dx * dx + dz * dz;
+        if (d2 > r2) continue;
+
+        e.health -= damage;
+        e.hit_flash = FLASH_TIME;
+        const float d = std::sqrt(d2);
+        const float kb = knock_amount(knockback, e.stats.weight);
+        if (d > 1e-4f) { e.knock_vel[0] += (dx / d) * kb; e.knock_vel[2] += (dz / d) * kb; }
+        if (e.health <= 0.0f) e.alive = false;   // update_enemies compacts dead next tick
+        already_hit.push_back(e.id);
+    }
+}
+
 } // namespace dc::entity

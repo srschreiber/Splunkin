@@ -38,6 +38,15 @@ struct Weapon {
     float attack_speed     = 0.7f;   // swing-animation playback multiplier (lower = slower)
     float cooldown         = 0.25f;  // seconds after a swing before the next is allowed
     float stamina_per_swing = 20.0f; // stamina spent per swing
+    // Thrown special (MMB): the sword detaches, flies `throw_distance` out, then
+    // boomerangs back. Bigger cost/cooldown, more damage than a swing.
+    float throw_distance    = 8.0f;  // outbound distance before it returns
+    float throw_speed       = 14.0f; // flight speed (units/s)
+    float throw_radius      = 0.9f;  // hit radius while flying
+    float throw_damage      = 25.0f; // damage per enemy hit
+    float throw_cooldown    = 1.2f;  // seconds after catching before throwing again
+    float stamina_per_throw = 35.0f; // stamina spent to throw
+    float throw_size        = 1.0f;  // size multiplier for the thrown sword (scales hit radius too)
 };
 
 // Unarmed (fists) fallback when no weapon is equipped: short, narrow, base damage,

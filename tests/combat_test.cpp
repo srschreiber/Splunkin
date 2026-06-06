@@ -91,6 +91,19 @@ int main() {
     }
     assert(whiff == 0.0f);   // the committed swing missed
 
+    // radius_attack: hits enemies in range once per pass (the thrown sword uses this).
+    EntityList lr;
+    lr.spawn_enemy(10.0f, 10.0f);   // at the center
+    lr.spawn_enemy(20.0f, 20.0f);   // far away
+    vec3 center = { 10.0f, 0.0f, 10.0f };
+    std::vector<uint32_t> rhit;
+    radius_attack(lr, center, 1.5f, 5.0f, 5.0f, rhit);          // non-lethal
+    assert(rhit.size() == 1);                                   // only the near one
+    assert(lr.items[0].alive && lr.items[0].health < ENEMY_MAX_HEALTH);
+    float h = lr.items[0].health;
+    radius_attack(lr, center, 1.5f, 5.0f, 5.0f, rhit);          // already hit -> skipped
+    assert(lr.items[0].health == h);
+
     std::printf("PASS combat\n");
     return 0;
 }

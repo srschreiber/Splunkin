@@ -53,4 +53,11 @@ struct EnemyHitPlayer {
 EnemyHitPlayer update_enemies(EntityList& list, const dc::world::Map& map,
                               const dc::world::FlowField& flow, const PlayerCombat& pc, float dt);
 
+// Damage + knock every enemy within `radius` (xz) of `center`, skipping ids already
+// in `already_hit` (so a moving hazard hits each enemy once per pass). Marks the
+// dead; the caller's next update_enemies compacts them. Pure / reusable (thrown
+// sword now, explosions later).
+void radius_attack(EntityList& list, const vec3 center, float radius,
+                   float damage, float knockback, std::vector<uint32_t>& already_hit);
+
 } // namespace dc::entity

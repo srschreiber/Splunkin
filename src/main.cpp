@@ -195,6 +195,17 @@ int main(int argc, char** argv) {
     bool  blocking = false;
     bool  punch_struck = false;                        // strike lands once per punch
     float attack_cd = 0.0f;                            // weapon cooldown between swings
+    bool  punch_is_throw = false;                      // this punch clip is a sword throw
+    float throw_cd = 0.0f;                             // cooldown between throws
+    // The in-flight thrown sword (one at a time). While active, the hand is empty.
+    struct ThrownSword {
+        bool  active = false, returning = false;
+        vec3  pos = {0.0f, 0.0f, 0.0f};
+        vec3  dir = {0.0f, 0.0f, 0.0f};
+        float traveled = 0.0f;
+        float spin = 0.0f;
+        std::vector<uint32_t> hit_ids;   // enemies hit this pass (cleared on the return leg)
+    } thrown;
     std::vector<dc::renderer::Mat4> part_world;        // posed per-part transforms (player)
     std::vector<dc::renderer::Mat4> chest_part_world;  // posed per-part transforms (a chest)
     std::vector<dc::renderer::AnimLayer> layers;       // reused each frame
@@ -238,19 +249,44 @@ int main(int argc, char** argv) {
         const float atk_speed  = player.weapon ? player.weapon->attack_speed     : dc::entity::UNARMED_ATTACK_SPEED;
         const float atk_cd_dur = player.weapon ? player.weapon->cooldown         : dc::entity::UNARMED_COOLDOWN;
         const float swing_cost = player.weapon ? player.weapon->stamina_per_swing : dc::entity::UNARMED_STAMINA;
+        const float throw_cost = player.weapon ? player.weapon->stamina_per_throw : 1e9f;  // no weapon -> can't throw
         if (attack_cd > 0.0f) attack_cd -= dt;
-        if (input.mouse_down(SDL_BUTTON_LEFT) && !punching && !block_held
-            && attack_cd <= 0.0f && player.stamina >= swing_cost) {
-            punching = true; punch_time = 0.0f; punch_struck = false;
-            player.stamina -= swing_cost;   // spend stamina on the swing
+        if (throw_cd  > 0.0f) throw_cd  -= dt;
+        // Start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
+        // the difference is resolved at the strike frame below.
+        if (!punching && !block_held && !thrown.active) {
+            if (player.weapon && input.mouse_down(SDL_BUTTON_MIDDLE)
+                && throw_cd <= 0.0f && player.stamina >= throw_cost) {
+                punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = true;
+                player.stamina -= throw_cost;
+            } else if (input.mouse_down(SDL_BUTTON_LEFT)
+                       && attack_cd <= 0.0f && player.stamina >= swing_cost) {
+                punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = false;
+                player.stamina -= swing_cost;
+            }
         }
-        bool player_strike = false;        // true only on the frame the swing connects
+        bool player_strike = false;        // true only on the frame a MELEE swing connects
         if (punching) {
             punch_time += dt * atk_speed;
-            if (!punch_struck && punch_time >= PUNCH_STRIKE) { player_strike = true; punch_struck = true; }
+            if (!punch_struck && punch_time >= PUNCH_STRIKE) {
+                punch_struck = true;
+                if (punch_is_throw && player.weapon) {
+                    // Release: detach the sword as a spinning projectile flying forward.
+                    thrown.active = true; thrown.returning = false;
+                    thrown.traveled = 0.0f; thrown.spin = 0.0f; thrown.hit_ids.clear();
+                    thrown.pos[0] = player.position[0]; thrown.pos[1] = 0.0f; thrown.pos[2] = player.position[2];
+                    vec3 f; player.front(f);
+                    float fl = std::sqrt(f[0] * f[0] + f[2] * f[2]);
+                    thrown.dir[0] = fl > 1e-4f ? f[0] / fl : 0.0f;
+                    thrown.dir[2] = fl > 1e-4f ? f[2] / fl : 1.0f;
+                    throw_cd = player.weapon->throw_cooldown;
+                } else {
+                    player_strike = true;
+                }
+            }
             if (!model_data.punch.valid() || punch_time >= model_data.punch.duration) {
                 punching = false;
-                attack_cd = atk_cd_dur;    // begin the cooldown once the swing ends
+                if (!punch_is_throw) attack_cd = atk_cd_dur;
             }
         }
 
@@ -333,6 +369,29 @@ int main(int argc, char** argv) {
         bool v_now = input.key_down(SDL_SCANCODE_V);
         if (v_now && !v_prev) { debug_cone = !debug_cone; if (!debug_cone) window.set_title("dungeoncrawl"); }
         v_prev = v_now;
+
+        // Thrown sword: spin, fly out `throw_distance`, then boomerang back to the
+        // player; damage enemies in its path (once per leg). Runs before the enemy
+        // sim so kills/knockback are folded into this frame's update.
+        if (thrown.active && player.weapon) {
+            const auto& w = *player.weapon;
+            thrown.spin += 22.0f * dt;                 // procedural horizontal spin
+            if (!thrown.returning) {
+                float step = w.throw_speed * dt;
+                thrown.pos[0] += thrown.dir[0] * step;
+                thrown.pos[2] += thrown.dir[2] * step;
+                thrown.traveled += step;
+                if (thrown.traveled >= w.throw_distance) { thrown.returning = true; thrown.hit_ids.clear(); }
+            } else {
+                float hx = player.position[0] - thrown.pos[0];
+                float hz = player.position[2] - thrown.pos[2];
+                float hd = std::sqrt(hx * hx + hz * hz);
+                if (hd < 1.0f) thrown.active = false;  // caught -> sword back in hand
+                else { thrown.pos[0] += hx / hd * w.throw_speed * dt; thrown.pos[2] += hz / hd * w.throw_speed * dt; }
+            }
+            dc::entity::radius_attack(entities, thrown.pos, w.throw_radius * w.throw_size,
+                                      w.throw_damage, player.stats.knockback, thrown.hit_ids);
+        }
 
         // Enemies: flow-field from the player's tile, then step the enemy sim.
         int pcol = static_cast<int>(player.position[0] / dc::world::TILE);
@@ -423,12 +482,30 @@ int main(int argc, char** argv) {
         vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
         renderer.draw_model(helmet_model, helmet_offset, helmet_place, helmet_color);
 
-        // Sword: drawn only when a weapon is equipped, attached to the left hand bone.
-        if (player.weapon) {
+        // Sword in hand: only when equipped AND not currently thrown.
+        if (player.weapon && !thrown.active) {
             mat4 sword_place;
             glm_mat4_mul(placement, l_hand_world.m, sword_place);
             vec3 sword_color = { 0.8f, 0.8f, 0.9f };
             renderer.draw_model(sword_model, sword_offset, sword_place, sword_color);
+        }
+        // Thrown sword: spinning in flight. Match the in-hand size by reusing the
+        // hand bone's world scale (the player rig is ~0.22x), times the throw_size
+        // upgrade. Without this it'd draw at full model scale (way too big).
+        if (thrown.active) {
+            float rig_scale = std::sqrt(l_hand_world.m[0][0] * l_hand_world.m[0][0]
+                                      + l_hand_world.m[0][1] * l_hand_world.m[0][1]
+                                      + l_hand_world.m[0][2] * l_hand_world.m[0][2]);
+            float s = rig_scale * (player.weapon ? player.weapon->throw_size : 1.0f);
+            mat4 tplace;
+            glm_mat4_identity(tplace);
+            vec3 tpos = { thrown.pos[0], 0.7f, thrown.pos[2] };   // waist height
+            glm_translate(tplace, tpos);
+            glm_rotate_y(tplace, thrown.spin, tplace);
+            vec3 sc = { s, s, s };
+            glm_scale(tplace, sc);
+            vec3 sword_color = { 0.85f, 0.85f, 0.95f };
+            renderer.draw_model(sword_model, sword_offset, tplace, sword_color);
         }
 
         // Shield: drawn only when a shield is equipped, attached to the right hand bone.
@@ -520,6 +597,9 @@ int main(int argc, char** argv) {
                               1.0f, 0.55f, 0.1f);
             for (const auto& sp : spawners)                                              // spawn zones: green disc
                 draw_cone(sp.pos[0], sp.pos[2], 0.0f, 3.14159265f, sp.radius, 0.1f, 0.9f, 0.2f);
+            if (thrown.active && player.weapon)                                          // thrown hit area: red disc
+                draw_cone(thrown.pos[0], thrown.pos[2], 0.0f, 3.14159265f,
+                          player.weapon->throw_radius * player.weapon->throw_size, 0.9f, 0.2f, 0.2f);
         }
         renderer.draw_particles(particle_verts);
 
