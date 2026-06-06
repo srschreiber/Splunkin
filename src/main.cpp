@@ -206,6 +206,7 @@ int main(int argc, char** argv) {
     float block_time = 0.0f;                      // block-clip clock (advances while blocking)
     bool  punching = false;
     bool  blocking = false;
+    bool  exhausted = false;                           // winded: must recover before sprint/block
     bool  punch_struck = false;                        // strike lands once per punch
     float attack_cd = 0.0f;                            // weapon cooldown between swings
     bool  punch_is_throw = false;                      // this punch clip is a sword throw
@@ -264,8 +265,13 @@ int main(int argc, char** argv) {
                       - (input.key_down(SDL_SCANCODE_A) ? 1.0f : 0.0f);
         bool jump = input.key_down(SDL_SCANCODE_SPACE);
         bool moving = (forward != 0.0f || strafe != 0.0f);
+        // Exhaustion: hitting 0 stamina winds you until it recovers past a threshold.
+        // (Otherwise regen re-enables sprint/block one frame at a time = stutter-sprint.)
+        const float EXHAUST_RECOVER = player.stamina_max * 0.25f;
+        if (player.stamina <= 0.0f) exhausted = true;
+        else if (player.stamina >= EXHAUST_RECOVER) exhausted = false;
         // Run while holding Shift (needs stamina). Drains stamina (applied below).
-        bool running = moving && player.stamina > 0.0f && input.key_down(SDL_SCANCODE_LSHIFT);
+        bool running = moving && !exhausted && input.key_down(SDL_SCANCODE_LSHIFT);
         player.speed = running ? dc::entity::RUN_SPEED : dc::entity::MOVE_SPEED;
         player.update(forward, strafe, jump, dt, *map);
 
@@ -274,7 +280,7 @@ int main(int argc, char** argv) {
 
         // Block held (right mouse): needs a shield and some stamina. You can't block
         // and swing at once, so holding block also forbids starting a swing (below).
-        bool block_held = player.shield.has_value() && player.stamina > 0.0f
+        bool block_held = player.shield.has_value() && !exhausted
                         && input.mouse_down(SDL_BUTTON_RIGHT);
 
         // Attack (left mouse): one-shot swing, gated by cooldown, not-blocking, and
