@@ -978,6 +978,28 @@ int main(int argc, char** argv) {
                 for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
             }
 
+            // Special-ability icons (bottom-right): "1" throw, "2" orbit, each boxed.
+            // On use, a white overlay fills the box and drains down as the cooldown
+            // elapses (height = remaining / total).
+            if (player.weapon) {
+                auto draw_special = [&](float x0, float y0, float w, float h, int d, float frac) {
+                    const float x1 = x0 + w, y1 = y0 + h;
+                    hud_rect(x0 - 0.007f, y0 - 0.007f, x1 + 0.007f, y1 + 0.007f, 0.9f, 0.9f, 0.9f, 0.9f);  // border
+                    hud_rect(x0, y0, x1, y1, 0.10f, 0.10f, 0.12f, 0.85f);                                  // backing
+                    const float t = (w < h ? w : h) * 0.12f;
+                    draw_digit(x0 + w * 0.28f, y0 + h * 0.18f, w * 0.45f, h * 0.64f, t, d);                // label
+                    if (frac > 0.0f) {                                                                     // cooldown drain
+                        const float fh = h * (frac > 1.0f ? 1.0f : frac);
+                        hud_rect(x0, y0, x1, y0 + fh, 1.0f, 1.0f, 1.0f, 0.55f);
+                    }
+                };
+                const float bw = 0.06f, bh = 0.105f, by = -0.93f;
+                const float tf = player.weapon->throw_cooldown > 0.0f ? throw_cd / player.weapon->throw_cooldown : 0.0f;
+                const float of = player.weapon->orbit_cooldown > 0.0f ? orbit_cd / player.weapon->orbit_cooldown : 0.0f;
+                draw_special(0.80f, by, bw, bh, 1, tf);
+                draw_special(0.89f, by, bw, bh, 2, of);
+            }
+
             // Death flash: full-screen red overlay that fades out.
             if (death_flash > 0.0f)
                 hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.7f, 0.0f, 0.0f, clamp01(death_flash / 1.2f) * 0.6f);

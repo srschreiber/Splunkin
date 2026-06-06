@@ -44,17 +44,17 @@ struct Weapon {
     float throw_speed       = 14.0f; // flight speed (units/s)
     float throw_radius      = 0.9f;  // hit radius while flying
     float throw_damage      = 25.0f; // damage per enemy hit
-    float throw_cooldown    = 1.2f;  // seconds after catching before throwing again
+    float throw_cooldown    = 2.0f;  // longer cooldown for the special (~2x a basic swing gap)
     float stamina_per_throw = 35.0f; // stamina spent to throw
     float throw_size        = 1.0f;  // size multiplier for the thrown sword (scales hit radius too)
     // Orbit special (2): summon `orbit_count` spinning swords circling you for a
-    // duration, damaging enemies they sweep. Pricey on stamina, with a cooldown.
+    // duration, damaging enemies they sweep. Long cooldown, but hits hard.
     int   orbit_count       = 3;
     float orbit_radius      = 1.9f;  // how far the swords circle from the player
-    float orbit_duration    = 2.0f;  // seconds they stay
-    float orbit_damage      = 15.0f; // damage per hit-tick
-    float orbit_hit_radius  = 0.7f;  // each sword's hit radius
-    float orbit_cooldown    = 3.0f;
+    float orbit_duration    = 2.5f;  // seconds they stay
+    float orbit_damage      = 30.0f; // damage per hit-tick (strong — earns the 5x cooldown)
+    float orbit_hit_radius  = 0.85f; // each sword's hit radius
+    float orbit_cooldown    = 5.0f;  // ~5x the throw cooldown
     float stamina_per_orbit = 60.0f; // a lot
 };
 
