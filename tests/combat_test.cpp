@@ -104,6 +104,20 @@ int main() {
     radius_attack(lr, center, 1.5f, 5.0f, 5.0f, rhit);          // already hit -> skipped
     assert(lr.items[0].health == h);
 
+    // update_enemies reports death positions (so the caller can drop coins).
+    EntityList ld2;
+    ld2.spawn_enemy(pc.pos[0] + 1.0f, pc.pos[2]);
+    ld2.items[0].stats.weight = 100.0f;     // don't knock it out of reach
+    ld2.items[0].health = 1.0f;             // dies on the next strike
+    std::vector<float> deaths;
+    {
+        FlowField f = compute_flow(*m, pcol, prow);
+        PlayerCombat st = pc; st.strike = true;
+        update_enemies(ld2, *m, f, st, 0.016f, &deaths);
+    }
+    assert(ld2.items.empty());              // it died and was removed
+    assert(deaths.size() == 3);             // one death reported as an (x,y,z) triple
+
     std::printf("PASS combat\n");
     return 0;
 }

@@ -38,6 +38,14 @@ struct Chest {
     bool  opened = false;
 };
 
+// A dropped coin: sits on the floor (settling), then magnets to the player and
+// is collected. `age` gates the settle delay so it's always visible briefly.
+struct Coin {
+    vec3  pos;
+    float value = 1.0f;
+    float age   = 0.0f;
+};
+
 int main(int argc, char** argv) {
     bool smoke = false;
     const char* map_path = "assets/maps/test.txt";
@@ -180,6 +188,11 @@ int main(int argc, char** argv) {
         spawners.push_back(sp);
     }
 
+    std::vector<Coin> coins;                 // dropped on kills, magnet to the player
+    std::vector<float> frame_deaths;         // enemy death positions this frame (xyz triples)
+    int   currency = 0;
+    float death_flash = 0.0f;                // red "you died" overlay timer
+
     dc::renderer::Camera camera;
 
     dc::entity::Player player;
@@ -213,6 +226,27 @@ int main(int argc, char** argv) {
     bool g_prev = false;                               // edge-triggered debug enemy spawn
     bool v_prev = false;                               // edge-triggered debug-cone toggle
     bool debug_cone = false;                           // draw the shield block cone
+
+    // Reset the run (solo death = game over -> start over). Player back to spawn at
+    // full health/stamina, currency cleared, enemies/coins reset.
+    auto reset_run = [&]() {
+        player.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
+        player.position[1] = dc::world::EYE_HEIGHT;
+        player.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
+        player.vel_y = 0.0f;
+        player.health = player.stats.max_health;
+        player.stamina = player.stamina_max;
+        player.knock_vel[0] = player.knock_vel[2] = 0.0f;
+        player.hit_flash = 0.0f;
+        thrown.active = false;
+        currency = 0;
+        coins.clear();
+        entities.items.clear();
+        for (const auto& es : map->enemies)
+            entities.spawn_enemy((es.col + 0.5f) * dc::world::TILE, (es.row + 0.5f) * dc::world::TILE);
+        for (auto& sp : spawners) sp.accum = 0.0f;
+    };
+
     bool running = true;
     uint64_t prev = SDL_GetTicksNS();
     while (running) {
@@ -421,7 +455,8 @@ int main(int argc, char** argv) {
         } else {
             pc.blocking = false;   // no shield -> can't block
         }
-        dc::entity::EnemyHitPlayer hit = dc::entity::update_enemies(entities, *map, flow, pc, dt);
+        frame_deaths.clear();
+        dc::entity::EnemyHitPlayer hit = dc::entity::update_enemies(entities, *map, flow, pc, dt, &frame_deaths);
         player.health -= hit.damage;
         if (player.health < 0.0f) player.health = 0.0f;
         player.knock_vel[0] += hit.knock[0];            // integrated (with collision) in player.update next frame
@@ -432,6 +467,38 @@ int main(int argc, char** argv) {
             player.stamina -= player.shield->stamina_per_hit;
             if (player.stamina < 0.0f) player.stamina = 0.0f;
         }
+
+        // Drop a coin where each enemy died (frame_deaths holds xyz triples).
+        for (std::size_t i = 0; i + 2 < frame_deaths.size(); i += 3) {
+            Coin c; c.pos[0] = frame_deaths[i]; c.pos[1] = frame_deaths[i + 1]; c.pos[2] = frame_deaths[i + 2];
+            coins.push_back(c);
+        }
+
+        // Coins: settle briefly (so they're always visible), then magnet to the
+        // player when close and collect on contact.
+        const float MAGNET_RADIUS = 1.8f, COLLECT_RADIUS = 0.6f, COIN_SPEED = 7.0f, COIN_SETTLE = 0.35f;
+        for (std::size_t i = 0; i < coins.size();) {
+            coins[i].age += dt;
+            float dx = player.position[0] - coins[i].pos[0];
+            float dz = player.position[2] - coins[i].pos[2];
+            float d = std::sqrt(dx * dx + dz * dz);
+            if (coins[i].age >= COIN_SETTLE) {        // only after it has settled
+                if (d < COLLECT_RADIUS) { currency += static_cast<int>(coins[i].value); coins[i] = coins.back(); coins.pop_back(); continue; }
+                if (d < MAGNET_RADIUS && d > 1e-4f) {
+                    float step = COIN_SPEED * dt;
+                    coins[i].pos[0] += dx / d * step;
+                    coins[i].pos[2] += dz / d * step;
+                }
+            }
+            ++i;
+        }
+
+        // Death = game over (solo): reset the run, flash the screen red.
+        if (player.health <= 0.0f && death_flash <= 0.0f) {
+            reset_run();
+            death_flash = 1.2f;
+        }
+        if (death_flash > 0.0f) death_flash -= dt;
 
         // Spawners trickle new enemies onto valid floor within their disc.
         for (auto& sp : spawners) sp.update(dt, entities, *map);
@@ -565,6 +632,25 @@ int main(int argc, char** argv) {
         for (const auto& tr : torches)
             dc::fx::append_billboards(tr.ps, renderer.cam_right, renderer.cam_up, PARTICLE_SIZE, particle_verts);
 
+        // Coins: glowing gold billboards that bob just off the floor.
+        {
+            const float cs = 0.25f;
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            for (const auto& c : coins) {
+                float bob = 0.45f + 0.08f * std::sin(t_now * 5.0f + c.pos[0]);
+                vec3 ctr = { c.pos[0], bob, c.pos[2] };
+                auto P = [&](float ax, float ay) {
+                    particle_verts.insert(particle_verts.end(), {
+                        ctr[0] + (R[0] * ax + U[0] * ay) * cs,
+                        ctr[1] + (R[1] * ax + U[1] * ay) * cs,
+                        ctr[2] + (R[2] * ax + U[2] * ay) * cs,
+                        1.0f, 0.85f, 0.2f, 1.0f });
+                };
+                P(-1,-1); P(1,-1); P(1,1);
+                P(-1,-1); P(1,1); P(-1,1);
+            }
+        }
+
         // Debug: draw the combat cones as flat fans on the floor in front of the
         // player (reuses the additive particle pass: 7 floats/vertex pos+rgba).
         // Red = sword/attack arc; blue = shield block arc.
@@ -609,8 +695,8 @@ int main(int argc, char** argv) {
             const char* atk = punching ? "SWING" : "-";
             const char* blk = block_ready ? "BLOCK" : (blocking ? "raising" : "-");
             std::snprintf(buf, sizeof buf,
-                          "dungeoncrawl  [DBG]  hp:%.0f  stam:%.0f  enemies:%zu  atk:%s  shield:%s  cd:%.2f",
-                          player.health, player.stamina, entities.items.size(), atk, blk, attack_cd);
+                          "dungeoncrawl  [DBG]  hp:%.0f  stam:%.0f  coins:%d  enemies:%zu  atk:%s  shield:%s",
+                          player.health, player.stamina, currency, entities.items.size(), atk, blk);
             window.set_title(buf);
         }
 
@@ -622,12 +708,21 @@ int main(int argc, char** argv) {
                     x0,y0,0.0f, r,g,b,a,  x1,y0,0.0f, r,g,b,a,  x1,y1,0.0f, r,g,b,a,
                     x0,y0,0.0f, r,g,b,a,  x1,y1,0.0f, r,g,b,a,  x0,y1,0.0f, r,g,b,a });
             };
-            const float x0 = -0.96f, x1 = -0.56f, y0 = -0.93f, y1 = -0.89f;
-            hud_rect(x0, y0, x1, y1, 0.05f, 0.05f, 0.05f, 0.6f);            // dark backing
-            float frac = player.stamina_max > 0.0f ? player.stamina / player.stamina_max : 0.0f;
-            if (frac < 0.0f) frac = 0.0f;
-            if (frac > 1.0f) frac = 1.0f;
-            hud_rect(x0, y0, x0 + (x1 - x0) * frac, y1, 0.2f, 0.9f, 0.3f, 0.95f);  // green fill
+            auto clamp01 = [](float f) { return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f); };
+            const float x0 = -0.96f, x1 = -0.56f;
+            // Health bar (red), just above the stamina bar.
+            const float hy0 = -0.88f, hy1 = -0.84f;
+            hud_rect(x0, hy0, x1, hy1, 0.05f, 0.05f, 0.05f, 0.6f);
+            float hf = clamp01(player.stats.max_health > 0.0f ? player.health / player.stats.max_health : 0.0f);
+            hud_rect(x0, hy0, x0 + (x1 - x0) * hf, hy1, 0.9f, 0.2f, 0.2f, 0.95f);
+            // Stamina bar (green).
+            const float y0 = -0.93f, y1 = -0.89f;
+            hud_rect(x0, y0, x1, y1, 0.05f, 0.05f, 0.05f, 0.6f);
+            float sf = clamp01(player.stamina_max > 0.0f ? player.stamina / player.stamina_max : 0.0f);
+            hud_rect(x0, y0, x0 + (x1 - x0) * sf, y1, 0.2f, 0.9f, 0.3f, 0.95f);
+            // Death flash: full-screen red overlay that fades out.
+            if (death_flash > 0.0f)
+                hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.7f, 0.0f, 0.0f, clamp01(death_flash / 1.2f) * 0.6f);
             renderer.draw_hud(hud);
         }
 

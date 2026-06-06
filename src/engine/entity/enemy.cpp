@@ -27,7 +27,8 @@ float knock_amount(float attacker_kb, float target_weight) {
 } // namespace
 
 EnemyHitPlayer update_enemies(EntityList& list, const dc::world::Map& map,
-                              const dc::world::FlowField& flow, const PlayerCombat& pc, float dt) {
+                              const dc::world::FlowField& flow, const PlayerCombat& pc, float dt,
+                              std::vector<float>* deaths) {
     EnemyHitPlayer out;
     const float fwd_x = std::cos(pc.yaw), fwd_z = std::sin(pc.yaw);   // player forward (xz)
     const float kdamp = std::exp(-KNOCK_DAMP * dt);
@@ -137,10 +138,17 @@ EnemyHitPlayer update_enemies(EntityList& list, const dc::world::Map& map,
         }
     }
 
-    // Drop dead enemies (swap-pop; order doesn't matter).
+    // Drop dead enemies (swap-pop; order doesn't matter), reporting where each died.
     for (std::size_t i = 0; i < list.items.size();) {
-        if (!list.items[i].alive) { list.items[i] = list.items.back(); list.items.pop_back(); }
-        else ++i;
+        if (!list.items[i].alive) {
+            if (deaths) {
+                deaths->push_back(list.items[i].position[0]);
+                deaths->push_back(list.items[i].position[1]);
+                deaths->push_back(list.items[i].position[2]);
+            }
+            list.items[i] = list.items.back();
+            list.items.pop_back();
+        } else ++i;
     }
     return out;
 }

@@ -50,8 +50,12 @@ struct EnemyHitPlayer {
 // flash on enemies), then pathfind/move toward the player and attack when in
 // range. Returns what was done to the player. Pure over (list, map, flow, player)
 // + list.rng. Dead enemies are removed.
+// `deaths` (optional): each enemy removed this tick appends its position as 3
+// floats (x,y,z), so the caller can drop loot (coins) where it died. (Flat floats
+// because cglm's vec3 is a C array and can't go in a std::vector.)
 EnemyHitPlayer update_enemies(EntityList& list, const dc::world::Map& map,
-                              const dc::world::FlowField& flow, const PlayerCombat& pc, float dt);
+                              const dc::world::FlowField& flow, const PlayerCombat& pc, float dt,
+                              std::vector<float>* deaths = nullptr);
 
 // Damage + knock every enemy within `radius` (xz) of `center`, skipping ids already
 // in `already_hit` (so a moving hazard hits each enemy once per pass). Marks the
