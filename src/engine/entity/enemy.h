@@ -12,8 +12,8 @@ inline constexpr float ENEMY_MAX_HEALTH      = 30.0f;
 inline constexpr float ENEMY_ATTACK_DAMAGE   = 8.0f;
 inline constexpr float ENEMY_KNOCKBACK       = 7.0f;   // impulse an enemy deals to the player
 inline constexpr float ENEMY_WEIGHT          = 4.0f;   // resists the player's knockback
-inline constexpr float ENEMY_ATTACK_RANGE    = 1.3f;   // start a swing within this of the player
-inline constexpr float ENEMY_ATTACK_REACH    = 1.5f;   // hit connects within this at the strike
+inline constexpr float ENEMY_ATTACK_RANGE    = 1.8f;   // start a swing within this of the player
+inline constexpr float ENEMY_ATTACK_REACH    = 2.4f;   // hit connects within this at the strike (long, hard to backpedal out of)
 inline constexpr float ENEMY_ATTACK_CONE     = -0.5f;  // arccos(-.5)=120 deg half-arc (wide; can't just circle out)
 inline constexpr float ENEMY_ATTACK_INTERVAL = 1.2f;   // seconds between attacks
 inline constexpr float ENEMY_ATTACK_WINDUP   = 0.4f;   // swing time before the hit lands (dodge window)
