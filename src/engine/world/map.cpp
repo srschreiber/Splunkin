@@ -44,8 +44,9 @@ std::optional<Map> parse_map(const std::string& text) {
         for (int col = 0; col < width; ++col) {
             char c = (col < static_cast<int>(l.size())) ? l[col] : ' ';
             // N/E/S/W are wall cells that also carry a torch, so they're Solid.
+            // 'C' (chest) is Solid too — you bump into it and open it from adjacent.
             bool is_torch = (c == 'N' || c == 'E' || c == 'S' || c == 'W');
-            Cell cell = (c == '#' || is_torch) ? Cell::Solid : Cell::Open;
+            Cell cell = (c == '#' || c == 'C' || is_torch) ? Cell::Solid : Cell::Open;
             m.cells[static_cast<std::size_t>(row) * width + col] = cell;
             if (c == '@' && !spawn_set) {
                 m.spawn_col = col;

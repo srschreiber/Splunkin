@@ -37,12 +37,22 @@ std::vector<float> build_map_mesh(const Map& map) {
     const float H = WALL_HEIGHT;
     const float VWALL = H / T;   // vertical UV repeat up a wall (keeps texels square)
 
+    // Chests are Solid (block movement + pathfinding) but should NOT render as
+    // walls — treat their tiles as open floor for meshing only.
+    auto is_chest = [&](int c, int r) {
+        for (const auto& ch : map.chests) if (ch.col == c && ch.row == r) return true;
+        return false;
+    };
+    auto renders_open = [&](int c, int r) {
+        return map.at(c, r) == Cell::Open || is_chest(c, r);
+    };
+
     for (int row = 0; row < map.height; ++row) {
         for (int col = 0; col < map.width; ++col) {
             const float x0 = col * T, x1 = (col + 1) * T;
             const float z0 = row * T, z1 = (row + 1) * T;
 
-            if (map.at(col, row) == Cell::Open) {
+            if (renders_open(col, row)) {
                 float f0[3]{x0,0,z0}, f1[3]{x0,0,z1}, f2[3]{x1,0,z1}, f3[3]{x1,0,z0};
                 push_quad(v, f0,f1,f2,f3, 0,1,0, 1.0f, 1.0f, LAYER_FLOOR);
                 float c0[3]{x0,H,z0}, c1[3]{x1,H,z0}, c2[3]{x1,H,z1}, c3[3]{x0,H,z1};
@@ -50,19 +60,19 @@ std::vector<float> build_map_mesh(const Map& map) {
                 continue;
             }
 
-            if (map.at(col, row - 1) == Cell::Open) {   // -Z
+            if (renders_open(col, row - 1)) {   // -Z
                 float p0[3]{x1,0,z0}, p1[3]{x0,0,z0}, p2[3]{x0,H,z0}, p3[3]{x1,H,z0};
                 push_quad(v, p0,p1,p2,p3, 0,0,-1, 1.0f, VWALL, LAYER_WALL);
             }
-            if (map.at(col, row + 1) == Cell::Open) {   // +Z
+            if (renders_open(col, row + 1)) {   // +Z
                 float p0[3]{x0,0,z1}, p1[3]{x1,0,z1}, p2[3]{x1,H,z1}, p3[3]{x0,H,z1};
                 push_quad(v, p0,p1,p2,p3, 0,0,1, 1.0f, VWALL, LAYER_WALL);
             }
-            if (map.at(col - 1, row) == Cell::Open) {   // -X
+            if (renders_open(col - 1, row)) {   // -X
                 float p0[3]{x0,0,z0}, p1[3]{x0,0,z1}, p2[3]{x0,H,z1}, p3[3]{x0,H,z0};
                 push_quad(v, p0,p1,p2,p3, -1,0,0, 1.0f, VWALL, LAYER_WALL);
             }
-            if (map.at(col + 1, row) == Cell::Open) {   // +X
+            if (renders_open(col + 1, row)) {   // +X
                 float p0[3]{x1,0,z1}, p1[3]{x1,0,z0}, p2[3]{x1,H,z0}, p3[3]{x1,H,z1};
                 push_quad(v, p0,p1,p2,p3, 1,0,0, 1.0f, VWALL, LAYER_WALL);
             }

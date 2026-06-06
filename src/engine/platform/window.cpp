@@ -63,6 +63,14 @@ void Window::set_title(const char* title) {
     if (sdl_window) SDL_SetWindowTitle(sdl_window, title);
 }
 
+void Window::window_size(int& w, int& h) const {
+    SDL_GetWindowSize(sdl_window, &w, &h);
+}
+
+void Window::set_relative_mouse(bool on) {
+    SDL_SetWindowRelativeMouseMode(sdl_window, on);
+}
+
 void Window::swap() { SDL_GL_SwapWindow(sdl_window); }
 
 void Window::shutdown() {

@@ -34,10 +34,10 @@ int main() {
     assert(!parse_map("").has_value());
     assert(!parse_map("\n\n").has_value());
 
-    // 'C' is an open floor tile that also records a chest spawn.
+    // 'C' is a Solid tile (blocks movement) that also records a chest spawn.
     auto m3 = parse_map("##\n#C\n");
     assert(m3.has_value());
-    assert(m3->at(1, 1) == Cell::Open);     // chest tile is walkable
+    assert(m3->at(1, 1) == Cell::Solid);    // chest tile blocks movement
     assert(m3->chests.size() == 1);
     assert(m3->chests[0].col == 1 && m3->chests[0].row == 1);
 

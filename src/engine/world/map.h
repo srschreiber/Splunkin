@@ -35,7 +35,8 @@ struct Map {
 };
 
 // Parses an ASCII grid. '#'=Solid, '.'/' '=Open, '@'=Open + spawn (first wins),
-// 'C'=Open + chest spawn, 'X'=Open + enemy spawn. 'N'/'E'/'S'/'W'=Solid wall +
+// 'C'=Solid + chest spawn (blocks movement; opened from an adjacent tile),
+// 'X'=Open + enemy spawn. 'N'/'E'/'S'/'W'=Solid wall +
 // a torch facing that way (the letter is the direction the flame points, into
 // the adjacent open cell).
 // Ragged rows padded with Open to the longest line. Empty input -> nullopt.

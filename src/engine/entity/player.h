@@ -47,6 +47,15 @@ struct Weapon {
     float throw_cooldown    = 1.2f;  // seconds after catching before throwing again
     float stamina_per_throw = 35.0f; // stamina spent to throw
     float throw_size        = 1.0f;  // size multiplier for the thrown sword (scales hit radius too)
+    // Orbit special (2): summon `orbit_count` spinning swords circling you for a
+    // duration, damaging enemies they sweep. Pricey on stamina, with a cooldown.
+    int   orbit_count       = 3;
+    float orbit_radius      = 1.9f;  // how far the swords circle from the player
+    float orbit_duration    = 2.0f;  // seconds they stay
+    float orbit_damage      = 15.0f; // damage per hit-tick
+    float orbit_hit_radius  = 0.7f;  // each sword's hit radius
+    float orbit_cooldown    = 3.0f;
+    float stamina_per_orbit = 60.0f; // a lot
 };
 
 // Unarmed (fists) fallback when no weapon is equipped: short, narrow, base damage,
@@ -70,6 +79,12 @@ struct Player {
     float stamina       = 100.0f;
     float stamina_max   = 100.0f;
     float stamina_regen = 18.0f;               // per second, while not blocking
+    // Upgrade modifiers (from chest cards). knockback upgrade bumps stats.knockback.
+    float stamina_mult       = 1.0f;           // green: scales all stamina costs (<1 cheaper)
+    float damage_mult        = 1.0f;           // red: scales melee + throw damage
+    float swing_reach_bonus  = 0.0f;           // blue: + melee reach
+    float swing_cone_bonus   = 0.0f;           // blue: widens the swing arc (subtract from cos)
+    float sword_scale        = 1.0f;           // blue: also scales the sword model visually
     std::optional<Shield> shield = Shield{};   // equipped shield (nullopt = none)
     std::optional<Weapon> weapon = Weapon{};   // equipped weapon (nullopt = fists)
     vec3  knock_vel = {0.0f, 0.0f, 0.0f};  // horizontal knockback velocity (decays in update)

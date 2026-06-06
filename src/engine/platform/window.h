@@ -26,6 +26,11 @@ struct Window {
     // Set the window title bar text (used as a lightweight debug readout).
     void set_title(const char* title);
 
+    // Logical window size in points (matches mouse coords; differs from framebuffer on retina).
+    void window_size(int& w, int& h) const;
+    // Toggle relative mouse (FPS look on; free cursor for menus off).
+    void set_relative_mouse(bool on);
+
     void swap();
     void shutdown();
 };

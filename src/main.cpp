@@ -31,11 +31,12 @@ static std::string read_file(const char* path) {
     std::stringstream ss; ss << f.rdbuf(); return ss.str();
 }
 
-// A placed chest. One-way: once opened, the lid stays open.
+// A placed chest. One-way: once opened, the lid stays open. Costs `cost` coins.
 struct Chest {
     int   col = 0, row = 0;
     float open_t = 0.0f;    // time into the open clip (0 = closed)
     bool  opened = false;
+    int   cost   = 10;      // coins to open
 };
 
 // A dropped coin: sits on the floor (settling), then magnets to the player and
@@ -45,6 +46,61 @@ struct Coin {
     float value = 1.0f;
     float age   = 0.0f;
 };
+
+// 7-segment digit: calls box(u0,v0,u1,v1) for each lit segment of digit `d`, in a
+// local cell of width w / height h / segment thickness t (origin at bottom-left).
+// Callers map the boxes to whatever they draw (HUD rects, billboarded quads, ...).
+//
+// Segment layout (the shape of an 8) and their bit positions in `seg`:
+//        aaaa            a = bit 0
+//       f    b           b = bit 1
+//       f    b           c = bit 2
+//        gggg            d = bit 3
+//       e    c           e = bit 4
+//       e    c           f = bit 5
+//        dddd            g = bit 6
+// e.g. seg['8'] lights all 7; seg['1'] lights only b,c.
+template <class Box>
+static void seven_seg(int d, float w, float h, float t, Box box) {
+    static const unsigned char seg[10] =
+        { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+    if (d < 0 || d > 9) return;
+    const unsigned char m = seg[d];
+    const float top = h, mid = h * 0.5f, bot = 0.0f;
+    auto on = [&](int bit) { return (m >> bit) & 1; };
+    if (on(0)) box(t,        top - t,        w - t, top);              // a (top)
+    if (on(1)) box(w - t,    mid,            w,     top);              // b (top-right)
+    if (on(2)) box(w - t,    bot,            w,     mid);              // c (bottom-right)
+    if (on(3)) box(t,        bot,            w - t, bot + t);          // d (bottom)
+    if (on(4)) box(0.0f,     bot,            t,     mid);              // e (bottom-left)
+    if (on(5)) box(0.0f,     mid,            t,     top);              // f (top-left)
+    if (on(6)) box(t,        mid - t * 0.5f, w - t, mid + t * 0.5f);   // g (middle)
+}
+
+// Chest upgrade cards (color-coded, no text for now).
+enum class Upgrade { StaminaCost, Knockback, Damage, SwingArc };
+
+// Apply one upgrade to the player (stacks additively/multiplicatively each pick).
+static void apply_upgrade(dc::entity::Player& p, Upgrade u) {
+    switch (u) {
+        case Upgrade::StaminaCost: p.stamina_mult *= 0.85f;       break;  // green: -15% costs
+        case Upgrade::Knockback:   p.stats.knockback += 4.0f;     break;  // yellow
+        case Upgrade::Damage:      p.damage_mult += 0.25f;        break;  // red: +25% dmg
+        case Upgrade::SwingArc:    p.swing_reach_bonus += 0.5f;           // blue: longer + wider swing
+                                   p.swing_cone_bonus  += 0.12f;
+                                   p.sword_scale       += 0.2f;   break;  // + a bigger blade
+    }
+}
+
+// Card color per upgrade (green / yellow / red / blue).
+static void upgrade_color(Upgrade u, float& r, float& g, float& b) {
+    switch (u) {
+        case Upgrade::StaminaCost: r = 0.20f; g = 0.85f; b = 0.30f; break;  // green
+        case Upgrade::Knockback:   r = 0.90f; g = 0.80f; b = 0.15f; break;  // yellow
+        case Upgrade::Damage:      r = 0.85f; g = 0.20f; b = 0.20f; break;  // red
+        case Upgrade::SwingArc:    r = 0.25f; g = 0.50f; b = 1.00f; break;  // blue
+    }
+}
 
 int main(int argc, char** argv) {
     bool smoke = false;
@@ -191,6 +247,7 @@ int main(int argc, char** argv) {
     std::vector<Coin> coins;                 // dropped on kills, magnet to the player
     std::vector<float> frame_deaths;         // enemy death positions this frame (xyz triples)
     int   currency = 0;
+    float run_time = 0.0f;                    // seconds survived this run (top-of-screen timer)
     float death_flash = 0.0f;                // red "you died" overlay timer
 
     dc::renderer::Camera camera;
@@ -207,6 +264,9 @@ int main(int argc, char** argv) {
     bool  punching = false;
     bool  blocking = false;
     bool  exhausted = false;                           // winded: must recover before sprint/block
+    bool  choosing = false;                            // upgrade-card menu open (freezes movement)
+    bool  menu_click_prev = false;                     // edge-detect the card click
+    const Upgrade cards[4] = { Upgrade::StaminaCost, Upgrade::Knockback, Upgrade::Damage, Upgrade::SwingArc };
     bool  punch_struck = false;                        // strike lands once per punch
     float attack_cd = 0.0f;                            // weapon cooldown between swings
     bool  punch_is_throw = false;                      // this punch clip is a sword throw
@@ -220,6 +280,16 @@ int main(int argc, char** argv) {
         float spin = 0.0f;
         std::vector<uint32_t> hit_ids;   // enemies hit this pass (cleared on the return leg)
     } thrown;
+    // Orbit special (2): spinning swords circling the player for a short time.
+    struct Orbit {
+        bool  active = false;
+        float time = 0.0f;       // seconds remaining
+        float angle = 0.0f;      // revolve angle around the player
+        float spin = 0.0f;       // each sword's own spin
+        float tick = 0.0f;       // time until the next damage tick
+        std::vector<uint32_t> hit_ids;
+    } orbit;
+    float orbit_cd = 0.0f;       // cooldown between casts
     std::vector<dc::renderer::Mat4> part_world;        // posed per-part transforms (player)
     std::vector<dc::renderer::Mat4> chest_part_world;  // posed per-part transforms (a chest)
     std::vector<dc::renderer::AnimLayer> layers;       // reused each frame
@@ -228,8 +298,10 @@ int main(int argc, char** argv) {
     bool v_prev = false;                               // edge-triggered debug-cone toggle
     bool debug_cone = false;                           // draw the shield block cone
 
+    const float base_knockback = player.stats.knockback;   // for clearing the yellow upgrade on death
+
     // Reset the run (solo death = game over -> start over). Player back to spawn at
-    // full health/stamina, currency cleared, enemies/coins reset.
+    // full health/stamina, currency + upgrades cleared, enemies/coins reset.
     auto reset_run = [&]() {
         player.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
         player.position[1] = dc::world::EYE_HEIGHT;
@@ -240,12 +312,29 @@ int main(int argc, char** argv) {
         player.knock_vel[0] = player.knock_vel[2] = 0.0f;
         player.hit_flash = 0.0f;
         thrown.active = false;
+        orbit.active = false;
+        if (choosing) { choosing = false; window.set_relative_mouse(true); }
+        // Clear all chest upgrades.
+        player.stamina_mult = 1.0f;
+        player.damage_mult = 1.0f;
+        player.swing_reach_bonus = 0.0f;
+        player.swing_cone_bonus = 0.0f;
+        player.sword_scale = 1.0f;
+        player.stats.knockback = base_knockback;
         currency = 0;
+        run_time = 0.0f;
         coins.clear();
         entities.items.clear();
         for (const auto& es : map->enemies)
             entities.spawn_enemy((es.col + 0.5f) * dc::world::TILE, (es.row + 0.5f) * dc::world::TILE);
         for (auto& sp : spawners) sp.accum = 0.0f;
+    };
+
+    // Upgrade-card layout in NDC (shared by hit-testing and drawing).
+    const float CARD_W = 0.18f, CARD_GAP = 0.05f, CARD_TOP = 0.45f, CARD_BOT = -0.45f;
+    auto card_x0 = [&](int i) {
+        const float total = 4 * CARD_W + 3 * CARD_GAP;
+        return -total * 0.5f + i * (CARD_W + CARD_GAP);
     };
 
     bool running = true;
@@ -257,13 +346,14 @@ int main(int argc, char** argv) {
         float dt = static_cast<float>(now - prev) / 1.0e9f;
         prev = now;
         if (dt > 0.05f) dt = 0.05f;
+        run_time += dt;   // survival timer
 
-        player.add_look(input.mouse_dx, input.mouse_dy);
-        float forward = (input.key_down(SDL_SCANCODE_W) ? 1.0f : 0.0f)
-                      - (input.key_down(SDL_SCANCODE_S) ? 1.0f : 0.0f);
-        float strafe  = (input.key_down(SDL_SCANCODE_D) ? 1.0f : 0.0f)
-                      - (input.key_down(SDL_SCANCODE_A) ? 1.0f : 0.0f);
-        bool jump = input.key_down(SDL_SCANCODE_SPACE);
+        if (!choosing) player.add_look(input.mouse_dx, input.mouse_dy);   // freeze look in the menu
+        float forward = choosing ? 0.0f : (input.key_down(SDL_SCANCODE_W) ? 1.0f : 0.0f)
+                                        - (input.key_down(SDL_SCANCODE_S) ? 1.0f : 0.0f);
+        float strafe  = choosing ? 0.0f : (input.key_down(SDL_SCANCODE_D) ? 1.0f : 0.0f)
+                                        - (input.key_down(SDL_SCANCODE_A) ? 1.0f : 0.0f);
+        bool jump = !choosing && input.key_down(SDL_SCANCODE_SPACE);
         bool moving = (forward != 0.0f || strafe != 0.0f);
         // Exhaustion: hitting 0 stamina winds you until it recovers past a threshold.
         // (Otherwise regen re-enables sprint/block one frame at a time = stutter-sprint.)
@@ -280,7 +370,7 @@ int main(int argc, char** argv) {
 
         // Block held (right mouse): needs a shield and some stamina. You can't block
         // and swing at once, so holding block also forbids starting a swing (below).
-        bool block_held = player.shield.has_value() && !exhausted
+        bool block_held = player.shield.has_value() && !exhausted && !choosing
                         && input.mouse_down(SDL_BUTTON_RIGHT);
 
         // Attack (left mouse): one-shot swing, gated by cooldown, not-blocking, and
@@ -292,17 +382,30 @@ int main(int argc, char** argv) {
         const float throw_cost = player.weapon ? player.weapon->stamina_per_throw : 1e9f;  // no weapon -> can't throw
         if (attack_cd > 0.0f) attack_cd -= dt;
         if (throw_cd  > 0.0f) throw_cd  -= dt;
+        if (orbit_cd  > 0.0f) orbit_cd  -= dt;
+
+        // Orbit special (2): summon spinning swords for a while (big stamina cost).
+        if (player.weapon && !choosing && !orbit.active && orbit_cd <= 0.0f
+            && input.key_down(SDL_SCANCODE_2)
+            && player.stamina >= player.weapon->stamina_per_orbit) {
+            orbit.active = true;
+            orbit.time = player.weapon->orbit_duration;
+            orbit.angle = 0.0f; orbit.spin = 0.0f; orbit.tick = 0.0f;
+            orbit.hit_ids.clear();
+            player.stamina -= player.weapon->stamina_per_orbit * player.stamina_mult;
+            orbit_cd = player.weapon->orbit_cooldown;
+        }
         // Start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
         // the difference is resolved at the strike frame below.
-        if (!punching && !block_held && !thrown.active) {
+        if (!punching && !block_held && !thrown.active && !choosing) {
             if (player.weapon && input.key_down(SDL_SCANCODE_1)
                 && throw_cd <= 0.0f && player.stamina >= throw_cost) {
                 punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = true;
-                player.stamina -= throw_cost;
+                player.stamina -= throw_cost * player.stamina_mult;
             } else if (input.mouse_down(SDL_BUTTON_LEFT)
                        && attack_cd <= 0.0f && player.stamina >= swing_cost) {
                 punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = false;
-                player.stamina -= swing_cost;
+                player.stamina -= swing_cost * player.stamina_mult;
             }
         }
         bool player_strike = false;        // true only on the frame a MELEE swing connects
@@ -341,15 +444,15 @@ int main(int argc, char** argv) {
 
         // Stamina: blocking and running drain it (and pause regen); otherwise it
         // regenerates. Running dry drops the shield / blocks swings / ends the run.
-        if (blocking)      player.stamina -= player.shield->stamina_per_sec * dt;
-        else if (running)  player.stamina -= dc::entity::RUN_STAMINA_PER_SEC * dt;
+        if (blocking)      player.stamina -= player.shield->stamina_per_sec * dt * player.stamina_mult;
+        else if (running)  player.stamina -= dc::entity::RUN_STAMINA_PER_SEC * dt * player.stamina_mult;
         else               player.stamina += player.stamina_regen * dt;
         if (player.stamina > player.stamina_max) player.stamina = player.stamina_max;
         if (player.stamina < 0.0f) player.stamina = 0.0f;
 
-        // Interact (E, edge-triggered): open the nearest closed chest within reach.
+        // Interact (E, edge-triggered): buy the nearest closed chest within reach.
         bool e_now = input.key_down(SDL_SCANCODE_E);
-        if (e_now && !e_prev) {
+        if (e_now && !e_prev && !choosing) {
             const float reach = 3.0f;            // world units
             int best = -1;
             float best_d2 = reach * reach;
@@ -361,9 +464,37 @@ int main(int argc, char** argv) {
                 float d2 = dx * dx + dz * dz;
                 if (d2 < best_d2) { best_d2 = d2; best = static_cast<int>(i); }
             }
-            if (best >= 0) chests[best].opened = true;   // one-way open
+            // Pay to open: deduct coins, open the chest, and present the upgrade menu.
+            if (best >= 0 && currency >= chests[best].cost) {
+                currency -= chests[best].cost;
+                chests[best].opened = true;     // one-way open
+                choosing = true;                // modal upgrade pick (freezes movement)
+                menu_click_prev = true;         // ignore the in-flight E/click frame
+                window.set_relative_mouse(false);  // free the cursor for clicking cards
+            }
         }
         e_prev = e_now;
+
+        // Upgrade menu: click a card to pick its upgrade, which closes the menu.
+        if (choosing) {
+            float mx, my; input.mouse_pos(mx, my);
+            int ww, wh; window.window_size(ww, wh);
+            const float nx = (ww > 0) ? (mx / ww) * 2.0f - 1.0f : 0.0f;   // pixel -> NDC
+            const float ny = (wh > 0) ? 1.0f - (my / wh) * 2.0f : 0.0f;
+            const bool click = input.mouse_down(SDL_BUTTON_LEFT);
+            if (click && !menu_click_prev) {
+                for (int i = 0; i < 4; ++i) {
+                    const float x0 = card_x0(i), x1 = x0 + CARD_W;
+                    if (nx >= x0 && nx <= x1 && ny >= CARD_BOT && ny <= CARD_TOP) {
+                        apply_upgrade(player, cards[i]);
+                        choosing = false;
+                        window.set_relative_mouse(true);
+                        break;
+                    }
+                }
+            }
+            menu_click_prev = click;
+        }
 
         // Advance each opened chest's lid toward fully open (then hold).
         const float chest_dur = chest_data.open.valid() ? chest_data.open.duration : 0.0f;
@@ -429,8 +560,30 @@ int main(int argc, char** argv) {
                 if (hd < 1.0f) thrown.active = false;  // caught -> sword back in hand
                 else { thrown.pos[0] += hx / hd * w.throw_speed * dt; thrown.pos[2] += hz / hd * w.throw_speed * dt; }
             }
-            dc::entity::radius_attack(entities, thrown.pos, w.throw_radius * w.throw_size,
-                                      w.throw_damage, player.stats.knockback, thrown.hit_ids);
+            dc::entity::radius_attack(entities, thrown.pos, w.throw_radius * w.throw_size * player.sword_scale,
+                                      w.throw_damage * player.damage_mult, player.stats.knockback, thrown.hit_ids);
+        }
+
+        // Orbit special: revolve + spin the swords; damage on periodic ticks (each
+        // tick all swords share one hit set, so an enemy takes one hit per tick).
+        if (orbit.active && player.weapon) {
+            const auto& w = *player.weapon;
+            orbit.time -= dt;
+            if (orbit.time <= 0.0f) orbit.active = false;
+            orbit.angle += 3.0f * dt;     // revolve speed around the player
+            orbit.spin  += 22.0f * dt;    // each sword's own spin
+            orbit.tick  -= dt;
+            if (orbit.active && orbit.tick <= 0.0f) {
+                orbit.tick = 0.25f;       // damage-tick interval
+                orbit.hit_ids.clear();
+                for (int i = 0; i < w.orbit_count; ++i) {
+                    float a = orbit.angle + (6.2831853f * i) / w.orbit_count;
+                    vec3 p = { player.position[0] + std::cos(a) * w.orbit_radius, 0.0f,
+                               player.position[2] + std::sin(a) * w.orbit_radius };
+                    dc::entity::radius_attack(entities, p, w.orbit_hit_radius * player.sword_scale,
+                                              w.orbit_damage * player.damage_mult, player.stats.knockback, orbit.hit_ids);
+                }
+            }
         }
 
         // Enemies: flow-field from the player's tile, then step the enemy sim.
@@ -453,6 +606,11 @@ int main(int argc, char** argv) {
             pc.strike_reach  = dc::entity::UNARMED_REACH;
             pc.strike_cos    = dc::entity::UNARMED_CONE;
         }
+        // Apply upgrade modifiers (red damage, blue longer+wider swing).
+        pc.strike_damage *= player.damage_mult;
+        pc.strike_reach  += player.swing_reach_bonus;
+        pc.strike_cos    -= player.swing_cone_bonus;
+        if (pc.strike_cos < -0.5f) pc.strike_cos = -0.5f;   // cap arc width
         // Shield drives blocking; only mitigates once fully raised (block_ready).
         if (player.shield) {
             pc.blocking    = block_ready;
@@ -470,7 +628,7 @@ int main(int argc, char** argv) {
         if (hit.hit) player.hit_flash = dc::entity::FLASH_TIME;   // only UNBLOCKED hits flash red
         if (player.hit_flash > 0.0f) player.hit_flash -= dt;
         if (hit.blocked && player.shield) {                      // absorbing a hit costs stamina
-            player.stamina -= player.shield->stamina_per_hit;
+            player.stamina -= player.shield->stamina_per_hit * player.stamina_mult;
             if (player.stamina < 0.0f) player.stamina = 0.0f;
         }
 
@@ -506,8 +664,14 @@ int main(int argc, char** argv) {
         }
         if (death_flash > 0.0f) death_flash -= dt;
 
-        // Spawners trickle new enemies onto valid floor within their disc.
-        for (auto& sp : spawners) sp.update(dt, entities, *map);
+        // Difficulty ramps with survival time: faster spawns + a higher cap.
+        // (run_time resets on death, so this scales back down too.)
+        const float difficulty = 1.0f + run_time / 25.0f;   // +1x base every 25s
+        for (auto& sp : spawners) {
+            sp.rate = 0.5f * difficulty;                     // 0.5 = configured base rate
+            sp.max_alive = static_cast<int>(8 * difficulty); // 8 = configured base cap
+            sp.update(dt, entities, *map);
+        }
 
         // Build the animation layers for this frame: walk drives the body, punch
         // is masked to the armL bone so you can punch while walking. (No layers
@@ -559,6 +723,8 @@ int main(int argc, char** argv) {
         if (player.weapon && !thrown.active) {
             mat4 sword_place;
             glm_mat4_mul(placement, l_hand_world.m, sword_place);
+            vec3 sws = { player.sword_scale, player.sword_scale, player.sword_scale };
+            glm_scale(sword_place, sws);   // blue upgrade grows the blade
             vec3 sword_color = { 0.8f, 0.8f, 0.9f };
             renderer.draw_model(sword_model, sword_offset, sword_place, sword_color);
         }
@@ -569,7 +735,7 @@ int main(int argc, char** argv) {
             float rig_scale = std::sqrt(l_hand_world.m[0][0] * l_hand_world.m[0][0]
                                       + l_hand_world.m[0][1] * l_hand_world.m[0][1]
                                       + l_hand_world.m[0][2] * l_hand_world.m[0][2]);
-            float s = rig_scale * (player.weapon ? player.weapon->throw_size : 1.0f);
+            float s = rig_scale * player.sword_scale * (player.weapon ? player.weapon->throw_size : 1.0f);
             mat4 tplace;
             glm_mat4_identity(tplace);
             vec3 tpos = { thrown.pos[0], 0.7f, thrown.pos[2] };   // waist height
@@ -579,6 +745,27 @@ int main(int argc, char** argv) {
             glm_scale(tplace, sc);
             vec3 sword_color = { 0.85f, 0.85f, 0.95f };
             renderer.draw_model(sword_model, sword_offset, tplace, sword_color);
+        }
+
+        // Orbit special: spinning swords circling the player at waist height.
+        if (orbit.active && player.weapon) {
+            float rig_scale = std::sqrt(l_hand_world.m[0][0] * l_hand_world.m[0][0]
+                                      + l_hand_world.m[0][1] * l_hand_world.m[0][1]
+                                      + l_hand_world.m[0][2] * l_hand_world.m[0][2]);
+            float s = rig_scale * player.sword_scale;
+            const auto& w = *player.weapon;
+            for (int i = 0; i < w.orbit_count; ++i) {
+                float a = orbit.angle + (6.2831853f * i) / w.orbit_count;
+                mat4 op; glm_mat4_identity(op);
+                vec3 opos = { player.position[0] + std::cos(a) * w.orbit_radius, 0.8f,
+                              player.position[2] + std::sin(a) * w.orbit_radius };
+                glm_translate(op, opos);
+                glm_rotate_y(op, orbit.spin, op);
+                vec3 osc = { s, s, s };
+                glm_scale(op, osc);
+                vec3 oc = { 0.85f, 0.85f, 0.95f };
+                renderer.draw_model(sword_model, sword_offset, op, oc);
+            }
         }
 
         // Shield: drawn only when a shield is equipped, attached to the right hand bone.
@@ -657,6 +844,45 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Chest price tags: the cost in 7-segment digits, billboarded above each
+        // unopened chest, shrinking with distance and culled when far (declutter).
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            const float COST_MAX = 0.30f;                 // world height cap (near)
+            const float COST_NEAR = 6.0f, COST_CULL = 22.0f;
+            // one billboarded quad in the (R,U) plane, offset (u,v) from `base`, scaled by sc
+            auto quad = [&](const vec3 base, float u0, float v0, float u1, float v1, float sc) {
+                auto P = [&](float u, float v) {
+                    particle_verts.insert(particle_verts.end(), {
+                        base[0] + (R[0]*u + U[0]*v) * sc, base[1] + (R[1]*u + U[1]*v) * sc,
+                        base[2] + (R[2]*u + U[2]*v) * sc, 1.0f, 0.85f, 0.2f, 1.0f });
+                };
+                P(u0,v0); P(u1,v0); P(u1,v1);
+                P(u0,v0); P(u1,v1); P(u0,v1);
+            };
+            for (const auto& ch : chests) {
+                if (ch.opened) continue;
+                float cx = (ch.col + 0.5f) * dc::world::TILE, cz = (ch.row + 0.5f) * dc::world::TILE;
+                float dx = cx - player.position[0], dz = cz - player.position[2];
+                float dist = std::sqrt(dx * dx + dz * dz);
+                if (dist > COST_CULL) continue;                       // too far: don't render
+                float sc = COST_MAX;
+                if (dist > COST_NEAR) sc *= COST_NEAR / dist;          // shrink with distance (capped near)
+
+                char num[16]; std::snprintf(num, sizeof num, "%d", ch.cost);
+                const int n = static_cast<int>(std::strlen(num));
+                const float dw = 0.6f, dh = 1.0f, dt = 0.16f, gap = dw + 0.3f;
+                const float total = n * gap - 0.3f;
+                vec3 base = { cx, 2.3f, cz };                          // float above the chest
+                for (int i = 0; i < n; ++i) {
+                    float ox = -total * 0.5f + i * gap;                // center the number, per-digit u offset
+                    seven_seg(num[i] - '0', dw, dh, dt, [&](float u0, float v0, float u1, float v1) {
+                        quad(base, ox + u0, v0, ox + u1, v1, sc);
+                    });
+                }
+            }
+        }
+
         // Debug: draw the combat cones as flat fans on the floor in front of the
         // player (reuses the additive particle pass: 7 floats/vertex pos+rgba).
         // Red = sword/attack arc; blue = shield block arc.
@@ -691,7 +917,7 @@ int main(int argc, char** argv) {
                 draw_cone(sp.pos[0], sp.pos[2], 0.0f, 3.14159265f, sp.radius, 0.1f, 0.9f, 0.2f);
             if (thrown.active && player.weapon)                                          // thrown hit area: red disc
                 draw_cone(thrown.pos[0], thrown.pos[2], 0.0f, 3.14159265f,
-                          player.weapon->throw_radius * player.weapon->throw_size, 0.9f, 0.2f, 0.2f);
+                          player.weapon->throw_radius * player.weapon->throw_size * player.sword_scale, 0.9f, 0.2f, 0.2f);
         }
         renderer.draw_particles(particle_verts);
 
@@ -730,21 +956,9 @@ int main(int argc, char** argv) {
             // Coin counter (top-left): a gold coin icon + the currency as 7-segment
             // digits built from rects — no font/text renderer needed.
             auto draw_digit = [&](float bx, float by, float w, float h, float t, int d) {
-                static const unsigned char seg[10] =
-                // encode the numbers as 7 bits for which segments to light: 0bgfedcba, where bit 0 = a, 1 = b, ..., 6 = g
-                    { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
-                if (d < 0 || d > 9) return;
-                unsigned char m = seg[d];
-                const float top = by + h, mid = by + h * 0.5f, bot = by;
-                const float R = 1.0f, G = 0.85f, B = 0.2f;
-                auto on = [&](int bit) { return (m >> bit) & 1; };
-                if (on(0)) hud_rect(bx + t,     top - t,        bx + w - t, top,            R, G, B, 1.0f);  // a
-                if (on(1)) hud_rect(bx + w - t, mid,            bx + w,     top,            R, G, B, 1.0f);  // b
-                if (on(2)) hud_rect(bx + w - t, bot,            bx + w,     mid,            R, G, B, 1.0f);  // c
-                if (on(3)) hud_rect(bx + t,     bot,            bx + w - t, bot + t,        R, G, B, 1.0f);  // d
-                if (on(4)) hud_rect(bx,         bot,            bx + t,     mid,            R, G, B, 1.0f);  // e
-                if (on(5)) hud_rect(bx,         mid,            bx + t,     top,            R, G, B, 1.0f);  // f
-                if (on(6)) hud_rect(bx + t,     mid - t * 0.5f, bx + w - t, mid + t * 0.5f, R, G, B, 1.0f);  // g
+                seven_seg(d, w, h, t, [&](float u0, float v0, float u1, float v1) {
+                    hud_rect(bx + u0, by + v0, bx + u1, by + v1, 1.0f, 0.85f, 0.2f, 1.0f);
+                });
             };
             {
                 const float dw = 0.035f, dh = 0.07f, dt = 0.011f, gap = dw + dt * 2.0f;
@@ -754,10 +968,30 @@ int main(int argc, char** argv) {
                 float dx = -0.88f;
                 for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
             }
+            // Survival timer (top-center): seconds survived, in 7-segment digits.
+            {
+                const float dw = 0.04f, dh = 0.085f, dt = 0.013f, gap = dw + dt * 2.0f;
+                const float by = 0.88f;
+                char num[16]; std::snprintf(num, sizeof num, "%d", static_cast<int>(run_time));
+                const int n = static_cast<int>(std::strlen(num));
+                float dx = -(n * gap) * 0.5f;        // center horizontally
+                for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
+            }
 
             // Death flash: full-screen red overlay that fades out.
             if (death_flash > 0.0f)
                 hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.7f, 0.0f, 0.0f, clamp01(death_flash / 1.2f) * 0.6f);
+
+            // Upgrade menu: dim the scene + 4 color-coded cards to click.
+            if (choosing) {
+                hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.5f);   // dim backdrop
+                for (int i = 0; i < 4; ++i) {
+                    const float x0 = card_x0(i), x1 = x0 + CARD_W;
+                    float r, g, b; upgrade_color(cards[i], r, g, b);
+                    hud_rect(x0 - 0.008f, CARD_BOT - 0.008f, x1 + 0.008f, CARD_TOP + 0.008f, 0.95f, 0.95f, 0.95f, 0.95f);  // border
+                    hud_rect(x0, CARD_BOT, x1, CARD_TOP, r, g, b, 0.95f);   // card
+                }
+            }
             renderer.draw_hud(hud);
         }
 

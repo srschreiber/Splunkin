@@ -28,4 +28,8 @@ bool Input::mouse_down(int button) const {
     return (SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(button)) != 0;
 }
 
+void Input::mouse_pos(float& x, float& y) const {
+    SDL_GetMouseState(&x, &y);   // window coords (points); only meaningful when not in relative mode
+}
+
 } // namespace dc::input
