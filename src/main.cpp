@@ -289,7 +289,7 @@ int main(int argc, char** argv) {
         // Start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
         // the difference is resolved at the strike frame below.
         if (!punching && !block_held && !thrown.active) {
-            if (player.weapon && input.mouse_down(SDL_BUTTON_MIDDLE)
+            if (player.weapon && input.key_down(SDL_SCANCODE_1)
                 && throw_cd <= 0.0f && player.stamina >= throw_cost) {
                 punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = true;
                 player.stamina -= throw_cost;
@@ -714,12 +714,41 @@ int main(int argc, char** argv) {
             const float hy0 = -0.88f, hy1 = -0.84f;
             hud_rect(x0, hy0, x1, hy1, 0.05f, 0.05f, 0.05f, 0.6f);
             float hf = clamp01(player.stats.max_health > 0.0f ? player.health / player.stats.max_health : 0.0f);
+            // linear interp from dark gray to bright red as health goes from 0% to 100%
             hud_rect(x0, hy0, x0 + (x1 - x0) * hf, hy1, 0.9f, 0.2f, 0.2f, 0.95f);
             // Stamina bar (green).
             const float y0 = -0.93f, y1 = -0.89f;
             hud_rect(x0, y0, x1, y1, 0.05f, 0.05f, 0.05f, 0.6f);
             float sf = clamp01(player.stamina_max > 0.0f ? player.stamina / player.stamina_max : 0.0f);
             hud_rect(x0, y0, x0 + (x1 - x0) * sf, y1, 0.2f, 0.9f, 0.3f, 0.95f);
+            // Coin counter (top-left): a gold coin icon + the currency as 7-segment
+            // digits built from rects — no font/text renderer needed.
+            auto draw_digit = [&](float bx, float by, float w, float h, float t, int d) {
+                static const unsigned char seg[10] =
+                // encode the numbers as 7 bits for which segments to light: 0bgfedcba, where bit 0 = a, 1 = b, ..., 6 = g
+                    { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
+                if (d < 0 || d > 9) return;
+                unsigned char m = seg[d];
+                const float top = by + h, mid = by + h * 0.5f, bot = by;
+                const float R = 1.0f, G = 0.85f, B = 0.2f;
+                auto on = [&](int bit) { return (m >> bit) & 1; };
+                if (on(0)) hud_rect(bx + t,     top - t,        bx + w - t, top,            R, G, B, 1.0f);  // a
+                if (on(1)) hud_rect(bx + w - t, mid,            bx + w,     top,            R, G, B, 1.0f);  // b
+                if (on(2)) hud_rect(bx + w - t, bot,            bx + w,     mid,            R, G, B, 1.0f);  // c
+                if (on(3)) hud_rect(bx + t,     bot,            bx + w - t, bot + t,        R, G, B, 1.0f);  // d
+                if (on(4)) hud_rect(bx,         bot,            bx + t,     mid,            R, G, B, 1.0f);  // e
+                if (on(5)) hud_rect(bx,         mid,            bx + t,     top,            R, G, B, 1.0f);  // f
+                if (on(6)) hud_rect(bx + t,     mid - t * 0.5f, bx + w - t, mid + t * 0.5f, R, G, B, 1.0f);  // g
+            };
+            {
+                const float dw = 0.035f, dh = 0.07f, dt = 0.011f, gap = dw + dt * 2.0f;
+                const float by = 0.86f;
+                hud_rect(-0.95f, by, -0.91f, by + dh, 1.0f, 0.85f, 0.2f, 1.0f);   // coin icon
+                char num[16]; std::snprintf(num, sizeof num, "%d", currency);
+                float dx = -0.88f;
+                for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
+            }
+
             // Death flash: full-screen red overlay that fades out.
             if (death_flash > 0.0f)
                 hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.7f, 0.0f, 0.0f, clamp01(death_flash / 1.2f) * 0.6f);
