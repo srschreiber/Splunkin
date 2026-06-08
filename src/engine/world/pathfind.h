@@ -21,6 +21,11 @@ struct FlowField {
 // BFS from (goal_col, goal_row) across Open cells.
 FlowField compute_flow(const Map& map, int goal_col, int goal_row);
 
+// Multi-source BFS from several goal tiles at once (e.g. all players). Each cell's
+// distance is to the NEAREST goal, so enemies descending the gradient head for the
+// closest player automatically. `cols`/`rows` are parallel arrays of goal tiles.
+FlowField compute_flow_multi(const Map& map, const std::vector<int>& cols, const std::vector<int>& rows);
+
 // Picks one neighbor of (col,row) whose distance is strictly lower (a step that
 // gets closer to the goal), chosen at RANDOM among the tied-best options so a
 // crowd of enemies fans out across equal paths instead of single-filing. Returns

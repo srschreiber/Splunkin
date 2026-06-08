@@ -19,14 +19,16 @@ static_assert(dc::world::EYE_HEIGHT < dc::world::WALL_HEIGHT - 0.2f,
 
 inline constexpr float PLAYER_MAX_HEALTH = 100.0f;
 
-// A shield's defensive stats. A frontal blocked hit takes max(0, dmg - block_power);
-// block_cos is cos(half-angle) of the arc it covers (smaller cos = wider arc).
+// A shield's defensive stats. A frontal block negates damage by SPENDING stamina:
+// it costs block_rate stamina per point of damage. With enough stamina the hit is
+// fully negated; if stamina runs out, the unaffordable remainder gets through at
+// full strength (taken = shortfall_stamina / block_rate). block_cos is cos(half-angle)
+// of the arc it covers (smaller cos = wider arc).
 struct Shield {
-    float block_power     = 6.0f;   // damage subtracted on a frontal block
+    float block_rate      = 0.5f;   // stamina spent per point of damage blocked
     float block_cos       = 0.6f;   // arccos(.6) ~53 deg half-cone
     float block_speed     = 1.0f;   // raise-animation playback multiplier (lower = slower to ready)
     float stamina_per_sec = 8.0f;   // drained per second while the shield is up
-    float stamina_per_hit = 15.0f;  // extra stamina drained each time it blocks a hit
 };
 
 // A weapon's offensive stats. Its attack_bonus is ADDED to the player's base

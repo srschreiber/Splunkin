@@ -6,6 +6,7 @@ uniform vec3 u_emissive;      // self-lit term (not attenuated)
 uniform vec3 u_light_pos;     // nearest torch flame position
 uniform vec3 u_light_color;   // torch color * flicker intensity (0 = no torch)
 uniform float u_light_radius; // falloff distance
+uniform float u_alpha;        // 1 = opaque; <1 for ghosts (dead players)
 out vec4 frag_color;
 void main() {
     vec3 n = normalize(v_normal);
@@ -24,5 +25,5 @@ void main() {
     vec3 point = u_light_color * ndl * atten;
 
     vec3 lit = u_color * shade + u_color * point + u_emissive;
-    frag_color = vec4(lit, 1.0);
+    frag_color = vec4(lit, u_alpha);
 }

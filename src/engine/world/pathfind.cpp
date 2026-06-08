@@ -3,17 +3,23 @@
 
 namespace dc::world {
 
-FlowField compute_flow(const Map& map, int goal_col, int goal_row) {
+FlowField compute_flow_multi(const Map& map, const std::vector<int>& cols, const std::vector<int>& rows) {
     FlowField f;
     f.width = map.width;
     f.height = map.height;
     f.dist.assign(static_cast<std::size_t>(map.width) * map.height, -1);
-    if (map.at(goal_col, goal_row) == Cell::Solid) return f;   // goal in a wall: all -1
 
     auto idx = [&](int c, int r) { return static_cast<std::size_t>(r) * f.width + c; };
     std::queue<std::pair<int,int>> q;
-    f.dist[idx(goal_col, goal_row)] = 0;
-    q.push({goal_col, goal_row});
+    const std::size_t ng = (cols.size() < rows.size()) ? cols.size() : rows.size();
+    for (std::size_t i = 0; i < ng; ++i) {   // seed BFS from every goal at distance 0
+        const int c = cols[i], r = rows[i];
+        if (c < 0 || r < 0 || c >= f.width || r >= f.height) continue;
+        if (map.at(c, r) == Cell::Solid) continue;
+        if (f.dist[idx(c, r)] != -1) continue;
+        f.dist[idx(c, r)] = 0;
+        q.push({c, r});
+    }
 
     const int dc[4] = { 1, -1, 0, 0 };
     const int dr[4] = { 0, 0, 1, -1 };
@@ -30,6 +36,10 @@ FlowField compute_flow(const Map& map, int goal_col, int goal_row) {
         }
     }
     return f;
+}
+
+FlowField compute_flow(const Map& map, int goal_col, int goal_row) {
+    return compute_flow_multi(map, { goal_col }, { goal_row });
 }
 
 bool flow_step(const FlowField& flow, int col, int row,

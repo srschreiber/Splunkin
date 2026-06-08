@@ -20,8 +20,25 @@ inline constexpr float ENEMY_ATTACK_WINDUP   = 0.4f;   // swing time before the 
 inline constexpr float ENEMY_STAGGER_SPEED   = 0.5f;   // above this knock speed, AI is suppressed
 inline constexpr float BLOCK_KNOCK_ABSORB    = 0.2f;   // knockback kept when a hit is blocked
 
+// Ranged enemy: keeps its distance and shoots spheres. It advances to RANGED_STANDOFF,
+// backs up (still firing) if a target gets closer than standoff - margin, and drops a
+// target that leaves RANGED_LEASH (out of range = unavailable -> retarget).
+inline constexpr float RANGED_STANDOFF      = 6.0f;    // preferred distance from the target
+inline constexpr float RANGED_BACKUP_MARGIN = 1.5f;    // hysteresis band around the standoff
+inline constexpr float RANGED_BACKUP_SPEED  = 1.4f;    // retreat speed (slower than its advance, ENEMY_SPEED)
+inline constexpr float RANGED_LEASH         = 13.0f;   // give up on a target past this
+inline constexpr float RANGED_FIRE_INTERVAL = 1.3f;    // seconds between shots (attack speed)
+inline constexpr float RANGED_DAMAGE        = 7.0f;
+inline constexpr float RANGED_KNOCKBACK     = 3.0f;
+inline constexpr float RANGED_SHOT_SPEED    = 9.0f;    // projectile travel speed (units/s)
+inline constexpr float RANGED_SHOT_RADIUS   = 0.35f;   // sphere size + hit radius
+inline constexpr float RANGED_SHOT_LIFE     = 2.5f;    // seconds before a shot fizzles
+inline constexpr float PROJECTILE_HIT_DIST  = 0.6f;    // shot within this of a player connects
+
 // The player's state this frame, for combat resolution.
 struct PlayerCombat {
+    uint32_t id;          // stable player id (host = 0, clients 1..); enemies target by id
+    bool  alive = true;   // dead players (ghosts) are ignored by enemies and deal no damage
     vec3  pos;            // player position (eye)
     float yaw;
     bool  blocking;
@@ -31,10 +48,12 @@ struct PlayerCombat {
     float strike_damage;
     float strike_knockback;  // the player's knockback stat (applied to enemies hit)
     float weight;            // the player's weight (resists incoming knockback)
-    // Shield: a blocked hit (attacker within the frontal cone) takes
-    // max(0, damage - block_power) and most of its knockback absorbed.
-    float block_cos;         // cos(half-angle) of the shield's frontal arc
-    float block_power;       // damage the shield subtracts when it blocks
+    // Shield: a frontal blocked hit spends block_rate stamina per point of damage to
+    // negate it; with enough `stamina` the hit is fully negated (and its knockback
+    // scaled away), otherwise the unaffordable remainder gets through at full damage.
+    float block_cos = 0.0f;  // cos(half-angle) of the shield's frontal arc
+    float block_rate = 0.0f; // stamina per point of damage blocked (0 = no shield)
+    float stamina   = 0.0f;  // stamina available to spend blocking this tick
 };
 
 // What the enemy tick did to the player (so the caller can apply it — keeps the
@@ -42,20 +61,33 @@ struct PlayerCombat {
 struct EnemyHitPlayer {
     float damage  = 0.0f;
     vec3  knock   = {0.0f, 0.0f, 0.0f};  // impulse to add to the player's knock_vel
-    bool  hit     = false;               // an UNBLOCKED hit landed (-> red flash)
-    bool  blocked = false;               // a hit was absorbed by the shield (-> no red flash)
+    bool  hit     = false;               // damage got through (-> red flash)
+    bool  blocked = false;               // the shield absorbed some damage this tick
+    float stamina_cost = 0.0f;           // stamina the shield spent blocking (caller deducts)
 };
 
-// Advance all enemies one tick: resolve the player's strike (damage + knockback +
-// flash on enemies), then pathfind/move toward the player and attack when in
-// range. Returns what was done to the player. Pure over (list, map, flow, player)
-// + list.rng. Dead enemies are removed.
-// `deaths` (optional): each enemy removed this tick appends its position as 3
-// floats (x,y,z), so the caller can drop loot (coins) where it died. (Flat floats
-// because cglm's vec3 is a C array and can't go in a std::vector.)
-EnemyHitPlayer update_enemies(EntityList& list, const dc::world::Map& map,
-                              const dc::world::FlowField& flow, const PlayerCombat& pc, float dt,
-                              std::vector<float>* deaths = nullptr);
+// Advance enemies one tick against ALL players (co-op). Each player's strike is
+// resolved against enemies; then every enemy pursues its committed target player
+// (descending THAT player's flow field) and attacks it in range. `flows` is parallel
+// to `players` (flows[i] is the distance field to players[i]); an enemy with no
+// committed target picks the nearest, and retarget-on-hit switches it to the player
+// who just struck it. `out` is sized to players.size(); out[i] is what was done to
+// player i (damage/knock/flash). Pure over (list, map, flows, players) + list.rng.
+// Dead enemies are removed. `deaths` (optional): each removed enemy appends its
+// position as 3 floats (x,y,z) so the caller can drop loot.
+void update_enemies(EntityList& list, const dc::world::Map& map,
+                    const std::vector<dc::world::FlowField>& flows,
+                    const std::vector<PlayerCombat>& players,
+                    std::vector<EnemyHitPlayer>& out, float dt,
+                    std::vector<float>* deaths = nullptr);
+
+// Advance in-flight projectiles (host-authoritative): move, expire by lifetime, die
+// on walls, and on reaching a LIVING player deal damage + knockback into out[i]
+// (parallel to `players`, same convention as update_enemies). Pure over
+// (list.projectiles, map, players). Spent shots are removed.
+void update_projectiles(EntityList& list, const dc::world::Map& map,
+                        const std::vector<PlayerCombat>& players,
+                        std::vector<EnemyHitPlayer>& out, float dt);
 
 // Damage + knock every enemy within `radius` (xz) of `center`, skipping ids already
 // in `already_hit` (so a moving hazard hits each enemy once per pass). Marks the

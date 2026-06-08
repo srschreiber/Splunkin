@@ -21,6 +21,7 @@ bool Renderer::init() {
     model_viewproj_loc     = glGetUniformLocation(model_program, "u_viewproj");
     model_model_loc        = glGetUniformLocation(model_program, "u_model");
     model_color_loc        = glGetUniformLocation(model_program, "u_color");
+    model_alpha_loc        = glGetUniformLocation(model_program, "u_alpha");
     model_emissive_loc     = glGetUniformLocation(model_program, "u_emissive");
     model_light_pos_loc    = glGetUniformLocation(model_program, "u_light_pos");
     model_light_color_loc  = glGetUniformLocation(model_program, "u_light_color");
@@ -96,9 +97,12 @@ void Renderer::draw_map(const Mesh& mesh) {
 }
 
 void Renderer::draw_model(const Model& model, const std::vector<Mat4>& part_world,
-                          mat4 placement, vec3 color) {
+                          mat4 placement, vec3 color, float alpha) {
     glUseProgram(model_program);
     glUniformMatrix4fv(model_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
+    glUniform1f(model_alpha_loc, alpha);
+    const bool ghost = alpha < 0.999f;   // dead players: alpha-blend over the scene
+    if (ghost) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
     const size_t count = model.parts.size() < part_world.size()
                        ? model.parts.size() : part_world.size();
     for (size_t i = 0; i < count; ++i) {
@@ -117,6 +121,7 @@ void Renderer::draw_model(const Model& model, const std::vector<Mat4>& part_worl
         glDrawElements(GL_TRIANGLES, model.parts[i].index_count, GL_UNSIGNED_INT, nullptr);
     }
     glBindVertexArray(0);
+    if (ghost) glDisable(GL_BLEND);   // restore the opaque default
 }
 
 void Renderer::draw_particles(const std::vector<float>& verts) {

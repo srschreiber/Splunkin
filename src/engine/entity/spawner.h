@@ -13,6 +13,7 @@ struct Spawner {
     float    radius    = 4.0f;                // spawn within this radius
     float    rate      = 0.5f;                // entities per second
     int      max_alive = 8;                   // stop emitting past this many entities total
+    float    ranged_fraction = 0.0f;          // chance each spawn is a ranged enemy (vs melee)
     float    accum     = 0.0f;                // fractional spawns owed
     uint32_t rng       = 0x2545f491u;
 

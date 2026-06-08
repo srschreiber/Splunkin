@@ -10,9 +10,7 @@ void Input::begin_frame() {
 
 void Input::on_event(const SDL_Event& e) {
     if (e.type == SDL_EVENT_QUIT) {
-        quit = true;
-    } else if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) {
-        quit = true;
+        quit = true;   // window close button; ESC is handled by the game as a pause toggle
     } else if (e.type == SDL_EVENT_MOUSE_MOTION) {
         mouse_dx += e.motion.xrel;
         mouse_dy += e.motion.yrel;

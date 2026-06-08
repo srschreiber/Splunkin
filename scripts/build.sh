@@ -15,15 +15,25 @@ SDL_LIBS="$(pkg-config --static --libs sdl3)"
 CXX=${CXX:-clang++}
 STD="-std=c++17"
 WARN="-Wall -Wextra"
-INC="-I$ROOT/src -I$TP -I$TP/glad/include -I$PREFIX/include $SDL_CFLAGS"
+INC="-I$ROOT/src -I$TP -I$TP/glad/include -I$TP/enet/include -I$PREFIX/include $SDL_CFLAGS"
 
 # Compile GLAD (C) once.
 if [ ! -f "$OBJ/gl.o" ]; then
   clang -c "$TP/glad/src/gl.c" -I"$TP/glad/include" -o "$OBJ/gl.o"
 fi
 
+# Compile enet (C) once. (unix.c covers macOS/Linux; Windows builds use win32.c.)
+ENET_OBJS=""
+for f in callbacks compress host list packet peer protocol unix; do
+  eo="$OBJ/enet_$f.o"
+  if [ ! -f "$eo" ]; then
+    clang -c "$TP/enet/$f.c" -I"$TP/enet/include" -o "$eo"
+  fi
+  ENET_OBJS="$ENET_OBJS $eo"
+done
+
 # Compile all C++ sources.
-OBJS="$OBJ/gl.o"
+OBJS="$OBJ/gl.o $ENET_OBJS"
 while IFS= read -r src; do
   obj="$OBJ/$(echo "$src" | sed 's#[/.]#_#g').o"
   "$CXX" $STD $WARN $INC -c "$src" -o "$obj"

@@ -21,7 +21,11 @@ void Spawner::update(float dt, EntityList& list, const dc::world::Map& map) {
             const float z   = pos[2] + std::sin(ang) * r;
             const int col = static_cast<int>(x / dc::world::TILE);
             const int row = static_cast<int>(z / dc::world::TILE);
-            if (map.at(col, row) == dc::world::Cell::Open) { list.spawn_enemy(x, z); break; }
+            if (map.at(col, row) == dc::world::Cell::Open) {
+                const EnemyKind kind = (rand01(rng) < ranged_fraction) ? EnemyKind::Ranged : EnemyKind::Melee;
+                list.spawn_enemy(x, z, kind);
+                break;
+            }
         }
     }
 }

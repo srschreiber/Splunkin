@@ -17,7 +17,7 @@ struct Renderer {
     uint32_t particle_program = 0;// additive billboards
     uint32_t texture = 0;         // GL_TEXTURE_2D_ARRAY for the map
     int world_viewproj_loc = -1;
-    int model_viewproj_loc = -1, model_model_loc = -1, model_color_loc = -1, model_emissive_loc = -1;
+    int model_viewproj_loc = -1, model_model_loc = -1, model_color_loc = -1, model_emissive_loc = -1, model_alpha_loc = -1;
     int particle_viewproj_loc = -1;
     // Point-light uniforms (one nearest torch), looked up per program.
     int world_light_pos_loc = -1, world_light_color_loc = -1, world_light_radius_loc = -1;
@@ -35,7 +35,8 @@ struct Renderer {
     // Draw the textured map mesh.
     void draw_map(const Mesh& mesh);
     // Draw a model: each part i uses placement * part_world[i] (from pose_model), flat color.
-    void draw_model(const Model& model, const std::vector<Mat4>& part_world, mat4 placement, vec3 color);
+    // alpha < 1 alpha-blends the model (used to render dead players as faint ghosts).
+    void draw_model(const Model& model, const std::vector<Mat4>& part_world, mat4 placement, vec3 color, float alpha = 1.0f);
     // Draw pre-billboarded particle vertices (7 floats each: pos3 + rgba). Additive, depth-write off.
     void draw_particles(const std::vector<float>& verts);
     // Draw 2D HUD triangles in NDC (7 floats each: pos3 + rgba). Alpha-blended, no depth.
