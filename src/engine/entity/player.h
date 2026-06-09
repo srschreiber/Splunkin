@@ -2,6 +2,7 @@
 #include <cglm/cglm.h>
 #include <optional>
 #include "engine/world/map.h"
+#include "engine/world/terrain.h"
 #include "engine/entity/entity.h"
 
 namespace dc::entity {
@@ -97,9 +98,10 @@ struct Player {
     // Mouse delta (pixels): yaw += dx*sens, pitch -= dy*sens, clamp pitch.
     void add_look(float dx, float dy);
     // forward/strafe in {-1,0,1}; jump=true attempts a jump this frame.
-    // Horizontal motion slides against the map; vertical applies gravity/jump.
+    // Horizontal motion slides against the map's walls; vertical applies gravity/jump
+    // and lands on the terrain height under the player (open-top, no ceiling).
     void update(float forward, float strafe, bool jump, float dt,
-                const dc::world::Map& map);
+                const dc::world::Map& map, const dc::world::Terrain& terrain);
 };
 
 } // namespace dc::entity

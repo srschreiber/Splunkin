@@ -22,7 +22,7 @@ void Player::add_look(float dx, float dy) {
 }
 
 void Player::update(float forward, float strafe, bool jump, float dt,
-                    const dc::world::Map& map) {
+                    const dc::world::Map& map, const dc::world::Terrain& terrain) {
     // --- Horizontal intent ---
     vec3 up = {0.0f, 1.0f, 0.0f};
     vec3 walk = { std::cos(yaw), 0.0f, std::sin(yaw) };
@@ -57,7 +57,7 @@ void Player::update(float forward, float strafe, bool jump, float dt,
     knock_vel[0] *= kdamp;
     knock_vel[2] *= kdamp;
 
-    // --- Vertical: gravity + jump ---
+    // --- Vertical: gravity + jump, landing on the terrain under us (open-top) ---
     if (jump && on_ground) {
         vel_y = JUMP_SPEED;
         on_ground = false;
@@ -65,13 +65,10 @@ void Player::update(float forward, float strafe, bool jump, float dt,
     vel_y -= GRAVITY * dt;
     position[1] += vel_y * dt;
 
-    const float ceil_limit = dc::world::WALL_HEIGHT - 0.2f;
-    if (position[1] > ceil_limit) {
-        position[1] = ceil_limit;
-        vel_y = 0.0f;   // head bonk: stop vertical motion
-    }
-    if (position[1] <= dc::world::EYE_HEIGHT) {
-        position[1] = dc::world::EYE_HEIGHT;
+    // Eye floor = ground height at our xz + eye offset. Land/walk on it.
+    const float eye_floor = terrain.height(position[0], position[2]) + dc::world::EYE_HEIGHT;
+    if (position[1] <= eye_floor) {
+        position[1] = eye_floor;
         vel_y = 0.0f;
         on_ground = true;
     }

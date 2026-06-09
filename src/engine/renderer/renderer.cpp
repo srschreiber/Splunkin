@@ -12,6 +12,8 @@ bool Renderer::init() {
     world_program = load_program("assets/shaders/world.vert", "assets/shaders/world.frag");
     if (!world_program) return false;
     world_viewproj_loc     = glGetUniformLocation(world_program, "u_viewproj");
+    world_use_solid_loc    = glGetUniformLocation(world_program, "u_use_solid");
+    world_solid_loc        = glGetUniformLocation(world_program, "u_solid");
     world_light_pos_loc    = glGetUniformLocation(world_program, "u_light_pos");
     world_light_color_loc  = glGetUniformLocation(world_program, "u_light_color");
     world_light_radius_loc = glGetUniformLocation(world_program, "u_light_radius");
@@ -91,8 +93,17 @@ void Renderer::set_light(const vec3 pos, const vec3 color, float radius) {
 void Renderer::draw_map(const Mesh& mesh) {
     glUseProgram(world_program);
     glUniformMatrix4fv(world_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
+    glUniform1i(world_use_solid_loc, 0);   // textured
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+    mesh.draw();
+}
+
+void Renderer::draw_terrain(const Mesh& mesh, const vec3 color) {
+    glUseProgram(world_program);
+    glUniformMatrix4fv(world_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
+    glUniform1i(world_use_solid_loc, 1);   // solid color (ignores the texture)
+    glUniform3fv(world_solid_loc, 1, color);
     mesh.draw();
 }
 

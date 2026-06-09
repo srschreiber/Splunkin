@@ -29,6 +29,8 @@ build_and_run "$ROOT/tests/torch_test.cpp" \
 
 build_and_run "$ROOT/tests/particles_test.cpp" "$ROOT/src/engine/fx/particles.cpp"
 
+build_and_run "$ROOT/tests/terrain_test.cpp" "$ROOT/src/engine/world/terrain.cpp"
+
 build_and_run "$ROOT/tests/pathfind_test.cpp" \
   "$ROOT/src/engine/world/pathfind.cpp" "$ROOT/src/engine/world/map.cpp"
 
@@ -42,18 +44,20 @@ build_and_run "$ROOT/tests/spawner_test.cpp" \
   "$ROOT/src/engine/world/map.cpp"
 
 build_and_run "$ROOT/tests/map_mesh_test.cpp" \
-  "$ROOT/src/engine/world/map_mesh.cpp" "$ROOT/src/engine/world/map.cpp"
+  "$ROOT/src/engine/world/map_mesh.cpp" "$ROOT/src/engine/world/map.cpp" \
+  "$ROOT/src/engine/world/terrain.cpp"
 
 build_and_run "$ROOT/tests/camera_test.cpp" \
   "$ROOT/src/engine/renderer/camera.cpp" "$ROOT/src/engine/entity/player.cpp" \
-  "$ROOT/src/engine/world/collision.cpp" "$ROOT/src/engine/world/map.cpp"
+  "$ROOT/src/engine/world/collision.cpp" "$ROOT/src/engine/world/map.cpp" \
+  "$ROOT/src/engine/world/terrain.cpp"
 
 build_and_run "$ROOT/tests/collision_test.cpp" \
   "$ROOT/src/engine/world/collision.cpp" "$ROOT/src/engine/world/map.cpp"
 
 build_and_run "$ROOT/tests/player_test.cpp" \
   "$ROOT/src/engine/entity/player.cpp" "$ROOT/src/engine/world/collision.cpp" \
-  "$ROOT/src/engine/world/map.cpp"
+  "$ROOT/src/engine/world/map.cpp" "$ROOT/src/engine/world/terrain.cpp"
 
 build_and_run "$ROOT/tests/texture_decode_test.cpp" "$ROOT/src/engine/renderer/stb_image_impl.cpp"
 

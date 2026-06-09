@@ -22,6 +22,7 @@ static const char* ROOM =
 int main() {
     auto map = dc::world::parse_map(ROOM);
     assert(map.has_value());
+    dc::world::Terrain flat; flat.base_amp = 0.0f; flat.hill_amp = 0.0f;   // height()==0 -> flat ground
 
     // add_look clamps pitch to +-89 deg.
     {
@@ -38,7 +39,7 @@ int main() {
         Player p;
         p.position[0] = 2.5f; p.position[1] = EYE_HEIGHT; p.position[2] = 7.0f;
         p.yaw = static_cast<float>(M_PI);   // walk dir = -X
-        p.update(1.0f, 0.0f, false, 0.1f, *map);   // 0.4 units toward wall
+        p.update(1.0f, 0.0f, false, 0.1f, *map, flat);   // 0.4 units toward wall
         assert(approx(p.position[0], 2.5f));        // blocked, did not move
     }
 
@@ -48,7 +49,7 @@ int main() {
         Player p;
         p.position[0] = 2.5f; p.position[1] = EYE_HEIGHT; p.position[2] = 7.0f;
         p.yaw = static_cast<float>(M_PI / 2.0);   // walk dir = +Z
-        p.update(1.0f, 0.0f, false, 0.1f, *map);
+        p.update(1.0f, 0.0f, false, 0.1f, *map, flat);
         assert(p.position[2] > 7.0f);             // moved along Z
         assert(approx(p.position[0], 2.5f));      // X unchanged
     }
@@ -60,7 +61,7 @@ int main() {
         p.yaw = 0.0f;
         const float x0 = p.position[0], z0 = p.position[2];
         const float dt = 0.05f;
-        p.update(1.0f, 1.0f, false, dt, *map);    // forward + strafe
+        p.update(1.0f, 1.0f, false, dt, *map, flat);    // forward + strafe
         const float dx = p.position[0] - x0, dz = p.position[2] - z0;
         assert(approx(std::sqrt(dx * dx + dz * dz), MOVE_SPEED * dt));
     }
@@ -70,7 +71,7 @@ int main() {
         Player p;
         p.position[0] = 10.0f; p.position[1] = EYE_HEIGHT + 2.0f; p.position[2] = 7.0f;
         p.on_ground = false;
-        for (int i = 0; i < 200; ++i) p.update(0.0f, 0.0f, false, 0.05f, *map);
+        for (int i = 0; i < 200; ++i) p.update(0.0f, 0.0f, false, 0.05f, *map, flat);
         assert(approx(p.position[1], EYE_HEIGHT));
         assert(p.on_ground == true);
     }
@@ -80,12 +81,12 @@ int main() {
         Player p;
         p.position[0] = 10.0f; p.position[1] = EYE_HEIGHT; p.position[2] = 7.0f;
         p.on_ground = true;
-        p.update(0.0f, 0.0f, true, 0.1f, *map);   // jump from ground
+        p.update(0.0f, 0.0f, true, 0.1f, *map, flat);   // jump from ground
         assert(p.on_ground == false);
         assert(p.position[1] > EYE_HEIGHT);
         const float v1 = p.vel_y;                 // upward, reduced by one g*dt
         assert(v1 > 0.0f);
-        p.update(0.0f, 0.0f, true, 0.1f, *map);   // jump pressed again mid-air
+        p.update(0.0f, 0.0f, true, 0.1f, *map, flat);   // jump pressed again mid-air
         assert(p.vel_y < v1);                     // no re-launch; gravity reduced it
     }
 

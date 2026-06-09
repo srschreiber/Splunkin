@@ -16,7 +16,7 @@ struct Renderer {
     uint32_t model_program = 0;   // flat-lit model
     uint32_t particle_program = 0;// additive billboards
     uint32_t texture = 0;         // GL_TEXTURE_2D_ARRAY for the map
-    int world_viewproj_loc = -1;
+    int world_viewproj_loc = -1, world_use_solid_loc = -1, world_solid_loc = -1;
     int model_viewproj_loc = -1, model_model_loc = -1, model_color_loc = -1, model_emissive_loc = -1, model_alpha_loc = -1;
     int particle_viewproj_loc = -1;
     // Point-light uniforms (one nearest torch), looked up per program.
@@ -32,8 +32,10 @@ struct Renderer {
     void begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player, float dt, int fb_w, int fb_h);
     // Set the single point light for this frame on both lit programs. color=0 -> no torch.
     void set_light(const vec3 pos, const vec3 color, float radius);
-    // Draw the textured map mesh.
+    // Draw the textured wall mesh.
     void draw_map(const Mesh& mesh);
+    // Draw the solid-color terrain floor mesh (same world program, no texture).
+    void draw_terrain(const Mesh& mesh, const vec3 color);
     // Draw a model: each part i uses placement * part_world[i] (from pose_model), flat color.
     // alpha < 1 alpha-blends the model (used to render dead players as faint ghosts).
     void draw_model(const Model& model, const std::vector<Mat4>& part_world, mat4 placement, vec3 color, float alpha = 1.0f);

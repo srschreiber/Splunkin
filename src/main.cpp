@@ -171,8 +171,15 @@ int main(int argc, char** argv) {
     dc::renderer::Renderer renderer;
     if (!renderer.init()) { window.shutdown(); return 1; }
 
+    // Procedural terrain: gentle hills under the open floor (seed -> identical on
+    // host + clients). Walls/gameplay come from the tile map; this only shapes height.
+    dc::world::Terrain terrain;
+    const vec3 terrain_color = { 0.32f, 0.40f, 0.26f };   // mossy green-brown
+
     dc::renderer::Mesh mesh;
-    mesh.upload(dc::world::build_map_mesh(*map));
+    mesh.upload(dc::world::build_map_mesh(*map, terrain));   // walls (textured)
+    dc::renderer::Mesh terrain_mesh;
+    terrain_mesh.upload(dc::world::build_terrain_mesh(*map, terrain));   // floor (solid color)
 
     dc::renderer::Model player_model;
     player_model.upload(model_data);
@@ -574,7 +581,7 @@ int main(int argc, char** argv) {
         // Run while holding Shift (needs stamina). Drains stamina (applied below).
         bool sprinting = moving && !exhausted && input.key_down(SDL_SCANCODE_LSHIFT);
         player.speed = sprinting ? dc::entity::RUN_SPEED : dc::entity::MOVE_SPEED;
-        player.update(forward, strafe, jump, dt, *map);
+        player.update(forward, strafe, jump, dt, *map, terrain);
 
         // Walk clock: advance while moving (faster while sprinting), reset when idle.
         if (moving) anim_time += dt * (sprinting ? 1.7f : 1.0f); else anim_time = 0.0f;
@@ -587,7 +594,7 @@ int main(int argc, char** argv) {
             // (The combined snapshot is broadcast later, after enemies/coins update.)
             for (auto& hc : host_clients) {
                 hc.body.yaw = hc.input.yaw; hc.body.pitch = hc.input.pitch;
-                hc.body.update(hc.input.forward, hc.input.strafe, hc.input.jump != 0, dt, *map);
+                hc.body.update(hc.input.forward, hc.input.strafe, hc.input.jump != 0, dt, *map, terrain);
                 bool m = (hc.input.forward != 0.0f || hc.input.strafe != 0.0f);
                 hc.anim_time = m ? hc.anim_time + dt : 0.0f;
                 if (hc.body.hit_flash > 0.0f) hc.body.hit_flash -= dt;   // decay the flash
@@ -1215,6 +1222,7 @@ int main(int argc, char** argv) {
         renderer.begin_frame(*map, camera, player, dt, w, h);
         renderer.set_light(light_pos, light_color, LIGHT_RADIUS);
         renderer.draw_map(mesh);
+        renderer.draw_terrain(terrain_mesh, terrain_color);
         const float GHOST_ALPHA = 0.18f;               // dead players: faint translucent body
         vec3 player_color = { 0.80f, 0.45f, 0.35f };
         if (dead) {
@@ -1301,7 +1309,8 @@ int main(int argc, char** argv) {
             dc::renderer::pose_model(chest_data, cl, 0.0f, chest_part_world);
             mat4 cplace;
             glm_mat4_identity(cplace);
-            vec3 cpos = { (ch.col + 0.5f) * dc::world::TILE, 0.0f, (ch.row + 0.5f) * dc::world::TILE };
+            float ccx = (ch.col + 0.5f) * dc::world::TILE, ccz = (ch.row + 0.5f) * dc::world::TILE;
+            vec3 cpos = { ccx, terrain.height(ccx, ccz), ccz };   // sit on the terrain surface
             glm_translate(cplace, cpos);            // move to the tile (origin at the chest's base)
             vec3 cscale = { 0.75f, 0.75f, 0.75f };
             glm_scale(cplace, cscale);              // half size, scaled around its base -> stays on floor
@@ -1320,7 +1329,7 @@ int main(int argc, char** argv) {
             dc::renderer::pose_model(model_data, el, 0.0f, enemy_part_world);
             mat4 eplace;
             glm_mat4_identity(eplace);
-            vec3 epos = { en.position[0], MODEL_FOOT_LIFT, en.position[2] };
+            vec3 epos = { en.position[0], terrain.height(en.position[0], en.position[2]) + MODEL_FOOT_LIFT, en.position[2] };
             glm_translate(eplace, epos);
             glm_rotate_y(eplace, -en.yaw + MODEL_YAW_OFFSET, eplace);
             vec3 col; glm_vec3_copy(en.kind == dc::entity::EnemyKind::Ranged ? ranged_color : enemy_color, col);
@@ -1429,7 +1438,7 @@ int main(int argc, char** argv) {
             const float cs = 0.25f;
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
             for (const auto& c : coins) {
-                float bob = 0.45f + 0.08f * std::sin(t_now * 5.0f + c.pos[0]);
+                float bob = terrain.height(c.pos[0], c.pos[2]) + 0.45f + 0.08f * std::sin(t_now * 5.0f + c.pos[0]);
                 vec3 ctr = { c.pos[0], bob, c.pos[2] };
                 auto P = [&](float ax, float ay) {
                     particle_verts.insert(particle_verts.end(), {
@@ -1490,7 +1499,7 @@ int main(int argc, char** argv) {
                 const int n = static_cast<int>(std::strlen(num));
                 const float dw = 0.6f, dh = 1.0f, dt = 0.16f, gap = dw + 0.3f;
                 const float total = n * gap - 0.3f;
-                vec3 base = { cx, 2.3f, cz };                          // float above the chest
+                vec3 base = { cx, terrain.height(cx, cz) + 2.3f, cz };   // float above the chest
                 for (int i = 0; i < n; ++i) {
                     float ox = -total * 0.5f + i * gap;                // center the number, per-digit u offset
                     seven_seg(num[i] - '0', dw, dh, dt, [&](float u0, float v0, float u1, float v1) {
@@ -1653,6 +1662,7 @@ int main(int argc, char** argv) {
     player_model.destroy();
     sword_model.destroy();
     mesh.destroy();
+    terrain_mesh.destroy();
     renderer.shutdown();
     net.shutdown();
     window.shutdown();
