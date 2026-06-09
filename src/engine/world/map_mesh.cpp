@@ -63,24 +63,30 @@ std::vector<float> build_map_mesh(const Map& map, const Terrain& terrain) {
             if (renders_open(map, col, row)) continue;   // floor is the terrain mesh; no ceiling
             const float x0 = col * T, x1 = (col + 1) * T;
             const float z0 = row * T, z1 = (row + 1) * T;
-            // Anchor the wall on the ground at this Solid cell's terrain height.
-            const float y0 = terrain.height((col + 0.5f) * T, (row + 0.5f) * T);
-            const float y1 = y0 + H;
+            // Each wall's bottom corners follow the terrain at the SHARED edge (so they
+            // meet the adjacent floor exactly), dropped by a skirt to cover any mid-edge
+            // dip; the top rides H above the ground. Closes the floor/wall seam gap.
+            const float SKIRT = 0.4f;
+            auto gy = [&](float x, float z) { return terrain.height(x, z); };
 
-            if (renders_open(map, col, row - 1)) {   // -Z
-                float p0[3]{x1,y0,z0}, p1[3]{x0,y0,z0}, p2[3]{x0,y1,z0}, p3[3]{x1,y1,z0};
+            if (renders_open(map, col, row - 1)) {   // -Z (edge at z0, corners x1,x0)
+                float p0[3]{x1, gy(x1,z0)-SKIRT, z0}, p1[3]{x0, gy(x0,z0)-SKIRT, z0};
+                float p2[3]{x0, gy(x0,z0)+H, z0},     p3[3]{x1, gy(x1,z0)+H, z0};
                 push_quad(v, p0,p1,p2,p3, 0,0,-1, 1.0f, VWALL, LAYER_WALL);
             }
-            if (renders_open(map, col, row + 1)) {   // +Z
-                float p0[3]{x0,y0,z1}, p1[3]{x1,y0,z1}, p2[3]{x1,y1,z1}, p3[3]{x0,y1,z1};
+            if (renders_open(map, col, row + 1)) {   // +Z (edge at z1, corners x0,x1)
+                float p0[3]{x0, gy(x0,z1)-SKIRT, z1}, p1[3]{x1, gy(x1,z1)-SKIRT, z1};
+                float p2[3]{x1, gy(x1,z1)+H, z1},     p3[3]{x0, gy(x0,z1)+H, z1};
                 push_quad(v, p0,p1,p2,p3, 0,0,1, 1.0f, VWALL, LAYER_WALL);
             }
-            if (renders_open(map, col - 1, row)) {   // -X
-                float p0[3]{x0,y0,z0}, p1[3]{x0,y0,z1}, p2[3]{x0,y1,z1}, p3[3]{x0,y1,z0};
+            if (renders_open(map, col - 1, row)) {   // -X (edge at x0, corners z0,z1)
+                float p0[3]{x0, gy(x0,z0)-SKIRT, z0}, p1[3]{x0, gy(x0,z1)-SKIRT, z1};
+                float p2[3]{x0, gy(x0,z1)+H, z1},     p3[3]{x0, gy(x0,z0)+H, z0};
                 push_quad(v, p0,p1,p2,p3, -1,0,0, 1.0f, VWALL, LAYER_WALL);
             }
-            if (renders_open(map, col + 1, row)) {   // +X
-                float p0[3]{x1,y0,z1}, p1[3]{x1,y0,z0}, p2[3]{x1,y1,z0}, p3[3]{x1,y1,z1};
+            if (renders_open(map, col + 1, row)) {   // +X (edge at x1, corners z1,z0)
+                float p0[3]{x1, gy(x1,z1)-SKIRT, z1}, p1[3]{x1, gy(x1,z0)-SKIRT, z0};
+                float p2[3]{x1, gy(x1,z0)+H, z0},     p3[3]{x1, gy(x1,z1)+H, z1};
                 push_quad(v, p0,p1,p2,p3, 1,0,0, 1.0f, VWALL, LAYER_WALL);
             }
         }
