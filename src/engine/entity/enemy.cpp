@@ -255,6 +255,10 @@ void update_projectiles(EntityList& list, const dc::world::Map& map,
                         const std::vector<PlayerCombat>& players,
                         std::vector<EnemyHitPlayer>& out, float dt) {
     if (out.size() < players.size()) out.resize(players.size());   // usually pre-sized by update_enemies
+    // Block stamina pool (same model as melee): a frontal shield negates damage by
+    // spending block_rate stamina per point. Drawn down across multiple shots this tick.
+    std::vector<float> bsta(players.size());
+    for (std::size_t i = 0; i < players.size(); ++i) bsta[i] = players[i].stamina;
     for (std::size_t i = 0; i < list.projectiles.size();) {
         Projectile& p = list.projectiles[i];
         p.life -= dt;
@@ -268,12 +272,29 @@ void update_projectiles(EntityList& list, const dc::world::Map& map,
                 const float dx = players[pi].pos[0] - p.pos[0], dz = players[pi].pos[2] - p.pos[2];
                 const float d2 = dx * dx + dz * dz;
                 if (d2 <= PROJECTILE_HIT_DIST * PROJECTILE_HIT_DIST) {
-                    out[pi].damage += p.damage;
-                    out[pi].hit = true;
+                    const PlayerCombat& pc = players[pi];
                     const float d = std::sqrt(d2);
+                    float dmg = p.damage, kb = p.knockback;
+                    // Frontal shield blocks the shot (spends stamina to negate it).
+                    if (pc.blocking && pc.block_rate > 0.0f && d > 1e-4f) {
+                        const float front = (-dx / d) * std::cos(pc.yaw) + (-dz / d) * std::sin(pc.yaw);
+                        if (front >= pc.block_cos) {
+                            const float cost_full = pc.block_rate * dmg;
+                            const float spent = bsta[pi] < cost_full ? bsta[pi] : cost_full;
+                            bsta[pi] -= spent;
+                            const float negated = spent / pc.block_rate;
+                            const float taken = dmg > negated ? dmg - negated : 0.0f;
+                            out[pi].stamina_cost += spent;
+                            if (negated > 0.0f) out[pi].blocked = true;
+                            kb *= (dmg > 1e-6f ? taken / dmg : 0.0f);
+                            dmg = taken;
+                        }
+                    }
+                    out[pi].damage += dmg;
+                    if (dmg > 0.0f) out[pi].hit = true;
                     if (d > 1e-4f) {   // shove the player along the shot's path
-                        out[pi].knock[0] += (dx / d) * p.knockback;
-                        out[pi].knock[2] += (dz / d) * p.knockback;
+                        out[pi].knock[0] += (dx / d) * kb;
+                        out[pi].knock[2] += (dz / d) * kb;
                     }
                     gone = true;
                     break;

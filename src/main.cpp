@@ -303,7 +303,7 @@ int main(int argc, char** argv) {
         bool punching = false, blocking = false;
         float punch_time = 0.0f, block_time = 0.0f, hit_flash = 0.0f, sword_scale = 1.0f;
         // Specials (render-only mirror of the owner's thrown/orbit state).
-        bool thrown_active = false; float thrown_x = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
+        bool thrown_active = false; float thrown_x = 0.0f, thrown_y = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
         bool orbit_active = false; int orbit_count = 0; float orbit_angle = 0.0f, orbit_spin = 0.0f, orbit_radius = 0.0f;
     };
     std::vector<Remote> remotes;
@@ -502,7 +502,7 @@ int main(int argc, char** argv) {
                             r.punch_time = s.punch_time; r.block_time = s.block_time;
                             r.hit_flash = s.hit_flash; r.sword_scale = s.sword_scale;
                             r.thrown_active = s.thrown_active != 0;
-                            r.thrown_x = s.thrown_x; r.thrown_z = s.thrown_z;
+                            r.thrown_x = s.thrown_x; r.thrown_y = s.thrown_y; r.thrown_z = s.thrown_z;
                             r.thrown_spin = s.thrown_spin; r.thrown_size = s.thrown_size;
                             r.orbit_active = s.orbit_active != 0; r.orbit_count = s.orbit_count;
                             r.orbit_angle = s.orbit_angle; r.orbit_spin = s.orbit_spin; r.orbit_radius = s.orbit_radius;
@@ -662,11 +662,11 @@ int main(int argc, char** argv) {
                     thrown.active = true; thrown.returning = false;
                     thrown.traveled = 0.0f; thrown.spin = 0.0f; thrown.hit_ids.clear();
                     thrown_reset = true;
-                    thrown.pos[0] = player.position[0]; thrown.pos[1] = 0.0f; thrown.pos[2] = player.position[2];
-                    vec3 f; player.front(f);
-                    float fl = std::sqrt(f[0] * f[0] + f[2] * f[2]);
-                    thrown.dir[0] = fl > 1e-4f ? f[0] / fl : 0.0f;
-                    thrown.dir[2] = fl > 1e-4f ? f[2] / fl : 1.0f;
+                    // Launch from the eye along the full 3D look direction (yaw + pitch),
+                    // so the sword flies exactly where the crosshair points.
+                    glm_vec3_copy(player.position, thrown.pos);
+                    vec3 f; player.front(f);   // already normalized
+                    glm_vec3_copy(f, thrown.dir);
                     throw_cd = player.weapon->throw_cooldown;
                 } else {
                     player_strike = true;
@@ -837,18 +837,21 @@ int main(int argc, char** argv) {
         if (thrown.active && player.weapon) {
             const auto& w = *player.weapon;
             thrown.spin += 22.0f * dt;                 // procedural horizontal spin
+            float step = w.throw_speed * dt;
             if (!thrown.returning) {
-                float step = w.throw_speed * dt;
-                thrown.pos[0] += thrown.dir[0] * step;
+                thrown.pos[0] += thrown.dir[0] * step;   // fly straight along the 3D aim
+                thrown.pos[1] += thrown.dir[1] * step;
                 thrown.pos[2] += thrown.dir[2] * step;
                 thrown.traveled += step;
                 if (thrown.traveled >= w.throw_distance) { thrown.returning = true; thrown.hit_ids.clear(); thrown_reset = true; }
             } else {
+                // Boomerang back to the player's current eye, in 3D.
                 float hx = player.position[0] - thrown.pos[0];
+                float hy = player.position[1] - thrown.pos[1];
                 float hz = player.position[2] - thrown.pos[2];
-                float hd = std::sqrt(hx * hx + hz * hz);
+                float hd = std::sqrt(hx * hx + hy * hy + hz * hz);
                 if (hd < 1.0f) thrown.active = false;  // caught -> sword back in hand
-                else { thrown.pos[0] += hx / hd * w.throw_speed * dt; thrown.pos[2] += hz / hd * w.throw_speed * dt; }
+                else { thrown.pos[0] += hx / hd * step; thrown.pos[1] += hy / hd * step; thrown.pos[2] += hz / hd * step; }
             }
             if (net.role != dc::net::Role::Client)   // damage is host-authoritative; client flight is cosmetic
                 dc::entity::radius_attack(entities, thrown.pos, w.throw_radius * w.throw_size * player.sword_scale,
@@ -979,7 +982,7 @@ int main(int argc, char** argv) {
             if (thrown.active && player.weapon) {
                 const auto& w = *player.weapon;
                 cmd.thrown_active = 1; cmd.thrown_reset = thrown_reset ? 1 : 0;
-                cmd.thrown_x = thrown.pos[0]; cmd.thrown_z = thrown.pos[2]; cmd.thrown_spin = thrown.spin;
+                cmd.thrown_x = thrown.pos[0]; cmd.thrown_y = thrown.pos[1]; cmd.thrown_z = thrown.pos[2]; cmd.thrown_spin = thrown.spin;
                 cmd.thrown_size = w.throw_size;
                 cmd.thrown_hit_radius = w.throw_radius * w.throw_size * player.sword_scale;
                 cmd.thrown_damage = w.throw_damage * player.damage_mult;
@@ -1078,7 +1081,7 @@ int main(int argc, char** argv) {
                 r.punch_time = hc.input.punch_time; r.block_time = hc.input.block_time;
                 r.hit_flash = hc.body.hit_flash; r.sword_scale = hc.input.sword_scale;
                 r.thrown_active = hc.input.thrown_active != 0;
-                r.thrown_x = hc.input.thrown_x; r.thrown_z = hc.input.thrown_z;
+                r.thrown_x = hc.input.thrown_x; r.thrown_y = hc.input.thrown_y; r.thrown_z = hc.input.thrown_z;
                 r.thrown_spin = hc.input.thrown_spin; r.thrown_size = hc.input.thrown_size;
                 r.orbit_active = hc.input.orbit_active != 0; r.orbit_count = hc.input.orbit_count;
                 r.orbit_angle = hc.input.orbit_angle; r.orbit_spin = hc.input.orbit_spin;
@@ -1151,7 +1154,7 @@ int main(int argc, char** argv) {
               s.punch_time = punch_time; s.block_time = block_time;
               s.hit_flash = player.hit_flash; s.sword_scale = player.sword_scale;
               if (thrown.active && player.weapon) {
-                  s.thrown_active = 1; s.thrown_x = thrown.pos[0]; s.thrown_z = thrown.pos[2];
+                  s.thrown_active = 1; s.thrown_x = thrown.pos[0]; s.thrown_y = thrown.pos[1]; s.thrown_z = thrown.pos[2];
                   s.thrown_spin = thrown.spin; s.thrown_size = player.weapon->throw_size;
               }
               if (orbit.active && player.weapon) {
@@ -1172,7 +1175,7 @@ int main(int argc, char** argv) {
                 s.punching = hc.input.anim_punch; s.blocking = hc.input.anim_block;
                 s.punch_time = hc.input.punch_time; s.block_time = hc.input.block_time;
                 s.hit_flash = hc.body.hit_flash; s.sword_scale = hc.input.sword_scale;
-                s.thrown_active = hc.input.thrown_active; s.thrown_x = hc.input.thrown_x;
+                s.thrown_active = hc.input.thrown_active; s.thrown_x = hc.input.thrown_x; s.thrown_y = hc.input.thrown_y;
                 s.thrown_z = hc.input.thrown_z; s.thrown_spin = hc.input.thrown_spin; s.thrown_size = hc.input.thrown_size;
                 s.orbit_active = hc.input.orbit_active; s.orbit_count = hc.input.orbit_count;
                 s.orbit_angle = hc.input.orbit_angle; s.orbit_spin = hc.input.orbit_spin; s.orbit_radius = hc.input.orbit_radius;
@@ -1278,7 +1281,7 @@ int main(int argc, char** argv) {
         // lift the gear up + push it forward along the look so both sword and shield
         // read on screen. (Tune these two if it sits too high/low or clips.)
         if (!camera.third_person) {
-            const float VM_RAISE = 0.8f, VM_FWD = 0.5f;
+            const float VM_RAISE = 0.2f, VM_FWD = 0.5f;   // low: gear just peeks into the lower view
             vec3 fr; player.front(fr);
             vec3 d = { fr[0] * VM_FWD, VM_RAISE + fr[1] * VM_FWD, fr[2] * VM_FWD };
             mat4 off; glm_mat4_identity(off); glm_translate(off, d);
@@ -1325,7 +1328,7 @@ int main(int argc, char** argv) {
             float s = rig_scale * player.sword_scale * (player.weapon ? player.weapon->throw_size : 1.0f);
             mat4 tplace;
             glm_mat4_identity(tplace);
-            vec3 tpos = { thrown.pos[0], 0.7f, thrown.pos[2] };   // waist height
+            vec3 tpos = { thrown.pos[0], thrown.pos[1], thrown.pos[2] };   // 3D flight (follows aim)
             glm_translate(tplace, tpos);
             glm_rotate_y(tplace, thrown.spin, tplace);
             vec3 sc = { s, s, s };
@@ -1344,7 +1347,8 @@ int main(int argc, char** argv) {
             for (int i = 0; i < w.orbit_count; ++i) {
                 float a = orbit.angle + (6.2831853f * i) / w.orbit_count;
                 mat4 op; glm_mat4_identity(op);
-                vec3 opos = { player.position[0] + std::cos(a) * w.orbit_radius, 1.5f,
+                vec3 opos = { player.position[0] + std::cos(a) * w.orbit_radius,
+                              (player.position[1] - dc::world::EYE_HEIGHT) + 1.2f,   // ride the player's ground
                               player.position[2] + std::sin(a) * w.orbit_radius };
                 glm_translate(op, opos);
                 glm_rotate_y(op, orbit.spin, op);
@@ -1484,7 +1488,7 @@ int main(int argc, char** argv) {
                 if (rp.thrown_active) {
                     float s = rig_scale * rp.sword_scale * rp.thrown_size;
                     mat4 tp; glm_mat4_identity(tp);
-                    vec3 tpos = { rp.thrown_x, 0.7f, rp.thrown_z };
+                    vec3 tpos = { rp.thrown_x, rp.thrown_y, rp.thrown_z };
                     glm_translate(tp, tpos);
                     glm_rotate_y(tp, rp.thrown_spin, tp);
                     vec3 sc = { s, s, s }; glm_scale(tp, sc);
@@ -1495,7 +1499,8 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < rp.orbit_count; ++i) {
                         float a = rp.orbit_angle + (6.2831853f * i) / rp.orbit_count;
                         mat4 op; glm_mat4_identity(op);
-                        vec3 opos = { rp.pos[0] + std::cos(a) * rp.orbit_radius, 1.5f,
+                        vec3 opos = { rp.pos[0] + std::cos(a) * rp.orbit_radius,
+                                      (rp.pos[1] - dc::world::EYE_HEIGHT) + 1.2f,   // ride the remote's ground
                                       rp.pos[2] + std::sin(a) * rp.orbit_radius };
                         glm_translate(op, opos);
                         glm_rotate_y(op, rp.orbit_spin, op);
@@ -1601,12 +1606,11 @@ int main(int argc, char** argv) {
         // player (reuses the additive particle pass: 7 floats/vertex pos+rgba).
         // Red = sword/attack arc; blue = shield block arc.
         if (debug_cone) {
-            const float cy = 0.05f;                       // just above the floor
             auto draw_cone = [&](float cx, float cz, float center_yaw, float half, float radius,
                                  float r, float g, float b) {
                 const int segs = 18;
-                auto push = [&](float x, float z) {
-                    particle_verts.insert(particle_verts.end(), { x, cy, z, r, g, b, 0.22f });
+                auto push = [&](float x, float z) {   // drape just above the terrain so hills don't bury it
+                    particle_verts.insert(particle_verts.end(), { x, terrain.height(x, z) + 0.12f, z, r, g, b, 0.22f });
                 };
                 for (int s = 0; s < segs; ++s) {
                     float a0 = (center_yaw - half) + (2.0f * half) * (s)     / segs;

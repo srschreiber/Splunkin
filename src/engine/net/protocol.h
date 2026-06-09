@@ -36,7 +36,7 @@ struct InputCmd {
     // applies the damage at the reported positions using these effective stats.
     uint8_t thrown_active = 0;
     uint8_t thrown_reset = 0;     // set the frame hit-ids should clear (launch / turn)
-    float   thrown_x = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
+    float   thrown_x = 0.0f, thrown_y = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
     float   thrown_hit_radius = 0.0f, thrown_damage = 0.0f, thrown_knockback = 0.0f;
     uint8_t orbit_active = 0;
     uint8_t orbit_tick = 0;       // a damage tick fires this frame
@@ -63,7 +63,7 @@ struct PlayerState {
     float    sword_scale = 1.0f;             // blue-upgrade blade size
     // Specials, for rendering everyone's thrown/orbit swords on every screen.
     uint8_t  thrown_active = 0;
-    float    thrown_x = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
+    float    thrown_x = 0.0f, thrown_y = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
     uint8_t  orbit_active = 0;
     int32_t  orbit_count = 0;
     float    orbit_angle = 0.0f, orbit_spin = 0.0f, orbit_radius = 0.0f;

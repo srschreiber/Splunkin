@@ -28,7 +28,7 @@ inline constexpr float PLAYER_MAX_HEALTH = 100.0f;
 struct Shield {
     float block_rate      = 0.5f;   // stamina spent per point of damage blocked
     float block_cos       = 0.6f;   // arccos(.6) ~53 deg half-cone
-    float block_speed     = 1.0f;   // raise-animation playback multiplier (lower = slower to ready)
+    float block_speed     = 2.0f;   // raise-animation playback multiplier (lower = slower to ready)
     float stamina_per_sec = 8.0f;   // drained per second while the shield is up
 };
 
