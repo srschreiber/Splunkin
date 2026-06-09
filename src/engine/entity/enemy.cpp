@@ -12,6 +12,10 @@ Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind) {
     e.position[0] = x; e.position[1] = 0.0f; e.position[2] = z;
     e.stats = { ENEMY_MAX_HEALTH, ENEMY_ATTACK_DAMAGE, ENEMY_KNOCKBACK, ENEMY_WEIGHT };
     e.health = e.stats.max_health;
+    if (kind == EnemyKind::Flying) {
+        e.position[1] = FLY_HOVER;     // hovers (relative height); reachable only by jumping
+        e.health = 1.0f;               // fragile: one jump-hit or thrown sword drops it
+    }
     e.alive = true;
     items.push_back(e);
     return items.back();
@@ -100,16 +104,21 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         for (std::size_t pi = 0; pi < players.size(); ++pi) {
             const PlayerCombat& pc = players[pi];
             if (!pc.strike || !pc.alive) continue;   // ghosts deal no damage
+            // 3D cone around the player's look direction. dx/dz are world-horizontal;
+            // dy is relative-height (swing origin vs the target's body center), valid
+            // at melee range where the two grounds are ~equal. Looking up reaches the flyer.
             const float tx = e.position[0] - pc.pos[0];
             const float tz = e.position[2] - pc.pos[2];
-            const float d = std::sqrt(tx * tx + tz * tz);
+            const float enemy_y  = (e.kind == EnemyKind::Flying) ? e.position[1] : GROUND_BODY_CENTER;
+            const float ty = enemy_y - (STRIKE_ORIGIN_Y + pc.strike_height);
+            const float d = std::sqrt(tx * tx + ty * ty + tz * tz);
             if (d <= pc.strike_reach && d > 1e-4f) {
-                const float dot = (tx / d) * std::cos(pc.yaw) + (tz / d) * std::sin(pc.yaw);
+                const float dot = (tx * pc.aim[0] + ty * pc.aim[1] + tz * pc.aim[2]) / d;
                 if (dot >= pc.strike_cos) {
                     e.health -= pc.strike_damage;
                     e.hit_flash = FLASH_TIME;
                     const float kb = knock_amount(pc.strike_knockback, e.stats.weight);
-                    e.knock_vel[0] += (tx / d) * kb;
+                    e.knock_vel[0] += (tx / d) * kb;   // knockback stays horizontal
                     e.knock_vel[2] += (tz / d) * kb;
                     struck = true; struck_by = pc.id;
                 }
@@ -138,7 +147,9 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         // target leaving does. ti indexes both players[] and flows[]. ---
         // Ranged enemies give up a target that flees past their leash; melee chase
         // forever (huge cap). -1 = nobody valid in range -> idle.
-        const float leash = (e.kind == EnemyKind::Ranged) ? RANGED_LEASH : 1e30f;
+        const bool ranged = (e.kind == EnemyKind::Ranged || e.kind == EnemyKind::Flying);
+        const bool flying = (e.kind == EnemyKind::Flying);
+        const float leash = !ranged ? 1e30f : (flying ? FLY_LEASH : RANGED_LEASH);
         const int ti = pick_target(e, players, leash);
         if (ti < 0) { e.anim_time = 0.0f; e.attacking = false; continue; }
         e.target_id = players[ti].id;            // re-stamp (acquires nearest on first tick)
@@ -148,22 +159,29 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         if (!e.attacking && dist > 1e-4f) e.yaw = std::atan2(tdz, tdx);   // track, commit during a melee swing
         const dc::world::FlowField& flow = flows[ti];
 
-        if (e.kind == EnemyKind::Ranged) {
+        if (ranged) {
+            // Flying is a ranged variant: longer range, hovers (position[1] untouched
+            // by the xz-only movement below), and shoots a differently-colored bolt.
+            const float standoff = flying ? FLY_STANDOFF      : RANGED_STANDOFF;
+            const float fire_int = flying ? FLY_FIRE_INTERVAL : RANGED_FIRE_INTERVAL;
+            const float dmg      = flying ? FLY_DAMAGE        : RANGED_DAMAGE;
+            const float shot_spd = flying ? FLY_SHOT_SPEED    : RANGED_SHOT_SPEED;
             // Shoot a sphere on a cooldown — even while repositioning.
             if (e.attack_cd <= 0.0f && dist > 1e-4f) {
-                e.attack_cd = RANGED_FIRE_INTERVAL;
+                e.attack_cd = fire_int;
                 Projectile pr;
-                pr.pos[0] = e.position[0]; pr.pos[1] = 1.0f; pr.pos[2] = e.position[2];   // muzzle ~chest height
-                pr.vel[0] = (tdx / dist) * RANGED_SHOT_SPEED;
-                pr.vel[2] = (tdz / dist) * RANGED_SHOT_SPEED;
-                pr.damage = RANGED_DAMAGE; pr.knockback = RANGED_KNOCKBACK; pr.life = RANGED_SHOT_LIFE;
+                pr.pos[0] = e.position[0]; pr.pos[1] = flying ? FLY_HOVER : 1.0f; pr.pos[2] = e.position[2];
+                pr.vel[0] = (tdx / dist) * shot_spd;
+                pr.vel[2] = (tdz / dist) * shot_spd;
+                pr.damage = dmg; pr.knockback = RANGED_KNOCKBACK; pr.life = RANGED_SHOT_LIFE;
+                if (flying) { pr.color[0] = 1.0f; pr.color[1] = 0.5f; pr.color[2] = 0.2f; }   // orange flyer bolts
                 list.projectiles.push_back(pr);
             }
             // Keep its distance: close to the standoff band, back straight off if the
             // target crowds it (still firing the whole time).
-            if (dist > RANGED_STANDOFF + RANGED_BACKUP_MARGIN) {
+            if (dist > standoff + RANGED_BACKUP_MARGIN) {
                 flow_advance(e, map, flow, list.rng, tgt.pos[0], tgt.pos[2], dt);
-            } else if (dist < RANGED_STANDOFF - RANGED_BACKUP_MARGIN && dist > 1e-4f) {
+            } else if (dist < standoff - RANGED_BACKUP_MARGIN && dist > 1e-4f) {
                 const float mx = -tdx / dist, mz = -tdz / dist, step = RANGED_BACKUP_SPEED * dt;   // retreat slowly
                 const float npx = e.position[0] + mx * step, npz = e.position[2] + mz * step;
                 if (!dc::world::circle_hits_solid(map, npx, e.position[2], ENEMY_RADIUS)) e.position[0] = npx;

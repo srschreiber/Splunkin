@@ -11,45 +11,28 @@ namespace dc::renderer {
 void Camera::view_matrix(mat4 out, dc::entity::Player& p, dc::world::Map& map, float dt) {
     vec3 f;  p.front(f);
     vec3 up = {0.0f, 1.0f, 0.0f};
+
+    // First person (default): eye exactly at the player's eye, looking along the full
+    // look direction. No offset / smoothing / raycast — position is already resolved.
+    if (!third_person) {
+        (void)map; (void)dt;
+        glm_look(p.position, f, up, out);
+        return;
+    }
+
+    // Third person (debug): pull the eye back along the look direction and a bit up,
+    // raycast so walls don't clip the camera, and ease toward the target for smoothness.
     vec3 eye = { p.position[0] - f[0] * distance,
-                 p.position[1] - f[1] * distance*1.5f,
+                 p.position[1] - f[1] * distance + 1.0f,
                  p.position[2] - f[2] * distance };
-    
-    // // if eye is in a solid cell, move it against the surface normal
-  
-
-    // cap the camera height
-    const float cam_ceil = dc::world::WALL_HEIGHT - 0.2f;
-    if (eye[1] > cam_ceil) eye[1] = cam_ceil;
-
-    // make sure camera is always higher than the player's head so we aren't blocked
-    if (eye[1] < p.position[1] + 0.5f) eye[1] = p.position[1] + .5f;
-    
-    // raycast from player to eye. If any solid is hit, that eye will be clamped to the hit position
-    const float step = 0.01f;
-    
-    for (float d = step; d <= distance; d += step) {
-        vec3 test = { p.position[0] - f[0] * d,
-                      p.position[2] - f[2] * d };
-        if (dc::world::circle_hits_solid(map, test[0], test[1], CAM_RADIUS)) {
-            eye[0] = test[0];
-            eye[2] = test[1];
-            break;
-        }
+    const float stepd = 0.05f;
+    for (float d = stepd; d <= distance; d += stepd) {
+        const float tx = p.position[0] - f[0] * d, tz = p.position[2] - f[2] * d;
+        if (dc::world::circle_hits_solid(map, tx, tz, CAM_RADIUS)) { eye[0] = tx; eye[2] = tz; break; }
     }
-
-    // Ease the rendered camera toward the target `eye` so wall-clamping glides
-    // instead of snapping. Time-based so the feel is the same at any frame rate;
-    // snap on the very first frame so we don't slide in from the origin.
-    const float smooth_speed = 10.0f;                       // higher = snappier
-    const float factor = 1.0f - std::exp(-smooth_speed * dt);
-    if (!eye_initialized) {
-        glm_vec3_copy(eye, smoothed_eye);
-        eye_initialized = true;
-    } else {
-        glm_vec3_lerp(smoothed_eye, eye, factor, smoothed_eye);
-    }
-
+    const float factor = 1.0f - std::exp(-12.0f * dt);
+    if (!eye_initialized) { glm_vec3_copy(eye, smoothed_eye); eye_initialized = true; }
+    else                  glm_vec3_lerp(smoothed_eye, eye, factor, smoothed_eye);
     glm_look(smoothed_eye, f, up, out);
 }
 

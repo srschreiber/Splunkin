@@ -80,8 +80,8 @@ struct EnemyState {
 // One dropped coin's position (render-only on clients).
 struct CoinState { float x = 0.0f, z = 0.0f; };
 
-// One in-flight projectile's position (render-only on clients).
-struct ProjectileState { float x = 0.0f, y = 0.0f, z = 0.0f; };
+// One in-flight projectile's position + glow color (render-only on clients).
+struct ProjectileState { float x = 0.0f, y = 0.0f, z = 0.0f, r = 0.75f, g = 0.35f, b = 1.0f; };
 
 // Packets:
 //   Input:    [MsgType::Input]    [InputCmd]

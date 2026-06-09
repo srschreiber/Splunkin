@@ -10,8 +10,9 @@ namespace dc::entity {
 enum class EntityType : uint8_t { Enemy };
 
 // Enemy behavior archetype. Targeting is shared (pick_target); the per-kind action
-// (melee swing vs. ranged standoff + projectile) branches in update_enemies.
-enum class EnemyKind : uint8_t { Melee, Ranged };
+// (melee swing vs. ranged standoff + projectile) branches in update_enemies. Flying
+// is a ranged variant that hovers above the ground (only reachable by jumping).
+enum class EnemyKind : uint8_t { Melee, Ranged, Flying };
 
 inline constexpr float FLASH_TIME = 0.15f;   // red hit-flash duration (seconds)
 inline constexpr float KNOCK_DAMP = 9.0f;    // knockback velocity decay rate (1/s)
@@ -60,8 +61,9 @@ struct Entity {
 // A flying sphere fired by a ranged enemy. Plain data, host-simulated, replicated
 // to clients for rendering. Hits the first player it reaches, then despawns.
 struct Projectile {
-    vec3  pos = {0.0f, 0.0f, 0.0f};
-    vec3  vel = {0.0f, 0.0f, 0.0f};
+    vec3  pos   = {0.0f, 0.0f, 0.0f};
+    vec3  vel   = {0.0f, 0.0f, 0.0f};
+    vec3  color = {0.75f, 0.35f, 1.0f};   // glow color (varies by shooter)
     float damage    = 0.0f;
     float knockback = 0.0f;
     float life      = 0.0f;   // seconds remaining before it fizzles

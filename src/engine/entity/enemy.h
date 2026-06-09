@@ -35,11 +35,32 @@ inline constexpr float RANGED_SHOT_RADIUS   = 0.35f;   // sphere size + hit radi
 inline constexpr float RANGED_SHOT_LIFE     = 2.5f;    // seconds before a shot fizzles
 inline constexpr float PROJECTILE_HIT_DIST  = 0.6f;    // shot within this of a player connects
 
+// Flying enemy: a ranged variant that hovers above the ground with longer range.
+// Reachable in melee only by jumping up to it (see the vertical strike reach below).
+inline constexpr float FLY_HOVER         = 2.5f;    // hover height above its ground (relative)
+inline constexpr float FLY_STANDOFF      = 5.0f;    // close enough that a chasing player can corner + jump it
+inline constexpr float FLY_LEASH         = 18.0f;   // better range than ground ranged
+inline constexpr float FLY_FIRE_INTERVAL = 1.6f;
+inline constexpr float FLY_DAMAGE        = 6.0f;
+inline constexpr float FLY_SHOT_SPEED    = 11.0f;
+
+// Melee vertical reach: a swing connects only if the target's height (relative to its
+// ground) is within this window of the player's strike elevation (feet-above-ground,
+// 0 when standing). Ground enemies (height 0) are always in reach; the flyer (height
+// FLY_HOVER) sits just above the standing window, so you must jump to clip it.
+// 3D swing cone: the hit test is a cone around the player's full look direction, so
+// looking up lets you reach the flyer. Heights are relative to ground (close-range
+// melee, so terrain difference is negligible): the swing originates at chest height
+// (+ jump), and a target's point is its body center (the flyer's is its hover height).
+inline constexpr float STRIKE_ORIGIN_Y   = 1.3f;   // swing origin above the player's feet
+inline constexpr float GROUND_BODY_CENTER = 1.0f;  // a ground enemy's aim point above its feet
+
 // The player's state this frame, for combat resolution.
 struct PlayerCombat {
     uint32_t id;          // stable player id (host = 0, clients 1..); enemies target by id
     bool  alive = true;   // dead players (ghosts) are ignored by enemies and deal no damage
     vec3  pos;            // player position (eye)
+    vec3  aim = {0,0,0};  // 3D look direction (yaw+pitch); the strike is a cone around this
     float yaw;
     bool  blocking;
     bool  strike;         // true on the single frame the player's swing connects
@@ -48,6 +69,7 @@ struct PlayerCombat {
     float strike_damage;
     float strike_knockback;  // the player's knockback stat (applied to enemies hit)
     float weight;            // the player's weight (resists incoming knockback)
+    float strike_height = 0.0f;  // feet height above own ground (0 standing, >0 mid-jump) for vertical reach
     // Shield: a frontal blocked hit spends block_rate stamina per point of damage to
     // negate it; with enough `stamina` the hit is fully negated (and its knockback
     // scaled away), otherwise the unaffordable remainder gets through at full damage.

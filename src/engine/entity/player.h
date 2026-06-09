@@ -77,6 +77,7 @@ struct Player {
     bool  on_ground = true;
     float speed = MOVE_SPEED;              // horizontal move speed (set per-frame: walk vs run)
     float health = PLAYER_MAX_HEALTH;      // clamps at 0 (no death screen yet)
+    float health_regen = 1.5f;             // hp/sec while alive (upgradeable later)
     // combat: attack_damage/knockback used when striking, weight resists incoming knockback
     Stats stats = { PLAYER_MAX_HEALTH, 5.0f, 10.0f, 5.0f };  // attack_damage = base/unarmed
     float stamina       = 100.0f;

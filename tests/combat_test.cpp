@@ -30,6 +30,7 @@ int main() {
     pc.strike_reach = 1.8f; pc.strike_cos = 0.4f; pc.strike_damage = 12.0f;
     pc.strike_knockback = 10.0f; pc.weight = 5.0f;
     pc.block_cos = 0.3f; pc.block_rate = 0.0f; pc.stamina = 0.0f;
+    pc.aim[0] = 1.0f;   // faces +x (yaw 0); 3D swing cone aims here
     const int pcol = static_cast<int>(pc.pos[0] / TILE);
     const int prow = static_cast<int>(pc.pos[2] / TILE);
 
@@ -174,6 +175,7 @@ int main() {
         a.strike_reach = 1.8f; a.strike_cos = 0.4f; a.strike_damage = 1.0f;
         a.strike_knockback = 0.0f; a.weight = 5.0f; a.block_cos = 0.3f;
         PlayerCombat b = a; b.id = 1; b.pos[0] = ex + 0.6f; b.yaw = 3.14159f;  // just +x, faces -x at it
+        b.aim[0] = -1.0f;   // aims -x toward the enemy
         std::vector<PlayerCombat> ps{ a, b };
         std::vector<FlowField> flows{ compute_flow(*m, 5, 2), compute_flow(*m, 5, 2) };
         EntityList lt;
@@ -227,6 +229,25 @@ int main() {
             update_projectiles(lr3, *m, ps, out, 0.016f);
         }
         assert(lr3.items[0].position[0] - a.pos[0] > gap0 + 0.5f);   // it retreated
+    }
+
+    // 3D swing cone: aiming up + jumping reaches a hovering flyer; a level swing at a
+    // far flyer whiffs (it's above the swing's reach).
+    {
+        FlowField f = compute_flow(*m, pcol, prow);
+        EntityList lf;
+        lf.spawn_enemy(pc.pos[0] + 1.0f, pc.pos[2], EnemyKind::Flying);   // close + overhead
+        PlayerCombat up = pc; up.strike = true; up.strike_height = 0.6f;  // mid-jump
+        const float ax = 1.0f, ay = 1.3f, al = std::sqrt(ax*ax + ay*ay);  // aim up-forward
+        up.aim[0] = ax/al; up.aim[1] = ay/al; up.aim[2] = 0.0f;
+        step1(lf, f, up, 0.016f);
+        assert(lf.items.empty());                                         // jump-look-up one-shots it
+
+        EntityList lf2;
+        lf2.spawn_enemy(pc.pos[0] + 3.0f, pc.pos[2], EnemyKind::Flying);  // far + overhead
+        PlayerCombat lvl = pc; lvl.strike = true;                        // standing, level aim (+x)
+        step1(lf2, f, lvl, 0.016f);
+        assert(!lf2.items.empty());                                       // out of the swing's 3D reach
     }
 
     std::printf("PASS combat\n");

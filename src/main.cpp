@@ -180,6 +180,7 @@ int main(int argc, char** argv) {
     mesh.upload(dc::world::build_map_mesh(*map, terrain));   // walls (textured)
     dc::renderer::Mesh terrain_mesh;
     terrain_mesh.upload(dc::world::build_terrain_mesh(*map, terrain));   // floor (solid color)
+    dc::renderer::Mesh flyer_mesh;   // rebuilt each frame from hovering flying-enemy cubes
 
     dc::renderer::Model player_model;
     player_model.upload(model_data);
@@ -264,7 +265,8 @@ int main(int argc, char** argv) {
         sp.pos[0] = map->width  * 0.5f * dc::world::TILE;
         sp.pos[2] = map->height * 0.5f * dc::world::TILE;
         sp.radius = 4.0f; sp.rate = 0.5f; sp.max_alive = 8;
-        sp.ranged_fraction = 0.35f;   // ~1 in 3 spawns shoots
+        sp.ranged_fraction = 0.30f;   // ~30% ground shooters
+        sp.flying_fraction = 0.15f;   // ~15% hovering shooters
         spawners.push_back(sp);
     }
 
@@ -358,6 +360,7 @@ int main(int argc, char** argv) {
     bool e_prev = false;                               // for edge-triggered interact
     bool g_prev = false;                               // edge-triggered debug enemy spawn (melee)
     bool h_prev = false;                               // edge-triggered debug enemy spawn (ranged)
+    bool j_prev = false;                               // edge-triggered debug enemy spawn (flying)
     bool v_prev = false;                               // edge-triggered debug-cone toggle
     bool debug_cone = false;                           // draw the shield block cone
 
@@ -538,6 +541,7 @@ int main(int argc, char** argv) {
                         dc::net::ProjectileState ps; std::memcpy(&ps, p, sizeof ps); p += sizeof ps;
                         dc::entity::Projectile pr;
                         pr.pos[0] = ps.x; pr.pos[1] = ps.y; pr.pos[2] = ps.z;
+                        pr.color[0] = ps.r; pr.color[1] = ps.g; pr.color[2] = ps.b;
                         entities.projectiles.push_back(pr);
                     }
                 }
@@ -598,6 +602,10 @@ int main(int argc, char** argv) {
                 bool m = (hc.input.forward != 0.0f || hc.input.strafe != 0.0f);
                 hc.anim_time = m ? hc.anim_time + dt : 0.0f;
                 if (hc.body.hit_flash > 0.0f) hc.body.hit_flash -= dt;   // decay the flash
+                if (hc.body.health > 0.0f) {                              // passive regen (not ghosts)
+                    hc.body.health += hc.body.health_regen * dt;
+                    if (hc.body.health > hc.body.stats.max_health) hc.body.health = hc.body.stats.max_health;
+                }
             }
             // (Remotes are rebuilt after combat, so hit_flash this frame is included.)
         }
@@ -687,6 +695,13 @@ int main(int argc, char** argv) {
         else               player.stamina += player.stamina_regen * dt;
         if (player.stamina > player.stamina_max) player.stamina = player.stamina_max;
         if (player.stamina < 0.0f) player.stamina = 0.0f;
+
+        // Passive health regen while alive (host-authoritative; clients get it via the
+        // snapshot). Never regen a ghost — that would revive the dead.
+        if (net.role != dc::net::Role::Client && player.health > 0.0f) {
+            player.health += player.health_regen * dt;
+            if (player.health > player.stats.max_health) player.health = player.stats.max_health;
+        }
 
         // Interact (E, edge-triggered): buy the nearest closed chest within reach.
         bool e_now = input.key_down(SDL_SCANCODE_E);
@@ -803,6 +818,13 @@ int main(int argc, char** argv) {
                                  dc::entity::EnemyKind::Ranged);
         }
         h_prev = h_now;
+        bool j_now = input.key_down(SDL_SCANCODE_J);
+        if (j_now && !j_prev && net.role != dc::net::Role::Client) {
+            vec3 f; player.front(f);
+            entities.spawn_enemy(player.position[0] + f[0] * 4.0f, player.position[2] + f[2] * 4.0f,
+                                 dc::entity::EnemyKind::Flying);
+        }
+        j_prev = j_now;
 
         // Debug: V toggles the combat cones + the title-bar readout.
         bool v_now = input.key_down(SDL_SCANCODE_V);
@@ -901,10 +923,15 @@ int main(int argc, char** argv) {
         pc.id = my_id;                 // host/standalone = 0; client = its assigned id
         pc.alive = !dead;              // ghosts aren't targeted and deal no damage
         glm_vec3_copy(player.position, pc.pos);
+        { vec3 aim; player.front(aim); glm_vec3_copy(aim, pc.aim); }   // 3D look dir for the swing cone
         pc.yaw = player.yaw;
         pc.strike = player_strike;
         pc.strike_knockback = player.stats.knockback;
         pc.weight           = player.stats.weight;
+        // Feet height above our own ground (0 standing, >0 mid-jump): drives the swing's
+        // vertical reach so a jump can clip the hovering flyer.
+        pc.strike_height = player.position[1]
+                         - (terrain.height(player.position[0], player.position[2]) + dc::world::EYE_HEIGHT);
         // Weapon drives damage/reach/cone; fall back to fists when unarmed.
         if (player.weapon) {
             pc.strike_damage = player.stats.attack_damage + player.weapon->attack_bonus;
@@ -982,6 +1009,12 @@ int main(int argc, char** argv) {
             glm_vec3_copy(hc.body.position, cc.pos);
             cc.yaw = hc.body.yaw;
             cc.strike           = hc.input.strike != 0;
+            // 3D aim from the client's reported yaw+pitch.
+            cc.aim[0] = std::cos(hc.input.pitch) * std::cos(hc.input.yaw);
+            cc.aim[1] = std::sin(hc.input.pitch);
+            cc.aim[2] = std::cos(hc.input.pitch) * std::sin(hc.input.yaw);
+            cc.strike_height    = hc.body.position[1]
+                                - (terrain.height(hc.body.position[0], hc.body.position[2]) + dc::world::EYE_HEIGHT);
             cc.strike_damage    = hc.input.strike_damage;
             cc.strike_reach     = hc.input.strike_reach;
             cc.strike_cos       = hc.input.strike_cos;
@@ -1164,6 +1197,7 @@ int main(int argc, char** argv) {
             uint32_t npr = static_cast<uint32_t>(entities.projectiles.size()); put(&npr, 4);
             for (auto& pr : entities.projectiles) {
                 dc::net::ProjectileState ps{}; ps.x = pr.pos[0]; ps.y = pr.pos[1]; ps.z = pr.pos[2];
+                ps.r = pr.color[0]; ps.g = pr.color[1]; ps.b = pr.color[2];
                 put(&ps, sizeof ps);
             }
             net.broadcast(buf.data(), buf.size(), false);
@@ -1219,34 +1253,63 @@ int main(int argc, char** argv) {
         glm_rotate_y(placement, -player.yaw + MODEL_YAW_OFFSET, placement);
 
         int w, h; window.framebuffer_size(w, h);
+        camera.third_person = debug_cone;   // debug view (V): pull back so you see yourself + the cones
         renderer.begin_frame(*map, camera, player, dt, w, h);
         renderer.set_light(light_pos, light_color, LIGHT_RADIUS);
         renderer.draw_map(mesh);
         renderer.draw_terrain(terrain_mesh, terrain_color);
-        const float GHOST_ALPHA = 0.18f;               // dead players: faint translucent body
-        vec3 player_color = { 0.80f, 0.45f, 0.35f };
-        if (dead) {
-            vec3 pale = { 0.55f, 0.65f, 0.95f };       // bluish wisp
-            glm_vec3_copy(pale, player_color);
-        } else if (player.hit_flash > 0.0f) {          // flash red when hit
-            vec3 red = { 1.0f, 0.1f, 0.1f };
-            glm_vec3_lerp(player_color, red, player.hit_flash / dc::entity::FLASH_TIME, player_color);
+        const float GHOST_ALPHA = 0.18f;               // dead remote players render faint + translucent
+        // First person (default): don't draw our own body/helmet — only the held sword
+        // and shield, as a "viewmodel" tilted by pitch about the eye so the gear aims
+        // where we point. Debug third-person (V): draw the full body + helmet instead,
+        // and attach the gear normally (no view tilt) so you can see the swing + cones.
+        const bool tp = camera.third_person;
+        mat4 vm_place;
+        {
+            mat4 tilt; glm_mat4_identity(tilt);
+            vec3 eye = { player.position[0], player.position[1], player.position[2] };
+            vec3 neg = { -eye[0], -eye[1], -eye[2] };
+            glm_translate(tilt, eye);
+            glm_rotate(tilt, player.pitch, renderer.cam_right);   // tilt up/down about camera-right
+            glm_translate(tilt, neg);
+            glm_mat4_mul(tilt, placement, vm_place);
         }
-        renderer.draw_model(player_model, part_world, placement, player_color, dead ? GHOST_ALPHA : 1.0f);
+        // First-person viewmodel: the rig's hands sit at waist height, below the view —
+        // lift the gear up + push it forward along the look so both sword and shield
+        // read on screen. (Tune these two if it sits too high/low or clips.)
+        if (!camera.third_person) {
+            const float VM_RAISE = 0.8f, VM_FWD = 0.5f;
+            vec3 fr; player.front(fr);
+            vec3 d = { fr[0] * VM_FWD, VM_RAISE + fr[1] * VM_FWD, fr[2] * VM_FWD };
+            mat4 off; glm_mat4_identity(off); glm_translate(off, d);
+            glm_mat4_mul(off, vm_place, vm_place);   // world-space lift, applied to the whole viewmodel
+        }
+        // The matrix the hand-attached gear hangs off of: real placement in 3rd person,
+        // the pitch-tilted viewmodel placement in 1st person.
+        mat4 gear_place;
+        glm_mat4_copy(tp ? placement : vm_place, gear_place);
 
-        // Helmet + gear: hidden while a ghost (a dead player drops their kit).
+        if (tp) {   // third-person: draw the body + helmet
+            vec3 body_color = { 0.80f, 0.45f, 0.35f };
+            if (dead) { vec3 pale = { 0.55f, 0.65f, 0.95f }; glm_vec3_copy(pale, body_color); }
+            else if (player.hit_flash > 0.0f) {
+                vec3 red = { 1.0f, 0.1f, 0.1f };
+                glm_vec3_lerp(body_color, red, player.hit_flash / dc::entity::FLASH_TIME, body_color);
+            }
+            renderer.draw_model(player_model, part_world, placement, body_color, dead ? GHOST_ALPHA : 1.0f);
+            if (!dead) {
+                mat4 helmet_place; glm_mat4_mul(placement, head_world.m, helmet_place);
+                vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
+                renderer.draw_model(helmet_model, helmet_offset, helmet_place, helmet_color);
+            }
+        }
+
+        // Gear hidden while a ghost (dead = no weapon).
         if (!dead) {
-        // Helmet: attached to the head bone socket. Its world = placement * headWorld
-        // * offset, so it rides head-look/walk/jump for free. White tint -> material color.
-        mat4 helmet_place;
-        glm_mat4_mul(placement, head_world.m, helmet_place);
-        vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
-        renderer.draw_model(helmet_model, helmet_offset, helmet_place, helmet_color);
-
         // Sword in hand: only when equipped AND not currently thrown.
         if (player.weapon && !thrown.active) {
             mat4 sword_place;
-            glm_mat4_mul(placement, l_hand_world.m, sword_place);
+            glm_mat4_mul(gear_place, l_hand_world.m, sword_place);
             vec3 sws = { player.sword_scale, player.sword_scale, player.sword_scale };
             glm_scale(sword_place, sws);   // blue upgrade grows the blade
             vec3 sword_color = { 0.8f, 0.8f, 0.9f };
@@ -1281,7 +1344,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < w.orbit_count; ++i) {
                 float a = orbit.angle + (6.2831853f * i) / w.orbit_count;
                 mat4 op; glm_mat4_identity(op);
-                vec3 opos = { player.position[0] + std::cos(a) * w.orbit_radius, 0.8f,
+                vec3 opos = { player.position[0] + std::cos(a) * w.orbit_radius, 1.5f,
                               player.position[2] + std::sin(a) * w.orbit_radius };
                 glm_translate(op, opos);
                 glm_rotate_y(op, orbit.spin, op);
@@ -1295,11 +1358,11 @@ int main(int argc, char** argv) {
         // Shield: drawn only when a shield is equipped, attached to the right hand bone.
         if (player.shield) {
             mat4 shield_place;
-            glm_mat4_mul(placement, r_hand_world.m, shield_place);
+            glm_mat4_mul(gear_place, r_hand_world.m, shield_place);
             vec3 shield_color = { 0.5f, 0.5f, 0.8f };
             renderer.draw_model(shield_model, shield_offset, shield_place, shield_color);
         }
-        }   // end if (!dead): a ghost shows only its faint body, no gear/effects
+        }   // end if (!dead)
 
         // Draw each chest, lid posed by its open_t (open clip only animates the lid).
         // White tint -> the per-part material colors from the .glb show through unchanged.
@@ -1318,11 +1381,30 @@ int main(int argc, char** argv) {
         }
 
         // Draw enemies — reuse the player model; melee tinted green, ranged purple,
-        // posed by their own walk/attack clocks and facing the player.
+        // posed by their own walk/attack clocks and facing the player. Flyers are
+        // hovering cubes (batched + drawn solid below) to prove out flying enemies.
         vec3 enemy_color  = { 0.25f, 0.80f, 0.30f };
         vec3 ranged_color = { 0.70f, 0.30f, 0.85f };
+        std::vector<float> flyer_verts;   // batched cube faces (9-float world-space verts)
+        auto box_face = [&](float ax,float ay,float az, float bx,float by,float bz,
+                            float cx,float cy,float cz, float dx,float dy,float dz, float nx,float ny,float nz) {
+            auto V = [&](float x,float y,float z){ flyer_verts.insert(flyer_verts.end(), {x,y,z,nx,ny,nz,0.f,0.f,0.f}); };
+            V(ax,ay,az); V(bx,by,bz); V(cx,cy,cz);  V(ax,ay,az); V(cx,cy,cz); V(dx,dy,dz);
+        };
+        auto append_cube = [&](float cx,float cy,float cz, float hx,float hy,float hz) {
+            const float x0=cx-hx,x1=cx+hx,y0=cy-hy,y1=cy+hy,z0=cz-hz,z1=cz+hz;
+            box_face(x0,y0,z1,x1,y0,z1,x1,y1,z1,x0,y1,z1, 0,0,1);   box_face(x1,y0,z0,x0,y0,z0,x0,y1,z0,x1,y1,z0, 0,0,-1);
+            box_face(x1,y0,z1,x1,y0,z0,x1,y1,z0,x1,y1,z1, 1,0,0);   box_face(x0,y0,z0,x0,y0,z1,x0,y1,z1,x0,y1,z0, -1,0,0);
+            box_face(x0,y1,z1,x1,y1,z1,x1,y1,z0,x0,y1,z0, 0,1,0);   box_face(x0,y0,z0,x1,y0,z0,x1,y0,z1,x0,y0,z1, 0,-1,0);
+        };
         for (const auto& en : entities.items) {
             if (en.type != dc::entity::EntityType::Enemy) continue;
+            if (en.kind == dc::entity::EnemyKind::Flying) {   // a hovering 2-tall cube
+                const float gx = en.position[0], gz = en.position[2];
+                const float cy = terrain.height(gx, gz) + dc::entity::FLY_HOVER;
+                append_cube(gx, cy, gz, 0.7f, 1.0f, 0.7f);
+                continue;
+            }
             std::vector<dc::renderer::AnimLayer> el;
             if (en.attacking)        el.push_back({ &model_data.punch, en.attack_time, model_data.arm_l_node });
             else if (en.anim_time > 0.0f) el.push_back({ &model_data.walk, en.anim_time, -1 });
@@ -1338,6 +1420,11 @@ int main(int argc, char** argv) {
                 glm_vec3_lerp(col, red, en.hit_flash / dc::entity::FLASH_TIME, col);
             }
             renderer.draw_model(player_model, enemy_part_world, eplace, col);
+        }
+        if (!flyer_verts.empty()) {                       // upload + draw this frame's flyer cubes
+            flyer_mesh.upload(flyer_verts);
+            vec3 flyer_color = { 0.85f, 0.25f, 0.30f };   // menacing red
+            renderer.draw_terrain(flyer_mesh, flyer_color);
         }
 
         // Draw remote players (other connected clients), blue-tinted, posed by their
@@ -1408,7 +1495,7 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < rp.orbit_count; ++i) {
                         float a = rp.orbit_angle + (6.2831853f * i) / rp.orbit_count;
                         mat4 op; glm_mat4_identity(op);
-                        vec3 opos = { rp.pos[0] + std::cos(a) * rp.orbit_radius, 0.8f,
+                        vec3 opos = { rp.pos[0] + std::cos(a) * rp.orbit_radius, 1.5f,
                                       rp.pos[2] + std::sin(a) * rp.orbit_radius };
                         glm_translate(op, opos);
                         glm_rotate_y(op, rp.orbit_spin, op);
@@ -1452,18 +1539,19 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Enemy projectiles: glowing purple spheres (additive billboards).
+        // Enemy projectiles: glowing spheres (additive billboards), per-shot color.
         {
             const float ps = 0.3f;
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
             for (const auto& pr : entities.projectiles) {
                 vec3 ctr = { pr.pos[0], pr.pos[1], pr.pos[2] };
+                const float cr = pr.color[0], cg = pr.color[1], cb = pr.color[2];
                 auto P = [&](float ax, float ay) {
                     particle_verts.insert(particle_verts.end(), {
                         ctr[0] + (R[0] * ax + U[0] * ay) * ps,
                         ctr[1] + (R[1] * ax + U[1] * ay) * ps,
                         ctr[2] + (R[2] * ax + U[2] * ay) * ps,
-                        0.75f, 0.35f, 1.0f, 1.0f });
+                        cr, cg, cb, 1.0f });
                 };
                 P(-1,-1); P(1,-1); P(1,1);
                 P(-1,-1); P(1,1); P(-1,1);
@@ -1528,10 +1616,35 @@ int main(int argc, char** argv) {
                     push(cx + std::cos(a1) * radius, cz + std::sin(a1) * radius);
                 }
             };
-            if (punching)                                                               // attack: red, only mid-swing
-                draw_cone(player.position[0], player.position[2], player.yaw,
-                          std::acos(pc.strike_cos), pc.strike_reach, 0.9f, 0.15f, 0.15f);
-            if (blocking)                                                               // block: blue, while raising/raised
+            // The player's swing is a real 3D cone around the aim direction (so you can
+            // see it tilt up at the flyer). Apex at the swing origin; ring at `radius`.
+            auto draw_cone3d = [&](const vec3 dir, float half, float radius, float r, float g, float b) {
+                vec3 apex = { player.position[0],
+                              player.position[1] - dc::world::EYE_HEIGHT + dc::entity::STRIKE_ORIGIN_Y,
+                              player.position[2] };
+                vec3 up = { 0.0f, 1.0f, 0.0f }, u, v;
+                glm_vec3_cross(const_cast<float*>(dir), up, u);
+                if (glm_vec3_norm(u) < 1e-3f) { vec3 alt = {1,0,0}; glm_vec3_cross(const_cast<float*>(dir), alt, u); }
+                glm_vec3_normalize(u);
+                glm_vec3_cross(const_cast<float*>(dir), u, v); glm_vec3_normalize(v);
+                const int segs = 20; const float cs = std::cos(half), sn = std::sin(half);
+                auto ring = [&](float phi, vec3 out) {
+                    for (int k = 0; k < 3; ++k)
+                        out[k] = apex[k] + radius * (cs * dir[k] + sn * (std::cos(phi) * u[k] + std::sin(phi) * v[k]));
+                };
+                auto push = [&](const vec3 p) {
+                    particle_verts.insert(particle_verts.end(), { p[0], p[1], p[2], r, g, b, 0.22f });
+                };
+                for (int s = 0; s < segs; ++s) {
+                    vec3 p0, p1;
+                    ring(6.2831853f * s / segs, p0);
+                    ring(6.2831853f * (s + 1) / segs, p1);
+                    push(apex); push(p0); push(p1);
+                }
+            };
+            if (punching)                                                               // attack: red 3D cone, mid-swing
+                draw_cone3d(pc.aim, std::acos(pc.strike_cos), pc.strike_reach, 0.9f, 0.15f, 0.15f);
+            if (blocking)                                                               // block: blue arc on the floor
                 draw_cone(player.position[0], player.position[2], player.yaw,
                           std::acos(pc.block_cos), pc.strike_reach * 0.9f, 0.2f, 0.5f, 1.0f);
             for (const auto& en : entities.items)                                       // enemy swings: orange
@@ -1641,6 +1754,17 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // First-person crosshair: a small + at screen center (skip while a menu's up).
+            // Correct the horizontal extent by aspect so it isn't stretched wide.
+            if (!ui_open && !dead) {
+                int cw, chh; window.window_size(cw, chh);
+                const float aspect = (cw > 0 && chh > 0) ? static_cast<float>(cw) / chh : 1.0f;
+                const float t = 0.004f, len = 0.022f;       // thickness, arm length (NDC-y units)
+                const float tx = t / aspect, lx = len / aspect;
+                hud_rect(-lx, -t, lx, t, 0.95f, 0.95f, 0.95f, 0.85f);   // horizontal arm
+                hud_rect(-tx, -len, tx, len, 0.95f, 0.95f, 0.95f, 0.85f);   // vertical arm
+            }
+
             // Pause menu (ESC): dim + a red Quit button (click to exit; ESC to resume).
             if (paused) {
                 hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.55f);  // dim backdrop
@@ -1663,6 +1787,7 @@ int main(int argc, char** argv) {
     sword_model.destroy();
     mesh.destroy();
     terrain_mesh.destroy();
+    flyer_mesh.destroy();
     renderer.shutdown();
     net.shutdown();
     window.shutdown();

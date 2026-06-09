@@ -22,7 +22,10 @@ void Spawner::update(float dt, EntityList& list, const dc::world::Map& map) {
             const int col = static_cast<int>(x / dc::world::TILE);
             const int row = static_cast<int>(z / dc::world::TILE);
             if (map.at(col, row) == dc::world::Cell::Open) {
-                const EnemyKind kind = (rand01(rng) < ranged_fraction) ? EnemyKind::Ranged : EnemyKind::Melee;
+                const float roll = rand01(rng);
+                const EnemyKind kind = (roll < flying_fraction) ? EnemyKind::Flying
+                                     : (roll < flying_fraction + ranged_fraction) ? EnemyKind::Ranged
+                                     : EnemyKind::Melee;
                 list.spawn_enemy(x, z, kind);
                 break;
             }
