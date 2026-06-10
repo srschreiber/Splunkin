@@ -305,6 +305,7 @@ int main(int argc, char** argv) {
         // Specials (render-only mirror of the owner's thrown/orbit state).
         bool thrown_active = false; float thrown_x = 0.0f, thrown_y = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
         bool orbit_active = false; int orbit_count = 0; float orbit_angle = 0.0f, orbit_spin = 0.0f, orbit_radius = 0.0f;
+        bool bash_active = false; float bash_radius = 0.0f;
     };
     std::vector<Remote> remotes;
     std::vector<dc::renderer::Mat4> remote_part_world;   // scratch for posing remotes
@@ -314,6 +315,10 @@ int main(int argc, char** argv) {
         std::vector<uint32_t> thrown_hits, orbit_hits;   // per-client special hit sets (host-side damage)
         float orbit_tick_cd = 0.0f;                      // host-run orbit damage cadence (client's tick pulse is lossy)
         int currency = 0;                                // this client's own wallet (host-authoritative)
+        // Host-run bash (started by a reliable BashCast event, advanced on the host's clock).
+        bool  bash_active = false; float bash_time = 0.0f, bash_radius = 0.0f;
+        float bash_max_radius = 0.0f, bash_damage = 0.0f, bash_knockback = 0.0f, bash_duration = 0.0f;
+        std::vector<uint32_t> bash_hits;
     };
     std::vector<HostClient> host_clients;
     uint32_t next_player_id = 1;   // host = 0; clients get 1,2,...
@@ -354,6 +359,14 @@ int main(int argc, char** argv) {
         std::vector<uint32_t> hit_ids;
     } orbit;
     float orbit_cd = 0.0f;       // cooldown between casts
+    // Shield-bash nova (3): an expanding sphere that shoves everything back.
+    struct Bash {
+        bool  active = false;
+        float time = 0.0f;       // seconds since cast
+        float radius = 0.0f;     // current shockwave radius (grows over bash_duration)
+        std::vector<uint32_t> hit_ids;   // enemies already shoved this cast (hit once as the front passes)
+    } bash;
+    float bash_cd = 0.0f;        // cooldown between bashes
     std::vector<dc::renderer::Mat4> part_world;        // posed per-part transforms (player)
     std::vector<dc::renderer::Mat4> chest_part_world;  // posed per-part transforms (a chest)
     std::vector<dc::renderer::AnimLayer> layers;       // reused each frame
@@ -379,6 +392,7 @@ int main(int argc, char** argv) {
         player.hit_flash = 0.0f;
         thrown.active = false;
         orbit.active = false;
+        bash.active = false;
         if (choosing) { choosing = false; window.set_relative_mouse(true); }
         // Clear all chest upgrades.
         player.stamina_mult = 1.0f;
@@ -450,6 +464,17 @@ int main(int argc, char** argv) {
                     && ev.data.size() >= 1 + sizeof(dc::net::InputCmd)) {
                     dc::net::InputCmd in; std::memcpy(&in, ev.data.data() + 1, sizeof in);
                     for (auto& hc : host_clients) if (hc.peer == ev.peer) { hc.input = in; break; }
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::BashCast
+                           && ev.data.size() >= 1 + sizeof(dc::net::BashCast)) {
+                    // A client cast the bash. Start a host-run nova for it (advanced +
+                    // damaged on the host's clock in the per-client specials block).
+                    dc::net::BashCast bc; std::memcpy(&bc, ev.data.data() + 1, sizeof bc);
+                    for (auto& hc : host_clients) if (hc.peer == ev.peer) {
+                        hc.bash_active = true; hc.bash_time = 0.0f; hc.bash_radius = 0.0f; hc.bash_hits.clear();
+                        hc.bash_max_radius = bc.radius; hc.bash_damage = bc.damage;
+                        hc.bash_knockback = bc.knockback; hc.bash_duration = bc.duration;
+                        break;
+                    }
                 } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::OpenChest
                            && ev.data.size() >= 5) {
                     // A client wants to open a chest. Events are processed one at a
@@ -504,6 +529,7 @@ int main(int argc, char** argv) {
                             r.thrown_active = s.thrown_active != 0;
                             r.thrown_x = s.thrown_x; r.thrown_y = s.thrown_y; r.thrown_z = s.thrown_z;
                             r.thrown_spin = s.thrown_spin; r.thrown_size = s.thrown_size;
+                            r.bash_active = s.bash_active != 0; r.bash_radius = s.bash_radius;
                             r.orbit_active = s.orbit_active != 0; r.orbit_count = s.orbit_count;
                             r.orbit_angle = s.orbit_angle; r.orbit_spin = s.orbit_spin; r.orbit_radius = s.orbit_radius;
                             remotes.push_back(r);
@@ -625,6 +651,30 @@ int main(int argc, char** argv) {
         if (attack_cd > 0.0f) attack_cd -= dt;
         if (throw_cd  > 0.0f) throw_cd  -= dt;
         if (orbit_cd  > 0.0f) orbit_cd  -= dt;
+        if (bash_cd   > 0.0f) bash_cd   -= dt;
+
+        // Shield bash nova (3): needs a shield + stamina, slow cooldown. Fires a sphere
+        // that expands and shoves enemies back (resolved in the update block below).
+        if (player.shield && !ui_open && !dead && !punching && !thrown.active && !bash.active
+            && bash_cd <= 0.0f && input.key_down(SDL_SCANCODE_3)
+            && player.stamina >= player.shield->stamina_per_bash) {
+            bash.active = true; bash.time = 0.0f; bash.radius = 0.0f; bash.hit_ids.clear();
+            player.stamina -= player.shield->stamina_per_bash * player.stamina_mult;
+            bash_cd = player.shield->bash_cooldown;
+            // Event model: tell the host once (reliable). It runs the damage + tells
+            // everyone else; we just predicted the visual above.
+            if (net.role == dc::net::Role::Client) {
+                dc::net::BashCast bc;
+                bc.radius = player.shield->bash_radius;
+                bc.damage = player.shield->bash_damage * player.damage_mult;
+                bc.knockback = player.shield->bash_knockback;
+                bc.duration = player.shield->bash_duration;
+                unsigned char buf[1 + sizeof bc];
+                buf[0] = static_cast<unsigned char>(dc::net::MsgType::BashCast);
+                std::memcpy(buf + 1, &bc, sizeof bc);
+                net.send_to_host(buf, sizeof buf, true);   // reliable: a cast can't be dropped
+            }
+        }
 
         // Orbit special (2): summon spinning swords for a while (big stamina cost).
         if (player.weapon && !ui_open && !dead && !orbit.active && orbit_cd <= 0.0f
@@ -882,6 +932,21 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Shield bash nova: an expanding sphere; radius_attack with a persistent hit set
+        // shoves each enemy once as the growing front reaches it (knockback points
+        // outward from the player, so everyone flies back).
+        if (bash.active && player.shield) {
+            const auto& s = *player.shield;
+            bash.time += dt;
+            bash.radius = (bash.time / s.bash_duration) * s.bash_radius;
+            if (net.role != dc::net::Role::Client) {
+                vec3 c = { player.position[0], 0.0f, player.position[2] };
+                dc::entity::radius_attack(entities, c, bash.radius,
+                                          s.bash_damage * player.damage_mult, s.bash_knockback, bash.hit_ids);
+            }
+            if (bash.time >= s.bash_duration) bash.active = false;
+        }
+
         // Each connected client's specials: the client simulates the flight/orbit;
         // the host applies the damage here (authoritative) at the reported positions,
         // with a per-client hit set so each enemy is hit once per leg / per tick.
@@ -914,6 +979,16 @@ int main(int argc, char** argv) {
                 } else {
                     hc.orbit_tick_cd = 0.0f;   // ready to bite immediately next activation
                     if (!hc.orbit_hits.empty()) hc.orbit_hits.clear();
+                }
+                // Bash nova (host-run from the BashCast event): expand + shove outward.
+                if (hc.bash_active) {
+                    hc.bash_time += dt;
+                    hc.bash_radius = (hc.bash_duration > 1e-4f)
+                                   ? (hc.bash_time / hc.bash_duration) * hc.bash_max_radius : 0.0f;
+                    vec3 c = { hc.body.position[0], 0.0f, hc.body.position[2] };
+                    dc::entity::radius_attack(entities, c, hc.bash_radius,
+                                              hc.bash_damage, hc.bash_knockback, hc.bash_hits);
+                    if (hc.bash_time >= hc.bash_duration) hc.bash_active = false;
                 }
             }
         }
@@ -1086,6 +1161,7 @@ int main(int argc, char** argv) {
                 r.orbit_active = hc.input.orbit_active != 0; r.orbit_count = hc.input.orbit_count;
                 r.orbit_angle = hc.input.orbit_angle; r.orbit_spin = hc.input.orbit_spin;
                 r.orbit_radius = hc.input.orbit_radius;
+                r.bash_active = hc.bash_active; r.bash_radius = hc.bash_radius;
                 remotes.push_back(r);
             }
         }
@@ -1161,6 +1237,7 @@ int main(int argc, char** argv) {
                   s.orbit_active = 1; s.orbit_count = player.weapon->orbit_count;
                   s.orbit_angle = orbit.angle; s.orbit_spin = orbit.spin; s.orbit_radius = player.weapon->orbit_radius;
               }
+              s.bash_active = bash.active ? 1 : 0; s.bash_radius = bash.radius;
               put(&s, sizeof s); }
             for (std::size_t ci = 0; ci < host_clients.size(); ++ci) {
                 auto& hc = host_clients[ci];
@@ -1179,6 +1256,7 @@ int main(int argc, char** argv) {
                 s.thrown_z = hc.input.thrown_z; s.thrown_spin = hc.input.thrown_spin; s.thrown_size = hc.input.thrown_size;
                 s.orbit_active = hc.input.orbit_active; s.orbit_count = hc.input.orbit_count;
                 s.orbit_angle = hc.input.orbit_angle; s.orbit_spin = hc.input.orbit_spin; s.orbit_radius = hc.input.orbit_radius;
+                s.bash_active = hc.bash_active ? 1 : 0; s.bash_radius = hc.bash_radius;
                 put(&s, sizeof s);
             }
             uint32_t ne = 0; for (auto& en : entities.items) if (en.type == dc::entity::EntityType::Enemy) ++ne;
@@ -1563,6 +1641,41 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Shield-bash nova: an expanding translucent shell of white points (a sphere
+        // growing from the caster), additive + fading as it spreads. Drawn for the local
+        // caster (predicted) and any remote that's bashing.
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            auto bash_sphere = [&](float cx, float cy, float cz, float radius, float alpha) {
+                if (radius <= 0.05f || alpha <= 0.0f) return;
+                const float ps = 0.16f;
+                const int N = 64;
+                for (int i = 0; i < N; ++i) {
+                    const float gy = 1.0f - 2.0f * (i + 0.5f) / N;           // -1..1
+                    const float rr = std::sqrt(std::max(0.0f, 1.0f - gy * gy));
+                    const float phi = i * 2.399963f;                         // golden angle
+                    const float px = cx + std::cos(phi) * rr * radius;
+                    const float py = cy + gy * radius;
+                    const float pz = cz + std::sin(phi) * rr * radius;
+                    auto P = [&](float ax, float ay) {
+                        particle_verts.insert(particle_verts.end(), {
+                            px + (R[0]*ax + U[0]*ay) * ps, py + (R[1]*ax + U[1]*ay) * ps,
+                            pz + (R[2]*ax + U[2]*ay) * ps, 1.0f, 1.0f, 1.0f, alpha });
+                    };
+                    P(-1,-1); P(1,-1); P(1,1);  P(-1,-1); P(1,1); P(-1,1);
+                }
+            };
+            if (bash.active && player.shield) {
+                const float prog = bash.time / player.shield->bash_duration;
+                bash_sphere(player.position[0], (player.position[1] - dc::world::EYE_HEIGHT) + 1.0f,
+                            player.position[2], bash.radius, (1.0f - prog) * 0.6f);
+            }
+            for (const auto& rp : remotes)
+                if (rp.bash_active)
+                    bash_sphere(rp.pos[0], (rp.pos[1] - dc::world::EYE_HEIGHT) + 1.0f, rp.pos[2],
+                                rp.bash_radius, 0.4f);
+        }
+
         // Chest price tags: the cost in 7-segment digits, billboarded above each
         // unopened chest, shrinking with distance and culled when far (declutter).
         {
@@ -1721,10 +1834,10 @@ int main(int argc, char** argv) {
                 for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
             }
 
-            // Special-ability icons (bottom-right): "1" throw, "2" orbit, each boxed.
-            // On use, a white overlay fills the box and drains down as the cooldown
-            // elapses (height = remaining / total).
-            if (player.weapon) {
+            // Special-ability icons (bottom-right): "1" throw, "2" orbit (weapon),
+            // "3" shield-bash (shield), each boxed. On use a white overlay fills the box
+            // and drains down as the cooldown elapses (height = remaining / total).
+            {
                 auto draw_special = [&](float x0, float y0, float w, float h, int d, float frac) {
                     const float x1 = x0 + w, y1 = y0 + h;
                     hud_rect(x0 - 0.007f, y0 - 0.007f, x1 + 0.007f, y1 + 0.007f, 0.9f, 0.9f, 0.9f, 0.9f);  // border
@@ -1736,11 +1849,17 @@ int main(int argc, char** argv) {
                         hud_rect(x0, y0, x1, y0 + fh, 1.0f, 1.0f, 1.0f, 0.55f);
                     }
                 };
-                const float bw = 0.06f, bh = 0.105f, by = -0.93f;
-                const float tf = player.weapon->throw_cooldown > 0.0f ? throw_cd / player.weapon->throw_cooldown : 0.0f;
-                const float of = player.weapon->orbit_cooldown > 0.0f ? orbit_cd / player.weapon->orbit_cooldown : 0.0f;
-                draw_special(0.80f, by, bw, bh, 1, tf);
-                draw_special(0.89f, by, bw, bh, 2, of);
+                const float bw = 0.06f, bh = 0.105f, by = -0.93f, gap = 0.09f, x3 = 0.74f;
+                if (player.weapon) {
+                    const float tf = player.weapon->throw_cooldown > 0.0f ? throw_cd / player.weapon->throw_cooldown : 0.0f;
+                    const float of = player.weapon->orbit_cooldown > 0.0f ? orbit_cd / player.weapon->orbit_cooldown : 0.0f;
+                    draw_special(x3,            by, bw, bh, 1, tf);
+                    draw_special(x3 + gap,      by, bw, bh, 2, of);
+                }
+                if (player.shield) {
+                    const float bf = player.shield->bash_cooldown > 0.0f ? bash_cd / player.shield->bash_cooldown : 0.0f;
+                    draw_special(x3 + gap * 2.0f, by, bw, bh, 3, bf);
+                }
             }
 
             // Death flash: full-screen red overlay that fades out.

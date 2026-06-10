@@ -30,6 +30,14 @@ struct Shield {
     float block_cos       = 0.6f;   // arccos(.6) ~53 deg half-cone
     float block_speed     = 2.0f;   // raise-animation playback multiplier (lower = slower to ready)
     float stamina_per_sec = 8.0f;   // drained per second while the shield is up
+    // Shield-bash nova (3): a white sphere expands from you, knocking everything it
+    // sweeps far back for light damage. Very high knockback, slow cooldown.
+    float bash_radius     = 4.5f;   // how far the shockwave reaches
+    float bash_damage     = 8.0f;   // low/moderate
+    float bash_knockback  = 30.0f;  // very high (>> enemy weight -> big shove)
+    float bash_duration   = 0.35f;  // seconds for the sphere to expand fully (quick)
+    float bash_cooldown   = 8.0f;   // very slow
+    float stamina_per_bash = 55.0f;
 };
 
 // A weapon's offensive stats. Its attack_bonus is ADDED to the player's base

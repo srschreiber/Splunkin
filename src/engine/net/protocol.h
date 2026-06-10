@@ -10,6 +10,13 @@ enum class MsgType : uint8_t {
     Input = 1, Snapshot = 2, AssignId = 3,
     OpenChest = 4,      // client -> host: request to buy/open chest [uint32 index]
     ChestGranted = 5,   // host -> client: open approved [uint32 index] (deducted, marked open)
+    BashCast = 6,       // client -> host: cast the shield-bash nova [BashCast payload] (reliable)
+};
+
+// Client -> host one-shot event: "I cast the bash." The host runs the damage sweep on
+// its own clock and broadcasts the expanding state; the caster predicts locally.
+struct BashCast {
+    float radius = 0.0f, damage = 0.0f, knockback = 0.0f, duration = 0.0f;
 };
 
 // Client -> host, every frame: what the player is doing. Gameplay fields (strike,
@@ -67,6 +74,8 @@ struct PlayerState {
     uint8_t  orbit_active = 0;
     int32_t  orbit_count = 0;
     float    orbit_angle = 0.0f, orbit_spin = 0.0f, orbit_radius = 0.0f;
+    uint8_t  bash_active = 0;        // shield-bash nova in progress
+    float    bash_radius = 0.0f;     // current shockwave radius (for the expanding sphere)
 };
 
 // One enemy's replicated state (render-only on clients).
