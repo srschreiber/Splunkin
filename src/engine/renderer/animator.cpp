@@ -77,7 +77,8 @@ struct Q  { versor q; };
 
 void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
                 float head_pitch, std::vector<Mat4>& out_part_world,
-                std::vector<int> attach_nodes, std::vector<Mat4*> out_attach) {
+                std::vector<int> attach_nodes, std::vector<Mat4*> out_attach,
+                float body_pitch) {
     const int n = static_cast<int>(model.nodes.size());
 
     // Working TRS per node = base (rest), then each layer overrides.
@@ -125,6 +126,21 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
         glm_quatv(pitch_q, hp, axis);
         glm_quat_mul(pitch_q, nr[model.head_node].q, result);
         glm_quat_copy(result, nr[model.head_node].q);
+    }
+
+    // body (torso) pitch: tilts the whole upper body — arms, hands, held weapon, and
+    // head (its children) — so the gear aims with the look. Composes with the clips
+    // (applied above) just like the head tilt. (Axis/sign may need tuning per rig.)
+    if (model.body_node >= 0 && model.body_node < n && body_pitch != 0.0f) {
+        float bp = body_pitch;
+        const float limit = glm_rad(80.0f);
+        if (bp < -limit) bp = -limit;
+        if (bp >  limit) bp =  limit;
+        vec3 axis = {1.0f, 0.0f, 0.0f};
+        versor pitch_q, result;
+        glm_quatv(pitch_q, bp, axis);
+        glm_quat_mul(pitch_q, nr[model.body_node].q, result);
+        glm_quat_copy(result, nr[model.body_node].q);
     }
 
     std::vector<Mat4> local(n), world(n);

@@ -179,6 +179,7 @@ bool read_model(const char* path, ModelData& out) {
 
     // Named bones we drive specially.
     out.head_node  = find_bone(data, "head");   // head-look
+    out.body_node  = find_bone(data, "body");   // torso: pitch it so the arms/weapon aim up/down
     out.arm_l_node = find_bone(data, "armL");    // punch layer is masked to this bone
     out.arm_r_node = find_bone(data, "armR");    // block layer is masked to this bone
     out.hand_l_node = find_bone(data, "handL");  // a socket for held items (not used in this example)

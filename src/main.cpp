@@ -313,12 +313,19 @@ int main(int argc, char** argv) {
     struct HostClient {
         uint32_t id, peer; dc::entity::Player body; dc::net::InputCmd input; float anim_time = 0.0f;
         std::vector<uint32_t> thrown_hits, orbit_hits;   // per-client special hit sets (host-side damage)
-        float orbit_tick_cd = 0.0f;                      // host-run orbit damage cadence (client's tick pulse is lossy)
+        float orbit_tick_cd = 0.0f;                      // host-run orbit damage cadence
         int currency = 0;                                // this client's own wallet (host-authoritative)
-        // Host-run bash (started by a reliable BashCast event, advanced on the host's clock).
+        // Specials are host-run from the client's reliable *Cast events: the host owns
+        // the motion + damage on its clock and broadcasts the state. (Same model as bash.)
         bool  bash_active = false; float bash_time = 0.0f, bash_radius = 0.0f;
         float bash_max_radius = 0.0f, bash_damage = 0.0f, bash_knockback = 0.0f, bash_duration = 0.0f;
         std::vector<uint32_t> bash_hits;
+        bool  orbit_active = false; float orbit_time = 0.0f, orbit_angle = 0.0f, orbit_spin = 0.0f;
+        float orbit_duration = 0.0f, orbit_radius = 0.0f, orbit_hit_radius = 0.0f, orbit_damage = 0.0f, orbit_knockback = 0.0f;
+        int   orbit_count = 0;
+        bool  thrown_active = false, thrown_returning = false;
+        float thrown_pos[3] = {0,0,0}, thrown_dir[3] = {0,0,0}, thrown_traveled = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
+        float throw_speed = 0.0f, throw_distance = 0.0f, throw_radius = 0.0f, throw_damage = 0.0f, throw_knockback = 0.0f;
     };
     std::vector<HostClient> host_clients;
     uint32_t next_player_id = 1;   // host = 0; clients get 1,2,...
@@ -473,6 +480,29 @@ int main(int argc, char** argv) {
                         hc.bash_active = true; hc.bash_time = 0.0f; hc.bash_radius = 0.0f; hc.bash_hits.clear();
                         hc.bash_max_radius = bc.radius; hc.bash_damage = bc.damage;
                         hc.bash_knockback = bc.knockback; hc.bash_duration = bc.duration;
+                        break;
+                    }
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::OrbitCast
+                           && ev.data.size() >= 1 + sizeof(dc::net::OrbitCast)) {
+                    dc::net::OrbitCast oc; std::memcpy(&oc, ev.data.data() + 1, sizeof oc);
+                    for (auto& hc : host_clients) if (hc.peer == ev.peer) {
+                        hc.orbit_active = true; hc.orbit_time = 0.0f; hc.orbit_angle = 0.0f; hc.orbit_spin = 0.0f;
+                        hc.orbit_tick_cd = 0.0f; hc.orbit_hits.clear();
+                        hc.orbit_duration = oc.duration; hc.orbit_radius = oc.radius;
+                        hc.orbit_hit_radius = oc.hit_radius; hc.orbit_damage = oc.damage;
+                        hc.orbit_knockback = oc.knockback; hc.orbit_count = oc.count;
+                        break;
+                    }
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::ThrownCast
+                           && ev.data.size() >= 1 + sizeof(dc::net::ThrownCast)) {
+                    dc::net::ThrownCast tc; std::memcpy(&tc, ev.data.data() + 1, sizeof tc);
+                    for (auto& hc : host_clients) if (hc.peer == ev.peer) {
+                        hc.thrown_active = true; hc.thrown_returning = false;
+                        hc.thrown_traveled = 0.0f; hc.thrown_spin = 0.0f; hc.thrown_hits.clear();
+                        hc.thrown_pos[0] = tc.ox; hc.thrown_pos[1] = tc.oy; hc.thrown_pos[2] = tc.oz;
+                        hc.thrown_dir[0] = tc.dx; hc.thrown_dir[1] = tc.dy; hc.thrown_dir[2] = tc.dz;
+                        hc.throw_speed = tc.speed; hc.throw_distance = tc.distance; hc.throw_radius = tc.radius;
+                        hc.throw_damage = tc.damage; hc.throw_knockback = tc.knockback; hc.thrown_size = tc.size;
                         break;
                     }
                 } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::OpenChest
@@ -686,6 +716,18 @@ int main(int argc, char** argv) {
             orbit.hit_ids.clear();
             player.stamina -= player.weapon->stamina_per_orbit * player.stamina_mult;
             orbit_cd = player.weapon->orbit_cooldown;
+            if (net.role == dc::net::Role::Client) {   // reliable cast: host runs damage + broadcasts
+                const auto& w = *player.weapon;
+                dc::net::OrbitCast oc;
+                oc.duration = w.orbit_duration; oc.radius = w.orbit_radius;
+                oc.hit_radius = w.orbit_hit_radius * player.sword_scale;
+                oc.damage = w.orbit_damage * player.damage_mult; oc.knockback = player.stats.knockback;
+                oc.count = w.orbit_count;
+                unsigned char buf[1 + sizeof oc];
+                buf[0] = static_cast<unsigned char>(dc::net::MsgType::OrbitCast);
+                std::memcpy(buf + 1, &oc, sizeof oc);
+                net.send_to_host(buf, sizeof buf, true);
+            }
         }
         // Start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
         // the difference is resolved at the strike frame below.
@@ -701,8 +743,6 @@ int main(int argc, char** argv) {
             }
         }
         bool player_strike = false;        // true only on the frame a MELEE swing connects
-        bool thrown_reset  = false;        // frame the thrown sword clears its hit-ids (launch / turn)
-        bool orbit_tick_now = false;       // frame an orbit damage-tick fires
         if (punching) {
             punch_time += dt * atk_speed;
             if (!punch_struck && punch_time >= PUNCH_STRIKE) {
@@ -711,13 +751,26 @@ int main(int argc, char** argv) {
                     // Release: detach the sword as a spinning projectile flying forward.
                     thrown.active = true; thrown.returning = false;
                     thrown.traveled = 0.0f; thrown.spin = 0.0f; thrown.hit_ids.clear();
-                    thrown_reset = true;
                     // Launch from the eye along the full 3D look direction (yaw + pitch),
                     // so the sword flies exactly where the crosshair points.
                     glm_vec3_copy(player.position, thrown.pos);
                     vec3 f; player.front(f);   // already normalized
                     glm_vec3_copy(f, thrown.dir);
                     throw_cd = player.weapon->throw_cooldown;
+                    if (net.role == dc::net::Role::Client) {   // reliable cast: host flies + damages it
+                        const auto& w = *player.weapon;
+                        dc::net::ThrownCast tc;
+                        tc.dx = f[0]; tc.dy = f[1]; tc.dz = f[2];
+                        tc.ox = player.position[0]; tc.oy = player.position[1]; tc.oz = player.position[2];
+                        tc.speed = w.throw_speed; tc.distance = w.throw_distance;
+                        tc.radius = w.throw_radius * w.throw_size * player.sword_scale;
+                        tc.damage = w.throw_damage * player.damage_mult; tc.knockback = player.stats.knockback;
+                        tc.size = w.throw_size;
+                        unsigned char buf[1 + sizeof tc];
+                        buf[0] = static_cast<unsigned char>(dc::net::MsgType::ThrownCast);
+                        std::memcpy(buf + 1, &tc, sizeof tc);
+                        net.send_to_host(buf, sizeof buf, true);
+                    }
                 } else {
                     player_strike = true;
                 }
@@ -893,7 +946,7 @@ int main(int argc, char** argv) {
                 thrown.pos[1] += thrown.dir[1] * step;
                 thrown.pos[2] += thrown.dir[2] * step;
                 thrown.traveled += step;
-                if (thrown.traveled >= w.throw_distance) { thrown.returning = true; thrown.hit_ids.clear(); thrown_reset = true; }
+                if (thrown.traveled >= w.throw_distance) { thrown.returning = true; thrown.hit_ids.clear(); }
             } else {
                 // Boomerang back to the player's current eye, in 3D.
                 float hx = player.position[0] - thrown.pos[0];
@@ -920,7 +973,6 @@ int main(int argc, char** argv) {
             if (orbit.active && orbit.tick <= 0.0f) {
                 orbit.tick = 0.25f;       // damage-tick interval
                 orbit.hit_ids.clear();
-                orbit_tick_now = true;
                 for (int i = 0; i < w.orbit_count; ++i) {
                     float a = orbit.angle + (6.2831853f * i) / w.orbit_count;
                     vec3 p = { player.position[0] + std::cos(a) * w.orbit_radius, 0.0f,
@@ -947,38 +999,51 @@ int main(int argc, char** argv) {
             if (bash.time >= s.bash_duration) bash.active = false;
         }
 
-        // Each connected client's specials: the client simulates the flight/orbit;
-        // the host applies the damage here (authoritative) at the reported positions,
-        // with a per-client hit set so each enemy is hit once per leg / per tick.
+        // Each connected client's specials are HOST-RUN from their reliable *Cast
+        // events: the host owns the motion + damage on its own clock (same as the local
+        // player's specials), and broadcasts the state. No trust in a per-frame stream.
         if (net.role == dc::net::Role::Host) {
             for (auto& hc : host_clients) {
-                if (hc.input.thrown_active) {
-                    if (hc.input.thrown_reset) hc.thrown_hits.clear();
-                    vec3 tp = { hc.input.thrown_x, 0.0f, hc.input.thrown_z };
-                    dc::entity::radius_attack(entities, tp, hc.input.thrown_hit_radius,
-                                              hc.input.thrown_damage, hc.input.thrown_knockback, hc.thrown_hits);
-                } else if (!hc.thrown_hits.empty()) {
-                    hc.thrown_hits.clear();   // throw ended -> reset for the next one
+                // Thrown sword: fly out along the cast dir, then boomerang to the client's
+                // live body; damage (2D xz) once per leg via the per-client hit set.
+                if (hc.thrown_active) {
+                    hc.thrown_spin += 22.0f * dt;
+                    const float step = hc.throw_speed * dt;
+                    if (!hc.thrown_returning) {
+                        hc.thrown_pos[0] += hc.thrown_dir[0]*step; hc.thrown_pos[1] += hc.thrown_dir[1]*step; hc.thrown_pos[2] += hc.thrown_dir[2]*step;
+                        hc.thrown_traveled += step;
+                        if (hc.thrown_traveled >= hc.throw_distance) { hc.thrown_returning = true; hc.thrown_hits.clear(); }
+                    } else {
+                        const float bx = hc.body.position[0]-hc.thrown_pos[0], by = hc.body.position[1]-hc.thrown_pos[1], bz = hc.body.position[2]-hc.thrown_pos[2];
+                        const float bd = std::sqrt(bx*bx + by*by + bz*bz);
+                        if (bd < 1.0f) hc.thrown_active = false;
+                        else { hc.thrown_pos[0]+=bx/bd*step; hc.thrown_pos[1]+=by/bd*step; hc.thrown_pos[2]+=bz/bd*step; }
+                    }
+                    if (hc.thrown_active) {
+                        vec3 tp = { hc.thrown_pos[0], 0.0f, hc.thrown_pos[2] };
+                        dc::entity::radius_attack(entities, tp, hc.throw_radius, hc.throw_damage, hc.throw_knockback, hc.thrown_hits);
+                    }
                 }
-                // Orbit damage: the host runs the 0.25s tick cadence itself rather than
-                // trusting the client's one-frame `orbit_tick` pulse (sent unreliably,
-                // so it's almost always lost before the host's combat step).
-                if (hc.input.orbit_active) {
+                // Orbit: revolve + tick damage on the host's own 0.25s cadence.
+                if (hc.orbit_active) {
+                    hc.orbit_time += dt;
+                    hc.orbit_angle += 3.0f * dt;
+                    hc.orbit_spin  += 22.0f * dt;
                     hc.orbit_tick_cd -= dt;
                     if (hc.orbit_tick_cd <= 0.0f) {
                         hc.orbit_tick_cd = 0.25f;
-                        hc.orbit_hits.clear();    // each tick shares one hit set (one hit per tick)
-                        for (int i = 0; i < hc.input.orbit_count; ++i) {
-                            float a = hc.input.orbit_angle + (6.2831853f * i) / hc.input.orbit_count;
-                            vec3 op = { hc.body.position[0] + std::cos(a) * hc.input.orbit_radius, 0.0f,
-                                        hc.body.position[2] + std::sin(a) * hc.input.orbit_radius };
-                            dc::entity::radius_attack(entities, op, hc.input.orbit_hit_radius,
-                                                      hc.input.orbit_damage, hc.input.orbit_knockback, hc.orbit_hits);
+                        hc.orbit_hits.clear();
+                        for (int i = 0; i < hc.orbit_count; ++i) {
+                            float a = hc.orbit_angle + (6.2831853f * i) / hc.orbit_count;
+                            vec3 op = { hc.body.position[0] + std::cos(a) * hc.orbit_radius, 0.0f,
+                                        hc.body.position[2] + std::sin(a) * hc.orbit_radius };
+                            dc::entity::radius_attack(entities, op, hc.orbit_hit_radius,
+                                                      hc.orbit_damage, hc.orbit_knockback, hc.orbit_hits);
                         }
                     }
-                } else {
-                    hc.orbit_tick_cd = 0.0f;   // ready to bite immediately next activation
-                    if (!hc.orbit_hits.empty()) hc.orbit_hits.clear();
+                    if (hc.orbit_time >= hc.orbit_duration) hc.orbit_active = false;
+                } else if (!hc.orbit_hits.empty()) {
+                    hc.orbit_hits.clear();
                 }
                 // Bash nova (host-run from the BashCast event): expand + shove outward.
                 if (hc.bash_active) {
@@ -1052,26 +1117,8 @@ int main(int argc, char** argv) {
             cmd.weight = pc.weight; cmd.block_cos = pc.block_cos; cmd.block_rate = pc.block_rate;
             cmd.stamina = player.stamina;
             cmd.sword_scale = player.sword_scale;
-            // Specials: report flight/orbit state + effective damage stats so the host
-            // can apply the damage authoritatively and everyone can render them.
-            if (thrown.active && player.weapon) {
-                const auto& w = *player.weapon;
-                cmd.thrown_active = 1; cmd.thrown_reset = thrown_reset ? 1 : 0;
-                cmd.thrown_x = thrown.pos[0]; cmd.thrown_y = thrown.pos[1]; cmd.thrown_z = thrown.pos[2]; cmd.thrown_spin = thrown.spin;
-                cmd.thrown_size = w.throw_size;
-                cmd.thrown_hit_radius = w.throw_radius * w.throw_size * player.sword_scale;
-                cmd.thrown_damage = w.throw_damage * player.damage_mult;
-                cmd.thrown_knockback = player.stats.knockback;
-            }
-            if (orbit.active && player.weapon) {
-                const auto& w = *player.weapon;
-                cmd.orbit_active = 1; cmd.orbit_tick = orbit_tick_now ? 1 : 0;
-                cmd.orbit_count = w.orbit_count; cmd.orbit_angle = orbit.angle; cmd.orbit_spin = orbit.spin;
-                cmd.orbit_radius = w.orbit_radius;
-                cmd.orbit_hit_radius = w.orbit_hit_radius * player.sword_scale;
-                cmd.orbit_damage = w.orbit_damage * player.damage_mult;
-                cmd.orbit_knockback = player.stats.knockback;
-            }
+            // (Specials are no longer streamed — they're sent as reliable cast events
+            // at their trigger points; the host runs + broadcasts them.)
             unsigned char buf[1 + sizeof cmd];
             buf[0] = static_cast<unsigned char>(dc::net::MsgType::Input);
             std::memcpy(buf + 1, &cmd, sizeof cmd);
@@ -1155,12 +1202,12 @@ int main(int argc, char** argv) {
                 r.punching = hc.input.anim_punch != 0; r.blocking = hc.input.anim_block != 0;
                 r.punch_time = hc.input.punch_time; r.block_time = hc.input.block_time;
                 r.hit_flash = hc.body.hit_flash; r.sword_scale = hc.input.sword_scale;
-                r.thrown_active = hc.input.thrown_active != 0;
-                r.thrown_x = hc.input.thrown_x; r.thrown_y = hc.input.thrown_y; r.thrown_z = hc.input.thrown_z;
-                r.thrown_spin = hc.input.thrown_spin; r.thrown_size = hc.input.thrown_size;
-                r.orbit_active = hc.input.orbit_active != 0; r.orbit_count = hc.input.orbit_count;
-                r.orbit_angle = hc.input.orbit_angle; r.orbit_spin = hc.input.orbit_spin;
-                r.orbit_radius = hc.input.orbit_radius;
+                r.thrown_active = hc.thrown_active;
+                r.thrown_x = hc.thrown_pos[0]; r.thrown_y = hc.thrown_pos[1]; r.thrown_z = hc.thrown_pos[2];
+                r.thrown_spin = hc.thrown_spin; r.thrown_size = hc.thrown_size;
+                r.orbit_active = hc.orbit_active; r.orbit_count = hc.orbit_count;
+                r.orbit_angle = hc.orbit_angle; r.orbit_spin = hc.orbit_spin;
+                r.orbit_radius = hc.orbit_radius;
                 r.bash_active = hc.bash_active; r.bash_radius = hc.bash_radius;
                 remotes.push_back(r);
             }
@@ -1252,10 +1299,10 @@ int main(int argc, char** argv) {
                 s.punching = hc.input.anim_punch; s.blocking = hc.input.anim_block;
                 s.punch_time = hc.input.punch_time; s.block_time = hc.input.block_time;
                 s.hit_flash = hc.body.hit_flash; s.sword_scale = hc.input.sword_scale;
-                s.thrown_active = hc.input.thrown_active; s.thrown_x = hc.input.thrown_x; s.thrown_y = hc.input.thrown_y;
-                s.thrown_z = hc.input.thrown_z; s.thrown_spin = hc.input.thrown_spin; s.thrown_size = hc.input.thrown_size;
-                s.orbit_active = hc.input.orbit_active; s.orbit_count = hc.input.orbit_count;
-                s.orbit_angle = hc.input.orbit_angle; s.orbit_spin = hc.input.orbit_spin; s.orbit_radius = hc.input.orbit_radius;
+                s.thrown_active = hc.thrown_active ? 1 : 0; s.thrown_x = hc.thrown_pos[0]; s.thrown_y = hc.thrown_pos[1];
+                s.thrown_z = hc.thrown_pos[2]; s.thrown_spin = hc.thrown_spin; s.thrown_size = hc.thrown_size;
+                s.orbit_active = hc.orbit_active ? 1 : 0; s.orbit_count = hc.orbit_count;
+                s.orbit_angle = hc.orbit_angle; s.orbit_spin = hc.orbit_spin; s.orbit_radius = hc.orbit_radius;
                 s.bash_active = hc.bash_active ? 1 : 0; s.bash_radius = hc.bash_radius;
                 put(&s, sizeof s);
             }
@@ -1518,9 +1565,11 @@ int main(int argc, char** argv) {
             if (rp.punching) rl.push_back({ &model_data.punch, rp.punch_time, model_data.arm_l_node });
             if (rp.blocking) rl.push_back({ &model_data.block, rp.block_time, model_data.arm_r_node, false });
             dc::renderer::Mat4 r_head, r_lhand, r_rhand;
-            dc::renderer::pose_model(model_data, rl, rp.pitch, remote_part_world,
+            // Pitch the body (not the head) so the arms + held gear aim with the look;
+            // the head tilts too since it's a child of the body bone.
+            dc::renderer::pose_model(model_data, rl, 0.0f, remote_part_world,
                                      { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
-                                     { &r_head, &r_lhand, &r_rhand });
+                                     { &r_head, &r_lhand, &r_rhand }, rp.pitch);
             float rfeet = (rp.pos[1] - dc::world::EYE_HEIGHT) + MODEL_FOOT_LIFT;
             mat4 rplace;
             glm_mat4_identity(rplace);

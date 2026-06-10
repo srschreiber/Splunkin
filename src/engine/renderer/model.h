@@ -59,10 +59,11 @@ struct ModelData {
     Animation            open;   // chest: lid swing (played forward to open)
     Animation            close;  // chest: closed pose (unused for now; open played in reverse closes)
     int head_node  = -1;   // for head-look, the "head" bone
-    int arm_l_node = -1;   
-    int hand_l_node = -1;   
-    int arm_r_node = -1;   
-    int hand_r_node = -1;   
+    int body_node  = -1;   // torso bone (parents arms+head): pitch it to aim the whole upper body
+    int arm_l_node = -1;
+    int hand_l_node = -1;
+    int arm_r_node = -1;
+    int hand_r_node = -1;
 };
 
 bool read_model(const char* path, ModelData& out);

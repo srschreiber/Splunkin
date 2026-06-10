@@ -31,9 +31,12 @@ struct AnimLayer {
 // `attach_nodes[i]` into `*out_attach[i]` — used to hang separate models off
 // animated bones (helmet -> head, shield -> hand, ...). The two vectors must be
 // the same length; pass none for no sockets.
+// `body_pitch` (optional) tilts the torso bone the same way, so the arms + held
+// weapon aim up/down with the look (used for remote players, whose body is drawn).
 void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
                 float head_pitch, std::vector<Mat4>& out_part_world,
-                std::vector<int> attach_nodes = {}, std::vector<Mat4*> out_attach = {});
+                std::vector<int> attach_nodes = {}, std::vector<Mat4*> out_attach = {},
+                float body_pitch = 0.0f);
 
 // Per-part local offset of a model's mesh nodes, relative to their parent bone
 // (the node's own T*R*S). For equipment hung off a socket bone, draw part i at:

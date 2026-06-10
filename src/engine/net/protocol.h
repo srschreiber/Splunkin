@@ -10,13 +10,25 @@ enum class MsgType : uint8_t {
     Input = 1, Snapshot = 2, AssignId = 3,
     OpenChest = 4,      // client -> host: request to buy/open chest [uint32 index]
     ChestGranted = 5,   // host -> client: open approved [uint32 index] (deducted, marked open)
-    BashCast = 6,       // client -> host: cast the shield-bash nova [BashCast payload] (reliable)
+    BashCast = 6,       // client -> host: cast the shield-bash nova [BashCast]   (reliable)
+    OrbitCast = 7,      // client -> host: summon the orbiting swords      [OrbitCast]  (reliable)
+    ThrownCast = 8,     // client -> host: throw the sword                 [ThrownCast] (reliable)
 };
 
-// Client -> host one-shot event: "I cast the bash." The host runs the damage sweep on
-// its own clock and broadcasts the expanding state; the caster predicts locally.
+// Client -> host one-shot "cast" events. The host runs each special on its own clock
+// (motion + damage) and broadcasts the evolving state in the snapshot; the caster
+// predicts locally for responsiveness. Reliable so a cast is never dropped.
 struct BashCast {
     float radius = 0.0f, damage = 0.0f, knockback = 0.0f, duration = 0.0f;
+};
+struct OrbitCast {
+    float duration = 0.0f, radius = 0.0f, hit_radius = 0.0f, damage = 0.0f, knockback = 0.0f;
+    int32_t count = 0;
+};
+struct ThrownCast {
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f;   // launch direction (3D, unit)
+    float ox = 0.0f, oy = 0.0f, oz = 0.0f;   // launch origin (eye)
+    float speed = 0.0f, distance = 0.0f, radius = 0.0f, damage = 0.0f, knockback = 0.0f, size = 1.0f;
 };
 
 // Client -> host, every frame: what the player is doing. Gameplay fields (strike,
@@ -39,17 +51,7 @@ struct InputCmd {
     float   block_cos = 0.0f, block_rate = 0.0f;   // shield arc + stamina-per-damage
     float   stamina = 0.0f;                        // client's current stamina (host needs it to resolve blocks)
     float   sword_scale = 1.0f;   // blade size (drives remote sword render)
-    // Specials. Flight/orbit motion is simulated client-side (cosmetic); the host
-    // applies the damage at the reported positions using these effective stats.
-    uint8_t thrown_active = 0;
-    uint8_t thrown_reset = 0;     // set the frame hit-ids should clear (launch / turn)
-    float   thrown_x = 0.0f, thrown_y = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
-    float   thrown_hit_radius = 0.0f, thrown_damage = 0.0f, thrown_knockback = 0.0f;
-    uint8_t orbit_active = 0;
-    uint8_t orbit_tick = 0;       // a damage tick fires this frame
-    int32_t orbit_count = 0;
-    float   orbit_angle = 0.0f, orbit_spin = 0.0f, orbit_radius = 0.0f;
-    float   orbit_hit_radius = 0.0f, orbit_damage = 0.0f, orbit_knockback = 0.0f;
+    // (Specials are no longer streamed here — they're host-run from the *Cast events.)
 };
 
 // One player's replicated state in a snapshot. Beyond pose, it carries the combat
