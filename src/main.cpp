@@ -1364,8 +1364,13 @@ int main(int argc, char** argv) {
         dc::renderer::Mat4 head_world;
         dc::renderer::Mat4 l_hand_world;
         dc::renderer::Mat4 r_hand_world;
-        dc::renderer::pose_model(model_data, layers, player.pitch, part_world,
-                                 { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node }, { &head_world, &l_hand_world, &r_hand_world });
+        // First person: head-look only (body undrawn; gear aims via the viewmodel tilt).
+        // Third-person debug (V): pitch the body so your own avatar hinges to aim, same
+        // as remotes — charming, and lets you see what everyone else sees.
+        dc::renderer::pose_model(model_data, layers, debug_cone ? 0.0f : player.pitch, part_world,
+                                 { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
+                                 { &head_world, &l_hand_world, &r_hand_world },
+                                 debug_cone ? player.pitch : 0.0f);
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
