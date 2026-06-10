@@ -34,7 +34,7 @@ struct Shield {
     // sweeps far back for light damage. Very high knockback, slow cooldown.
     float bash_radius     = 4.5f;   // how far the shockwave reaches
     float bash_damage     = 8.0f;   // low/moderate
-    float bash_knockback  = 30.0f;  // very high (>> enemy weight -> big shove)
+    float bash_knockback  = 55.0f;  // very high (>> enemy weight -> big shove)
     float bash_duration   = 0.35f;  // seconds for the sphere to expand fully (quick)
     float bash_cooldown   = 8.0f;   // very slow
     float stamina_per_bash = 55.0f;
