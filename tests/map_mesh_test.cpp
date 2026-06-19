@@ -8,7 +8,7 @@
 using namespace dc::world;
 
 int main() {
-    Terrain flat; flat.base_amp = 0.0f; flat.hill_amp = 0.0f;   // height()==0 -> flat ground/walls
+    Terrain flat; flat.base_amp = 0.0f; flat.hill_amp = 0.0f; flat.mound_amp = 0.0f;   // height()==0 -> flat ground/walls
 
     auto m = parse_map(
         "...\n"

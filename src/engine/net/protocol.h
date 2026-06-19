@@ -13,6 +13,12 @@ enum class MsgType : uint8_t {
     BashCast = 6,       // client -> host: cast the shield-bash nova [BashCast]   (reliable)
     OrbitCast = 7,      // client -> host: summon the orbiting swords      [OrbitCast]  (reliable)
     ThrownCast = 8,     // client -> host: throw the sword                 [ThrownCast] (reliable)
+    DashCast = 9,       // client -> host: dodge-dash                       [DashCast]   (reliable)
+    BuyItem = 10,       // client -> host: buy a chest slot [uint32 chest][uint32 slot]   (reliable)
+    ItemGranted = 11,   // host -> client: purchase approved [uint8 upgrade_type]         (reliable)
+    ReleaseChest = 12,  // client -> host: closed the menu without buying [uint32 chest]  (reliable)
+    BuyDrone = 13,      // client -> host: buy a ground drone vendor [uint32 vendor]      (reliable)
+    DroneGranted = 14,  // host -> client: drone purchase approved (gain a gunner minion) (reliable)
 };
 
 // Client -> host one-shot "cast" events. The host runs each special on its own clock
@@ -29,6 +35,11 @@ struct ThrownCast {
     float dx = 0.0f, dy = 0.0f, dz = 0.0f;   // launch direction (3D, unit)
     float ox = 0.0f, oy = 0.0f, oz = 0.0f;   // launch origin (eye)
     float speed = 0.0f, distance = 0.0f, radius = 0.0f, damage = 0.0f, knockback = 0.0f, size = 1.0f;
+};
+struct DashCast {
+    float dx = 0.0f, dz = 0.0f;              // dash direction (horizontal, unit)
+    float speed = 0.0f, iframes = 0.0f, decay = 8.0f;
+    float supersonic = 0.0f;                 // >0: dodge shockwave damage (host fires the AoE)
 };
 
 // Client -> host, every frame: what the player is doing. Gameplay fields (strike,
@@ -51,6 +62,14 @@ struct InputCmd {
     float   block_cos = 0.0f, block_rate = 0.0f;   // shield arc + stamina-per-damage
     float   stamina = 0.0f;                        // client's current stamina (host needs it to resolve blocks)
     float   sword_scale = 1.0f;   // blade size (drives remote sword render)
+    float   crit_chance = 0.0f, crit_mult = 2.0f;  // host rolls the client's melee crits with these
+    float   health_regen = 1.5f;                   // hp/sec the host regens this client's body
+    // Elemental brands the host applies on this client's melee hits.
+    float   fire_dps = 0.0f, fire_duration = 0.0f;
+    float   slow_factor = 1.0f, slow_duration = 0.0f;
+    float   earth_knock = 0.0f;
+    uint8_t minion_count = 0; float minion_damage = 0.0f, minion_range = 18.0f;   // host fires this client's gunner minions
+    float   trail_damage = 0.0f, trail_life = 0.0f;         // trailblazer fire-trail (host damages from it)
     // (Specials are no longer streamed here — they're host-run from the *Cast events.)
 };
 
@@ -65,6 +84,11 @@ struct PlayerState {
     float    health = 0.0f;
     uint8_t  moving = 0;
     int32_t  currency = 0;                   // this player's own coin wallet
+    float    damage_dealt = 0.0f;            // total damage this player has dealt to enemies (scoreboard)
+    uint8_t  elements = 0;                   // equipped elemental brands bitmask (1=fire,2=ice,4=earth) for sword particles
+    uint8_t  minions = 0;                    // gunner minion count, so everyone renders the orbiting drones
+    float    minion_range = 18.0f;           // drone targeting range (for remote drones' laser visuals)
+    float    trail_life = 0.0f;              // trailblazer segment lifetime (>0 = leaving a fire trail)
     float    block_spent = 0.0f;             // stamina the host's block resolution spent for this player this tick
     uint8_t  punching = 0, blocking = 0;
     float    punch_time = 0.0f, block_time = 0.0f;
@@ -83,16 +107,25 @@ struct PlayerState {
 // One enemy's replicated state (render-only on clients).
 struct EnemyState {
     float   x = 0.0f, z = 0.0f, yaw = 0.0f;
-    float   anim_time = 0.0f, attack_time = 0.0f, hit_flash = 0.0f;
+    float   anim_time = 0.0f, attack_time = 0.0f, hit_flash = 0.0f, punch_anim = 0.0f;
     uint8_t attacking = 0;
     uint8_t kind = 0;           // dc::entity::EnemyKind (0 = Melee, 1 = Ranged) -> render color
+    uint8_t status = 0;         // elemental status bitmask (1=burning, 2=slowed) -> fire/ice particles
 };
 
 // One dropped coin's position (render-only on clients).
 struct CoinState { float x = 0.0f, z = 0.0f; };
 
-// One in-flight projectile's position + glow color (render-only on clients).
-struct ProjectileState { float x = 0.0f, y = 0.0f, z = 0.0f, r = 0.75f, g = 0.35f, b = 1.0f; };
+// One in-flight projectile's position + glow color + travel dir (render-only on clients).
+// `beam` => render as a stretched glowing laser (eye); vx/vz give its on-screen orientation.
+struct ProjectileState { float x = 0.0f, y = 0.0f, z = 0.0f, r = 0.75f, g = 0.35f, b = 1.0f;
+                         float vx = 0.0f, vy = 0.0f, vz = 0.0f; uint8_t beam = 0; };
+
+// A floating damage number spawned this tick (host -> everyone): position, amount, crit.
+struct DamageNumState { float x = 0.0f, y = 0.0f, z = 0.0f, amount = 0.0f; uint8_t crit = 0; };
+
+// A dropped chest item lying on the ground (host -> everyone). `type` is dc Upgrade.
+struct GroundItemState { uint32_t id = 0; uint8_t type = 0; float x = 0.0f, y = 0.0f, z = 0.0f; };
 
 // Packets:
 //   Input:    [MsgType::Input]    [InputCmd]

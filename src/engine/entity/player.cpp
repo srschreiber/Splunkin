@@ -41,21 +41,39 @@ void Player::update(float forward, float strafe, bool jump, float dt,
         delta[0] = delta[1] = delta[2] = 0.0f;
     }
 
-    // --- Knockback impulse (decays), added to the move; per-axis wall slide ---
-    delta[0] += knock_vel[0] * dt;
-    delta[2] += knock_vel[2] * dt;
+    // --- Knockback + dodge-dash impulses (each decays at its own rate), added to the
+    // move; per-axis wall slide kills whichever axis hits a wall ---
+    delta[0] += (knock_vel[0] + dash_vel[0]) * dt;
+    delta[2] += (knock_vel[2] + dash_vel[2]) * dt;
 
-    // --- Per-axis slide against the map ---
-    if (!dc::world::circle_hits_solid(map, position[0] + delta[0], position[2], PLAYER_RADIUS))
+    // --- Per-axis slide against the map + a terrain step-up gate. You can't walk UP
+    // terrain that rises more than MAX_STEP_UP within STEP_LOOKAHEAD ahead of you — steep
+    // cliffs act as walls. The gate compares against our FEET, so when a jump lifts us high
+    // enough to clear a low ledge, the rise shrinks and we're allowed to step onto it. ---
+    const float feet = position[1] - dc::world::EYE_HEIGHT;
+    auto step_ok = [&](float nx, float nz, float dirx, float dirz) {
+        const float g = terrain.height(nx + dirx * STEP_LOOKAHEAD, nz + dirz * STEP_LOOKAHEAD);
+        return g - feet <= MAX_STEP_UP;
+    };
+    const float sx = delta[0] > 0.0f ? 1.0f : (delta[0] < 0.0f ? -1.0f : 0.0f);
+    const float sz = delta[2] > 0.0f ? 1.0f : (delta[2] < 0.0f ? -1.0f : 0.0f);
+    if (!dc::world::circle_hits_solid(map, position[0] + delta[0], position[2], PLAYER_RADIUS)
+        && step_ok(position[0] + delta[0], position[2], sx, 0.0f))
         position[0] += delta[0];
-    else knock_vel[0] = 0.0f;   // hit a wall: kill that knockback axis
-    if (!dc::world::circle_hits_solid(map, position[0], position[2] + delta[2], PLAYER_RADIUS))
+    else { knock_vel[0] = 0.0f; dash_vel[0] = 0.0f; }   // hit a wall / too-steep rise: kill that axis
+    if (!dc::world::circle_hits_solid(map, position[0], position[2] + delta[2], PLAYER_RADIUS)
+        && step_ok(position[0], position[2] + delta[2], 0.0f, sz))
         position[2] += delta[2];
-    else knock_vel[2] = 0.0f;
+    else { knock_vel[2] = 0.0f; dash_vel[2] = 0.0f; }
 
     const float kdamp = std::exp(-KNOCK_DAMP * dt);
     knock_vel[0] *= kdamp;
     knock_vel[2] *= kdamp;
+    const float ddamp = std::exp(-dash_decay * dt);
+    dash_vel[0] *= ddamp;
+    dash_vel[2] *= ddamp;
+    if (iframes > 0.0f) iframes -= dt;
+    if (dash_cd > 0.0f) dash_cd -= dt;
 
     // --- Vertical: gravity + jump, landing on the terrain under us (open-top) ---
     if (jump && on_ground) {

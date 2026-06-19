@@ -5,8 +5,31 @@
 
 #include <glad/gl.h>
 #include <cstring>
+#include <cstdio>
+#include <fstream>
 
 namespace dc::renderer {
+
+namespace {
+// Baked glyph range + atlas size. 32..126 covers printable ASCII. Baked once at a
+// generous pixel height; draw_text scales down (or up) from there.
+constexpr int   FONT_FIRST    = 32;
+constexpr int   FONT_COUNT    = 95;     // 32..126
+constexpr int   FONT_ATLAS_W  = 512;
+constexpr int   FONT_ATLAS_H  = 512;
+constexpr float FONT_BAKE_PX  = 64.0f;
+constexpr char  FONT_PATH[]   = "assets/fonts/sansrounded.ttf";
+
+bool read_file(const char* path, std::vector<unsigned char>& out) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return false;
+    const std::streamsize n = f.tellg();
+    if (n <= 0) return false;
+    f.seekg(0);
+    out.resize(static_cast<size_t>(n));
+    return static_cast<bool>(f.read(reinterpret_cast<char*>(out.data()), n));
+}
+} // namespace
 
 bool Renderer::init() {
     world_program = load_program("assets/shaders/world.vert", "assets/shaders/world.frag");
@@ -45,6 +68,62 @@ bool Renderer::init() {
     glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, pstride, (void*)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
     glBindVertexArray(0);
+
+    // Text: textured-quad program + a baked glyph atlas. Optional — if either the
+    // shader or the font is missing we warn and run without text (text_program stays 0).
+    text_program = load_program("assets/shaders/text.vert", "assets/shaders/text.frag");
+    if (text_program) {
+        text_atlas_loc = glGetUniformLocation(text_program, "u_atlas");
+        glGenVertexArrays(1, &text_vao);
+        glGenBuffers(1, &text_vbo);
+        glBindVertexArray(text_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
+        const GLsizei tstride = 8 * sizeof(float);   // pos(2) + uv(2) + rgba(4)
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, tstride, (void*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, tstride, (void*)(2 * sizeof(float)));
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, tstride, (void*)(4 * sizeof(float)));
+        glEnableVertexAttribArray(2);
+        glBindVertexArray(0);
+
+        std::vector<unsigned char> ttf;
+        if (read_file(FONT_PATH, ttf)) {
+            std::vector<unsigned char> bitmap(static_cast<size_t>(FONT_ATLAS_W) * FONT_ATLAS_H);
+            text_chars.resize(FONT_COUNT);
+            stbtt_BakeFontBitmap(ttf.data(), 0, FONT_BAKE_PX, bitmap.data(),
+                                 FONT_ATLAS_W, FONT_ATLAS_H, FONT_FIRST, FONT_COUNT, text_chars.data());
+            text_bake_px = FONT_BAKE_PX;
+            // Baseline drop from the top of the EM box, so callers can treat (x,y) as the
+            // text's top-left corner.
+            stbtt_fontinfo info;
+            if (stbtt_InitFont(&info, ttf.data(), stbtt_GetFontOffsetForIndex(ttf.data(), 0))) {
+                const float s = stbtt_ScaleForPixelHeight(&info, FONT_BAKE_PX);
+                int asc = 0, desc = 0, gap = 0;
+                stbtt_GetFontVMetrics(&info, &asc, &desc, &gap);
+                text_ascent = asc * s;
+            } else {
+                text_ascent = FONT_BAKE_PX * 0.8f;
+            }
+            // Upload the coverage atlas as a single-channel (R8) texture. Rows are byte-
+            // packed, so drop the unpack alignment to 1 for the upload.
+            glGenTextures(1, &text_atlas);
+            glBindTexture(GL_TEXTURE_2D, text_atlas);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, FONT_ATLAS_W, FONT_ATLAS_H, 0,
+                         GL_RED, GL_UNSIGNED_BYTE, bitmap.data());
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, 0);
+        } else {
+            std::fprintf(stderr, "renderer: could not load font %s — text disabled\n", FONT_PATH);
+        }
+    } else {
+        std::fprintf(stderr, "renderer: text shader failed to load — text disabled\n");
+    }
 
     const char* paths[3] = {
         "assets/textures/stonefloor0.png",
@@ -177,14 +256,83 @@ void Renderer::draw_hud(const std::vector<float>& verts) {
     glBindVertexArray(0);
 }
 
+void Renderer::draw_text(const char* text, float x, float y, float px_height,
+                         const vec3 color, float alpha, int fb_w, int fb_h) {
+    if (!text_program || !text_atlas || !text || fb_w <= 0 || fb_h <= 0) return;
+    const float scale = (text_bake_px > 0.0f) ? px_height / text_bake_px : 1.0f;
+    // Anchor (top-left) in device pixels (NDC y is up; pixel y is down from the top).
+    const float ax = (x * 0.5f + 0.5f) * fb_w;
+    const float top = (1.0f - (y * 0.5f + 0.5f)) * fb_h;
+    const float baseline = top + text_ascent * scale;
+
+    std::vector<float> verts;
+    verts.reserve(std::strlen(text) * 48);
+    float pen_x = 0.0f, pen_y = 0.0f;   // baked-pixel pen; baseline kept at y=0
+    const float r = color[0], g = color[1], b = color[2];
+    for (const char* p = text; *p; ++p) {
+        const unsigned char c = static_cast<unsigned char>(*p);
+        if (c < FONT_FIRST || c >= FONT_FIRST + text_chars.size()) continue;
+        stbtt_aligned_quad q;
+        stbtt_GetBakedQuad(text_chars.data(), FONT_ATLAS_W, FONT_ATLAS_H,
+                           c - FONT_FIRST, &pen_x, &pen_y, &q, 1);
+        // Quad corners: baked-pixel offsets from the pen, scaled and placed at the anchor,
+        // then converted to NDC (flip y).
+        const float px0 = ax + q.x0 * scale, px1 = ax + q.x1 * scale;
+        const float py0 = baseline + q.y0 * scale, py1 = baseline + q.y1 * scale;
+        const float nx0 = px0 / fb_w * 2.0f - 1.0f, nx1 = px1 / fb_w * 2.0f - 1.0f;
+        const float ny0 = 1.0f - py0 / fb_h * 2.0f, ny1 = 1.0f - py1 / fb_h * 2.0f;
+        auto V = [&](float vx, float vy, float s, float t) {
+            verts.insert(verts.end(), { vx, vy, s, t, r, g, b, alpha });
+        };
+        V(nx0, ny0, q.s0, q.t0); V(nx1, ny0, q.s1, q.t0); V(nx1, ny1, q.s1, q.t1);
+        V(nx0, ny0, q.s0, q.t0); V(nx1, ny1, q.s1, q.t1); V(nx0, ny1, q.s0, q.t1);
+    }
+    if (verts.empty()) return;
+
+    glUseProgram(text_program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, text_atlas);
+    glUniform1i(text_atlas_loc, 0);
+
+    glBindVertexArray(text_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                 verts.data(), GL_STREAM_DRAW);
+
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 8));
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glBindVertexArray(0);
+}
+
+float Renderer::text_width(const char* text, float px_height, int fb_w) const {
+    if (!text_program || !text || fb_w <= 0) return 0.0f;
+    const float scale = (text_bake_px > 0.0f) ? px_height / text_bake_px : 1.0f;
+    float w = 0.0f;
+    for (const char* p = text; *p; ++p) {
+        const unsigned char c = static_cast<unsigned char>(*p);
+        if (c < FONT_FIRST || c >= FONT_FIRST + text_chars.size()) continue;
+        w += text_chars[c - FONT_FIRST].xadvance * scale;
+    }
+    return w / fb_w * 2.0f;   // device px -> NDC-x
+}
+
 void Renderer::shutdown() {
     if (texture) glDeleteTextures(1, &texture);
+    if (text_atlas) glDeleteTextures(1, &text_atlas);
     if (particle_vbo) glDeleteBuffers(1, &particle_vbo);
+    if (text_vbo) glDeleteBuffers(1, &text_vbo);
     if (particle_vao) glDeleteVertexArrays(1, &particle_vao);
+    if (text_vao) glDeleteVertexArrays(1, &text_vao);
     if (world_program) glDeleteProgram(world_program);
     if (model_program) glDeleteProgram(model_program);
     if (particle_program) glDeleteProgram(particle_program);
+    if (text_program) glDeleteProgram(text_program);
     world_program = model_program = particle_program = texture = 0;
+    text_program = text_atlas = text_vao = text_vbo = 0;
     particle_vao = particle_vbo = 0;
     world_viewproj_loc = model_viewproj_loc = model_model_loc = model_color_loc = -1;
 }

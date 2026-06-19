@@ -16,6 +16,8 @@
 #include "engine/fx/particles.h"
 #include "engine/net/net.h"
 #include "engine/net/protocol.h"
+#include "game/upgrades.h"
+#include "game/seven_seg.h"
 
 #include <SDL3/SDL.h>
 #include <cglm/cglm.h>
@@ -34,12 +36,25 @@ static std::string read_file(const char* path) {
     std::stringstream ss; ss << f.rdbuf(); return ss.str();
 }
 
-// A placed chest. One-way: once opened, the lid stays open. Costs `cost` coins.
+// Upgrades + their catalog (Upgrade, IconShape, UpgradeDef, upgrade_def, apply_upgrade,
+// elem_mask) live in game/upgrades.h, included above.
+
+inline constexpr uint32_t NO_LOCK = 0xFFFFFFFFu;   // chest.locked_by sentinel: nobody's in the menu
+
+// A placed chest holding 4 items. A player opens its menu (one player at a time) and
+// buys ONE remaining item for `cost`; others buy the rest until it's depleted, then the
+// price disappears and the lid stays open. `contents` is seeded deterministically so
+// every peer agrees; only `taken`/`opened` (and the host's lock) change at runtime.
 struct Chest {
     int   col = 0, row = 0;
     float open_t = 0.0f;    // time into the open clip (0 = closed)
-    bool  opened = false;
-    int   cost   = 10;      // coins to open
+    bool  opened = false;   // lid open (set on first open; stays open once depleted)
+    int   cost   = 10;      // coins per item
+    Upgrade contents[4] = {};   // the 4 items (deterministic from the seed)
+    bool    taken[4] = {};      // which slots have been purchased
+    uint32_t locked_by = NO_LOCK;  // player id with the menu open (host-authoritative)
+    float    lock_time = 0.0f;     // host: auto-release countdown (safety)
+    int remaining() const { int n = 0; for (bool t : taken) if (!t) ++n; return n; }
 };
 
 // A dropped coin: sits on the floor (settling), then magnets to the player and
@@ -50,60 +65,15 @@ struct Coin {
     float age   = 0.0f;
 };
 
-// 7-segment digit: calls box(u0,v0,u1,v1) for each lit segment of digit `d`, in a
-// local cell of width w / height h / segment thickness t (origin at bottom-left).
-// Callers map the boxes to whatever they draw (HUD rects, billboarded quads, ...).
-//
-// Segment layout (the shape of an 8) and their bit positions in `seg`:
-//        aaaa            a = bit 0
-//       f    b           b = bit 1
-//       f    b           c = bit 2
-//        gggg            d = bit 3
-//       e    c           e = bit 4
-//       e    c           f = bit 5
-//        dddd            g = bit 6
-// e.g. seg['8'] lights all 7; seg['1'] lights only b,c.
-template <class Box>
-static void seven_seg(int d, float w, float h, float t, Box box) {
-    static const unsigned char seg[10] =
-        { 0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F };
-    if (d < 0 || d > 9) return;
-    const unsigned char m = seg[d];
-    const float top = h, mid = h * 0.5f, bot = 0.0f;
-    auto on = [&](int bit) { return (m >> bit) & 1; };
-    if (on(0)) box(t,        top - t,        w - t, top);              // a (top)
-    if (on(1)) box(w - t,    mid,            w,     top);              // b (top-right)
-    if (on(2)) box(w - t,    bot,            w,     mid);              // c (bottom-right)
-    if (on(3)) box(t,        bot,            w - t, bot + t);          // d (bottom)
-    if (on(4)) box(0.0f,     bot,            t,     mid);              // e (bottom-left)
-    if (on(5)) box(0.0f,     mid,            t,     top);              // f (top-left)
-    if (on(6)) box(t,        mid - t * 0.5f, w - t, mid + t * 0.5f);   // g (middle)
-}
+// An updraft pad: stepping onto it launches you upward (traversal). Position only;
+// placed deterministically so every peer agrees (no replication).
+struct Updraft { float x = 0.0f, z = 0.0f; };
 
-// Chest upgrade cards (color-coded, no text for now).
-enum class Upgrade { StaminaCost, Knockback, Damage, SwingArc };
+// A drone vending spot: a gunner drone lying on the ground with a price floating above.
+// Pay the cost (E) to gain a gunner minion; one-time (consumed on purchase).
+struct DroneVendor { float x = 0.0f, z = 0.0f; bool bought = false; };
 
-// Apply one upgrade to the player (stacks additively/multiplicatively each pick).
-static void apply_upgrade(dc::entity::Player& p, Upgrade u) {
-    switch (u) {
-        case Upgrade::StaminaCost: p.stamina_mult *= 0.85f;       break;  // green: -15% costs
-        case Upgrade::Knockback:   p.stats.knockback += 4.0f;     break;  // yellow
-        case Upgrade::Damage:      p.damage_mult += 0.25f;        break;  // red: +25% dmg
-        case Upgrade::SwingArc:    p.swing_reach_bonus += 0.5f;           // blue: longer + wider swing
-                                   p.swing_cone_bonus  += 0.12f;
-                                   p.sword_scale       += 0.2f;   break;  // + a bigger blade
-    }
-}
 
-// Card color per upgrade (green / yellow / red / blue).
-static void upgrade_color(Upgrade u, float& r, float& g, float& b) {
-    switch (u) {
-        case Upgrade::StaminaCost: r = 0.20f; g = 0.85f; b = 0.30f; break;  // green
-        case Upgrade::Knockback:   r = 0.90f; g = 0.80f; b = 0.15f; break;  // yellow
-        case Upgrade::Damage:      r = 0.85f; g = 0.20f; b = 0.20f; break;  // red
-        case Upgrade::SwingArc:    r = 0.25f; g = 0.50f; b = 1.00f; break;  // blue
-    }
-}
 
 int main(int argc, char** argv) {
     bool smoke = false;
@@ -164,6 +134,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "could not load model: assets/models/sword.glb\n");
         return 1;
     }
+    // Flying enemy model (optional): falls back to the red cube if it's missing.
+    dc::renderer::ModelData eye_data;
+    const bool eye_loaded = dc::renderer::read_model("assets/models/eye_enemy.glb", eye_data);
+    if (!eye_loaded) std::fprintf(stderr, "note: assets/models/eye_enemy.glb not found; flyers use the cube\n");
 
     dc::platform::Window window;
     if (!window.init("dungeoncrawl")) return 1;
@@ -174,7 +148,18 @@ int main(int argc, char** argv) {
     // Procedural terrain: gentle hills under the open floor (seed -> identical on
     // host + clients). Walls/gameplay come from the tile map; this only shapes height.
     dc::world::Terrain terrain;
+    // Second map-gen pass: scatter sheer-cliff plateaus (deterministic) before meshing.
+    terrain.place_plateaus(6, map->width * dc::world::TILE, map->height * dc::world::TILE,
+                           (map->spawn_col + 0.5f) * dc::world::TILE, (map->spawn_row + 0.5f) * dc::world::TILE);
     const vec3 terrain_color = { 0.32f, 0.40f, 0.26f };   // mossy green-brown
+
+    // Per-tile ground height (sampled at tile centers), computed once — terrain is static.
+    // Feeds the directional flow field so enemies path to ramps instead of up cliffs.
+    std::vector<float> tile_heights(static_cast<std::size_t>(map->width) * map->height);
+    for (int r = 0; r < map->height; ++r)
+        for (int c = 0; c < map->width; ++c)
+            tile_heights[static_cast<std::size_t>(r) * map->width + c] =
+                terrain.height((c + 0.5f) * dc::world::TILE, (r + 0.5f) * dc::world::TILE);
 
     dc::renderer::Mesh mesh;
     mesh.upload(dc::world::build_map_mesh(*map, terrain));   // walls (textured)
@@ -195,7 +180,10 @@ int main(int argc, char** argv) {
     shield_model.upload(shield_data);
 
     dc::renderer::Model sword_model;
-    sword_model.upload(sword_data); 
+    sword_model.upload(sword_data);
+
+    dc::renderer::Model eye_model;
+    if (eye_loaded) eye_model.upload(eye_data);
 
     dc::renderer::Model torch_model;
     torch_model.upload(torch_data);
@@ -210,6 +198,64 @@ int main(int argc, char** argv) {
     // Spawn a chest entity per 'C' tile in the map.
     std::vector<Chest> chests;
     for (const auto& cs : map->chests) chests.push_back({ cs.col, cs.row });
+    // Predetermine each chest's 4 items at startup, seeded from the map so EVERY peer
+    // computes the same contents (no need to replicate them — only taken/opened change).
+    {
+        uint32_t seed = 0x51ED7u + static_cast<uint32_t>(map->width * 73856093 + map->height * 19349663);
+        auto nextu = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+        for (auto& ch : chests)
+            for (int k = 0; k < 4; ++k) ch.contents[k] = static_cast<Upgrade>(nextu() % UPGRADE_COUNT);
+    }
+    int menu_chest = -1;   // index of the chest whose purchase menu is open locally (-1 = none)
+    vec3 player_prev = {0,0,0};   // local player's last-frame position (for shot-leading velocity)
+
+    // Updraft launch pads (slipstreams): mostly placed ON TOP of and AROUND the plateaus
+    // (deterministic from the map seed, so all peers agree). On a plateau they launch you
+    // higher; at the base, combined with the wind shove they help fling you up onto it.
+    std::vector<Updraft> updrafts;
+    {
+        uint32_t s = 0x0DDBA11u + static_cast<uint32_t>(map->width * 2654435761u);
+        auto nf = [&](float lo, float hi) {
+            s = s * 1664525u + 1013904223u;
+            return lo + (hi - lo) * ((s >> 8) * (1.0f / 16777216.0f));
+        };
+        const float worldW = map->width * dc::world::TILE, worldH = map->height * dc::world::TILE;
+        auto clampw = [](float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); };
+        for (const auto& p : terrain.plateaus) {
+            // One on top (kept off the rim so you don't immediately drift off the edge).
+            updrafts.push_back({ nf(p.x0 + 3.0f, p.x1 - 3.0f), nf(p.z0 + 3.0f, p.z1 - 3.0f) });
+            // One just outside a random edge, at the cliff base.
+            const float pad = 4.0f;
+            switch (static_cast<int>(nf(0.0f, 4.0f))) {
+                case 0:  updrafts.push_back({ clampw(p.x1 + pad, 2.0f, worldW - 2.0f), nf(p.z0, p.z1) }); break;
+                case 1:  updrafts.push_back({ clampw(p.x0 - pad, 2.0f, worldW - 2.0f), nf(p.z0, p.z1) }); break;
+                case 2:  updrafts.push_back({ nf(p.x0, p.x1), clampw(p.z1 + pad, 2.0f, worldH - 2.0f) }); break;
+                default: updrafts.push_back({ nf(p.x0, p.x1), clampw(p.z0 - pad, 2.0f, worldH - 2.0f) }); break;
+            }
+        }
+        // A couple of extra pads out in the open for variety.
+        for (int i = 0; i < 2; ++i)
+            updrafts.push_back({ nf(8.0f, worldW - 8.0f), nf(8.0f, worldH - 8.0f) });
+    }
+
+    // Drone vendors: a few ground drones you can buy (deterministic placement, like pads).
+    std::vector<DroneVendor> drone_vendors;
+    {
+        std::vector<int> open;
+        for (int r = 0; r < map->height; ++r)
+            for (int c = 0; c < map->width; ++c)
+                if (map->at(c, r) == dc::world::Cell::Open && !(c == map->spawn_col && r == map->spawn_row))
+                    open.push_back(r * map->width + c);
+        uint32_t s = 0xD9047E5u + static_cast<uint32_t>(map->height * 40503u);
+        const int want = 8;
+        for (int i = 0; i < want && !open.empty(); ++i) {
+            s = s * 1664525u + 1013904223u;
+            const std::size_t pick = (s >> 8) % open.size();
+            const int cell = open[pick]; open[pick] = open.back(); open.pop_back();
+            drone_vendors.push_back({ (cell % map->width + 0.5f) * dc::world::TILE, (cell / map->width + 0.5f) * dc::world::TILE, false });
+        }
+    }
+    const int DRONE_COST = 10;
 
     // Spawn a torch per wall-torch tile: precompute its placement + flame point,
     // and give each its own particle emitter.
@@ -264,7 +310,8 @@ int main(int argc, char** argv) {
         dc::entity::Spawner sp;
         sp.pos[0] = map->width  * 0.5f * dc::world::TILE;
         sp.pos[2] = map->height * 0.5f * dc::world::TILE;
-        sp.radius = 4.0f; sp.rate = 0.5f; sp.max_alive = 8;
+        sp.radius = map->width * 0.35f * dc::world::TILE;   // spread across the (bigger) arena
+        sp.rate = 0.4f; sp.max_alive = 6;                   // fewer, but stronger (see ENEMY_MAX_HEALTH)
         sp.ranged_fraction = 0.30f;   // ~30% ground shooters
         sp.flying_fraction = 0.15f;   // ~15% hovering shooters
         spawners.push_back(sp);
@@ -272,7 +319,46 @@ int main(int argc, char** argv) {
 
     std::vector<Coin> coins;                 // dropped on kills, magnet to the player
     std::vector<float> frame_deaths;         // enemy death positions this frame (xyz triples)
-    int   currency = 0;
+    std::vector<dc::entity::HitNumber> frame_hits;   // damage events this frame (host-computed)
+    // Floating damage numbers: rise + fade over their life. Spawned from frame_hits
+    // (host/standalone) or the snapshot (client). Rendered as billboarded 7-seg digits.
+    struct FloatNum { vec3 pos; float amount; float age; bool crit; };
+    std::vector<FloatNum> dmg_numbers;
+    constexpr float DMG_LIFE = 1.0f, DMG_RISE = 1.4f;   // seconds visible, world units/s upward
+    // Elemental sword sparks (fire rises, ice drifts down, earth scatters): a small
+    // simulated pool spawned from each player's blade by their equipped element mask.
+    struct Spark { vec3 pos, vel, color; float age = 0.0f, life = 0.0f,
+                   grav = 0.0f, size_mul = 1.0f, alpha_mul = 1.0f; };
+    std::vector<Spark> sparks;
+    uint32_t spark_rng = 0xC0FFEEu;
+    // Death disintegration: burst an enemy body into a cloud of tan sand motes that pop
+    // outward + up, fall, and fade. Shared by the host (off frame_deaths) and clients (off
+    // the replicated death list in the snapshot), so everyone sees the same crumble.
+    auto burst_sand = [&](float x, float y, float z) {
+        auto frand = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
+        const int GRAINS = 60;
+        for (int g = 0; g < GRAINS && sparks.size() < 2000; ++g) {
+            Spark s;
+            s.pos[0] = x + (frand() - 0.5f) * 0.7f;
+            s.pos[1] = y + frand() * 1.6f;                 // spread through the body volume
+            s.pos[2] = z + (frand() - 0.5f) * 0.7f;
+            const float ang = frand() * 6.2831853f, spd = 0.6f + frand() * 1.8f;
+            s.vel[0] = std::cos(ang) * spd;
+            s.vel[1] = 0.6f + frand() * 1.6f;              // a little pop up before gravity wins
+            s.vel[2] = std::sin(ang) * spd;
+            const float t = 0.55f + frand() * 0.35f;       // sandy tan, slight variation
+            s.color[0] = t + 0.18f; s.color[1] = t; s.color[2] = t * 0.7f;
+            s.age = 0.0f; s.life = 0.8f + frand() * 0.6f;
+            s.grav = 5.5f; s.size_mul = 1.5f; s.alpha_mul = 2.4f;
+            sparks.push_back(s);
+        }
+    };
+    constexpr int START_GOLD = 30;   // dev: each run begins with this (was 0)
+    int   currency = START_GOLD;
+    double host_damage = 0.0;                // host/standalone: this player's total damage dealt (scoreboard)
+    float  my_damage = 0.0f;                 // client: our own total, read back from the snapshot
+    bool   scoreboard = false;               // hold Tab: damage leaderboard + your items
+    bool   tab_prev = false;                 // edge-detect Tab
     float run_time = 0.0f;                    // seconds survived this run (top-of-screen timer)
     float death_flash = 0.0f;                // red "you died" overlay timer
 
@@ -282,6 +368,7 @@ int main(int argc, char** argv) {
     player.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
     player.position[1] = dc::world::EYE_HEIGHT;
     player.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
+    glm_vec3_copy(player.position, player_prev);   // seed velocity tracking (no first-frame spike)
 
     dc::input::Input input;
 
@@ -299,6 +386,11 @@ int main(int argc, char** argv) {
     // Replication state. A "remote" is another player we render (not simulate locally).
     struct Remote {
         uint32_t id; vec3 pos; float yaw, pitch, anim_time; bool moving;
+        float damage_dealt = 0.0f;   // total damage to enemies (from snapshot; scoreboard)
+        uint8_t elements = 0;        // elemental sword brands bitmask (for particles)
+        uint8_t minions = 0;         // gunner minion count (for the orbiting drones)
+        float  minion_range = 18.0f; // drone targeting range (for laser visuals)
+        float  trail_life = 0.0f;    // trailblazer segment lifetime (>0 = leaving a fire trail)
         bool ghost = false;   // dead player: render faint + translucent, no gear
         bool punching = false, blocking = false;
         float punch_time = 0.0f, block_time = 0.0f, hit_flash = 0.0f, sword_scale = 1.0f;
@@ -315,6 +407,9 @@ int main(int argc, char** argv) {
         std::vector<uint32_t> thrown_hits, orbit_hits;   // per-client special hit sets (host-side damage)
         float orbit_tick_cd = 0.0f;                      // host-run orbit damage cadence
         int currency = 0;                                // this client's own wallet (host-authoritative)
+        double damage_dealt = 0.0;                       // running total dealt to enemies (scoreboard)
+        float  minion_fire_cd = 0.0f;                    // host: this client's gunner volley timer
+        vec3   prev_pos = {0,0,0};                       // last frame's position (for shot-leading velocity)
         // Specials are host-run from the client's reliable *Cast events: the host owns
         // the motion + damage on its clock and broadcasts the state. (Same model as bash.)
         bool  bash_active = false; float bash_time = 0.0f, bash_radius = 0.0f;
@@ -336,13 +431,13 @@ int main(int argc, char** argv) {
     float block_time = 0.0f;                      // block-clip clock (advances while blocking)
     bool  punching = false;
     bool  blocking = false;
-    bool  exhausted = false;                           // winded: must recover before sprint/block
-    bool  choosing = false;                            // upgrade-card menu open (freezes movement)
-    bool  menu_click_prev = false;                     // edge-detect the card click
+    bool  exhausted = false;                           // winded: must recover before blocking
+    bool  shift_prev = false;                          // edge-trigger for the dodge-dash
     bool  paused = false;                              // ESC pause menu (frees the cursor)
     bool  esc_prev = false;                            // edge-detect ESC
     bool  pause_click_prev = false;                    // edge-detect the quit-button click
-    const Upgrade cards[4] = { Upgrade::StaminaCost, Upgrade::Knockback, Upgrade::Damage, Upgrade::SwingArc };
+    bool  menu_click_prev = false;                     // edge-detect the chest-menu buy click
+    int   inventory[UPGRADE_COUNT] = {0, 0, 0, 0};     // how many of each upgrade picked (RoR2-style stacks)
     bool  punch_struck = false;                        // strike lands once per punch
     float attack_cd = 0.0f;                            // weapon cooldown between swings
     bool  punch_is_throw = false;                      // this punch clip is a sword throw
@@ -381,10 +476,22 @@ int main(int argc, char** argv) {
     bool g_prev = false;                               // edge-triggered debug enemy spawn (melee)
     bool h_prev = false;                               // edge-triggered debug enemy spawn (ranged)
     bool j_prev = false;                               // edge-triggered debug enemy spawn (flying)
-    bool v_prev = false;                               // edge-triggered debug-cone toggle
-    bool debug_cone = false;                           // draw the shield block cone
+    bool v_prev = false;                               // edge-triggered first/third-person toggle (V)
+    bool first_person = false;                         // false = third-person (default); V toggles
+    bool grave_prev = false;                           // edge-triggered hitbox toggle (`)
+    bool show_hitboxes = false;                        // ` : draw combat cones / hitboxes + debug readout
 
-    const float base_knockback = player.stats.knockback;   // for clearing the yellow upgrade on death
+    const float base_knockback   = player.stats.knockback;  // for clearing upgrades on death
+    const float base_dash_speed  = player.dash_speed;       // Lunge upgrade resets to this
+    const float base_dash_iframes = player.dash_iframes;    // Afterimage upgrade resets to this
+    const float base_crit_chance = player.crit_chance;      // Keen Edge resets to this
+    const float base_crit_mult   = player.crit_mult;        // Deathblow resets to this
+    const float base_health_regen = player.health_regen;    // Regeneration resets to this
+    const float base_fire_dps = player.fire_dps, base_ice_slow = player.ice_slow, base_earth_knock = player.earth_knock;
+    const float base_minion_damage = player.minion_damage;   // Munitions resets to this; Gunner count -> 0
+    const float base_minion_range = player.minion_range;     // Drone Sensors resets to this
+    const float base_trail_damage = player.trail_damage, base_trail_life = player.trail_life;
+    const float base_supersonic = player.supersonic_damage;
 
     // Reset the run (solo death = game over -> start over). Player back to spawn at
     // full health/stamina, currency + upgrades cleared, enemies/coins reset.
@@ -396,32 +503,53 @@ int main(int argc, char** argv) {
         player.health = player.stats.max_health;
         player.stamina = player.stamina_max;
         player.knock_vel[0] = player.knock_vel[2] = 0.0f;
+        player.dash_vel[0] = player.dash_vel[2] = 0.0f; player.iframes = 0.0f; player.dash_cd = 0.0f;
         player.hit_flash = 0.0f;
         thrown.active = false;
         orbit.active = false;
         bash.active = false;
-        if (choosing) { choosing = false; window.set_relative_mouse(true); }
+        if (menu_chest >= 0) { menu_chest = -1; window.set_relative_mouse(true); }
         // Clear all chest upgrades.
         player.stamina_mult = 1.0f;
         player.damage_mult = 1.0f;
         player.swing_reach_bonus = 0.0f;
         player.swing_cone_bonus = 0.0f;
         player.sword_scale = 1.0f;
+        player.cooldown_mult = 1.0f;
+        player.dash_speed = base_dash_speed;
+        player.dash_iframes = base_dash_iframes;
+        player.crit_chance = base_crit_chance;
+        player.crit_mult = base_crit_mult;
+        player.health_regen = base_health_regen;
+        player.fire_dps = base_fire_dps; player.ice_slow = base_ice_slow; player.earth_knock = base_earth_knock;
+        player.minion_count = 0; player.minion_damage = base_minion_damage; player.minion_range = base_minion_range;
+        player.trail_damage = base_trail_damage; player.trail_life = base_trail_life;
+        player.supersonic_damage = base_supersonic;
         player.stats.knockback = base_knockback;
-        currency = 0;
+        for (int& n : inventory) n = 0;   // empty the item stacks
+        currency = START_GOLD;
+        host_damage = 0.0; my_damage = 0.0f;   // reset the damage leaderboard
         // Revive + reset every connected client (clears wallet, refills health, sends
         // them back to spawn). The full-health bodies go out in the next snapshot, so
         // ghosts come back to life on their own screens.
         for (auto& hc : host_clients) {
-            hc.currency = 0;
+            hc.currency = START_GOLD;
+            hc.damage_dealt = 0.0;
             hc.body.health = hc.body.stats.max_health;
             hc.body.knock_vel[0] = hc.body.knock_vel[2] = 0.0f;
+            hc.body.dash_vel[0] = hc.body.dash_vel[2] = 0.0f; hc.body.iframes = 0.0f;
             hc.body.hit_flash = 0.0f;
             hc.body.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
             hc.body.position[1] = dc::world::EYE_HEIGHT;
             hc.body.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
         }
         run_time = 0.0f;
+        for (auto& ch : chests) {   // re-close + restock every chest, drop any lock
+            ch.opened = false; ch.open_t = 0.0f; ch.locked_by = NO_LOCK; ch.lock_time = 0.0f;
+            for (bool& t : ch.taken) t = false;
+        }
+        menu_chest = -1;
+        for (auto& dv : drone_vendors) dv.bought = false;   // restock drone vendors
         coins.clear();
         entities.items.clear();
         entities.projectiles.clear();
@@ -431,14 +559,75 @@ int main(int argc, char** argv) {
         for (auto& sp : spawners) sp.accum = 0.0f;
     };
 
-    // Upgrade-card layout in NDC (shared by hit-testing and drawing).
-    const float CARD_W = 0.18f, CARD_GAP = 0.05f, CARD_TOP = 0.45f, CARD_BOT = -0.45f;
+    // Pause-menu quit button (NDC), shared by hit-testing and drawing.
+    const float QX0 = -0.15f, QX1 = 0.15f, QY0 = -0.09f, QY1 = 0.09f;
+
+    // Chest purchase-menu card layout in NDC (4 fixed slots; taken ones render empty).
+    const float CARD_W = 0.18f, CARD_GAP = 0.05f, CARD_TOP = 0.42f, CARD_BOT = -0.42f;
     auto card_x0 = [&](int i) {
         const float total = 4 * CARD_W + 3 * CARD_GAP;
         return -total * 0.5f + i * (CARD_W + CARD_GAP);
     };
-    // Pause-menu quit button (NDC), shared by hit-testing and drawing.
-    const float QX0 = -0.15f, QX1 = 0.15f, QY0 = -0.09f, QY1 = 0.09f;
+
+    // Local player buys an item: apply its upgrade + grow the stack.
+    auto apply_pickup = [&](Upgrade u) { apply_upgrade(player, u); inventory[static_cast<int>(u)]++; };
+    const float CHEST_REACH = 3.0f;            // how close you must be to open a chest
+    const float CHEST_LOCK_TIME = 30.0f;       // host: auto-release a lock held this long (safety)
+    // Gunner minions: loosely follow the owner, volley-fire the nearest enemy in range.
+    const float MINION_FIRE_INTERVAL = 0.6f;   // drone range is a per-player stat now (player.minion_range)
+    const float MINION_FOLLOW_RADIUS = 2.3f;   // loose formation radius around the owner (a bit further back)
+    const float MINION_FOLLOW_K = 2.6f;        // follow stiffness (lower = laggier; eases toward the slot)
+    float minion_fire_cd = 0.0f;               // host/standalone: local player's volley timer
+    // Per-owner drone positions, simulated per-peer for visuals (firing is host-side).
+    struct DroneSwarm { uint32_t id; vec3 pos[4]; bool spawned[4]; };
+    std::vector<DroneSwarm> swarms;
+    // Trailblazer fire trails: persistent per-owner segment lists (every peer simulates
+    // them for visuals; the host damages enemies standing in them).
+    struct TrailSeg { float x, z, age; };
+    struct Trail { uint32_t id; float dmg, life, last_x, last_z; bool init; std::vector<TrailSeg> segs; };
+    std::vector<Trail> trails;
+    const float TRAIL_DROP = 0.55f, TRAIL_RADIUS = 1.1f;
+
+    // Supersonic dodge shockwave: host-resolved AoE blasts queued this frame + the local
+    // spiral-gust visual timer.
+    const float SUPERSONIC_RADIUS = 5.0f, SUPERSONIC_KNOCK = 70.0f, SS_ANIM_TIME = 0.45f;
+    struct Blast { float x, z, dmg; uint32_t owner; };
+    std::vector<Blast> supersonic_blasts;
+    float ss_anim = 0.0f; vec3 ss_pos = {0.0f, 0.0f, 0.0f};
+
+    // Updraft launch + out-of-bounds safety net.
+    const float UPDRAFT_RADIUS = 1.3f, UPDRAFT_LAUNCH = 28.0f;   // launches you high (reach plateaus)
+    const float UPDRAFT_PUSH = 42.0f;                            // big horizontal gust in the entry direction (decays)
+    const float FALL_MARGIN = 4.0f, FALL_Y = -25.0f;           // outside this xz box (or below FALL_Y) = fell out
+    const float worldW = map->width * dc::world::TILE, worldH = map->height * dc::world::TILE;
+    auto on_updraft = [&](float x, float z) {
+        for (const auto& u : updrafts) { const float dx = x - u.x, dz = z - u.z;
+            if (dx*dx + dz*dz <= UPDRAFT_RADIUS*UPDRAFT_RADIUS) return true; }
+        return false;
+    };
+    // Launch off a pad while grounded on it: a strong upward kick plus a decaying gust in
+    // (mvx,mvz) — the direction the body was moving on entry (0,0 = straight up).
+    auto apply_updraft = [&](dc::entity::Player& b, float mvx, float mvz) {
+        if (!(b.on_ground && on_updraft(b.position[0], b.position[2]))) return;
+        b.vel_y = UPDRAFT_LAUNCH; b.on_ground = false;
+        b.knock_vel[0] += mvx * UPDRAFT_PUSH; b.knock_vel[2] += mvz * UPDRAFT_PUSH;
+    };
+    auto apply_fallout = [&](dc::entity::Player& b) {   // out of the map -> return to spawn, lose 25% max hp
+        const bool oob = b.position[0] < -FALL_MARGIN || b.position[0] > worldW + FALL_MARGIN
+                      || b.position[2] < -FALL_MARGIN || b.position[2] > worldH + FALL_MARGIN
+                      || b.position[1] < FALL_Y;
+        if (!oob) return;
+        b.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
+        b.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
+        b.position[1] = terrain.height(b.position[0], b.position[2]) + dc::world::EYE_HEIGHT;
+        b.vel_y = 0.0f; b.on_ground = true;
+        b.knock_vel[0] = b.knock_vel[2] = 0.0f; b.dash_vel[0] = b.dash_vel[2] = 0.0f;
+        if (b.health > 0.0f) {   // penalty (don't touch ghosts)
+            b.health -= b.stats.max_health * 0.25f;
+            if (b.health < 0.0f) b.health = 0.0f;
+            b.hit_flash = dc::entity::FLASH_TIME;
+        }
+    };
 
     bool running = true;
     uint64_t prev = SDL_GetTicksNS();
@@ -452,6 +641,7 @@ int main(int argc, char** argv) {
             if (ev.type == dc::net::Event::Connect) {
                 if (net.role == dc::net::Role::Host) {
                     HostClient hc; hc.id = next_player_id++; hc.peer = ev.peer;
+                    hc.currency = START_GOLD;   // dev: clients also start with gold
                     hc.body.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
                     hc.body.position[1] = dc::world::EYE_HEIGHT;
                     hc.body.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
@@ -464,7 +654,10 @@ int main(int argc, char** argv) {
                 }
             } else if (ev.type == dc::net::Event::Disconnect) {
                 for (std::size_t i = 0; i < host_clients.size(); ++i)
-                    if (host_clients[i].peer == ev.peer) { host_clients[i] = host_clients.back(); host_clients.pop_back(); break; }
+                    if (host_clients[i].peer == ev.peer) {
+                        for (auto& ch : chests) if (ch.locked_by == host_clients[i].id) ch.locked_by = NO_LOCK;  // free any held lock
+                        host_clients[i] = host_clients.back(); host_clients.pop_back(); break;
+                    }
             } else if (ev.type == dc::net::Event::Receive && !ev.data.empty()) {
                 const auto mt = static_cast<dc::net::MsgType>(ev.data[0]);
                 if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::Input
@@ -505,34 +698,90 @@ int main(int argc, char** argv) {
                         hc.throw_damage = tc.damage; hc.throw_knockback = tc.knockback; hc.thrown_size = tc.size;
                         break;
                     }
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::DashCast
+                           && ev.data.size() >= 1 + sizeof(dc::net::DashCast)) {
+                    dc::net::DashCast dc; std::memcpy(&dc, ev.data.data() + 1, sizeof dc);
+                    for (auto& hc : host_clients) if (hc.peer == ev.peer) {
+                        hc.body.dash_vel[0] = dc.dx * dc.speed; hc.body.dash_vel[2] = dc.dz * dc.speed;
+                        hc.body.iframes = dc.iframes; hc.body.dash_decay = dc.decay;
+                        if (dc.supersonic > 0.0f)   // queue the dodge shockwave at the client's body
+                            supersonic_blasts.push_back({ hc.body.position[0], hc.body.position[2], dc.supersonic, hc.id });
+                        break;
+                    }
                 } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::OpenChest
                            && ev.data.size() >= 5) {
-                    // A client wants to open a chest. Events are processed one at a
-                    // time, so two simultaneous requests can't both win: the first
-                    // marks it opened and the second fails the !opened check (no mutex
-                    // needed — the host is the single authority).
+                    // A client wants to open a chest's menu. Grant only if it has items
+                    // left and nobody else holds the lock (one player at a time). The host
+                    // processes events serially, so two requests can't both lock it.
                     uint32_t idx; std::memcpy(&idx, ev.data.data() + 1, 4);
                     HostClient* hc = nullptr;
                     for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
-                    if (hc && idx < chests.size() && !chests[idx].opened
-                        && hc->currency >= chests[idx].cost) {
-                        hc->currency -= chests[idx].cost;
-                        chests[idx].opened = true;            // one-way; replicated in the snapshot
-                        unsigned char buf[1 + sizeof idx];
+                    if (hc && idx < chests.size() && chests[idx].remaining() > 0
+                        && chests[idx].locked_by == NO_LOCK) {
+                        chests[idx].opened = true;                 // lid open (stays open)
+                        chests[idx].locked_by = hc->id;            // lock to this client
+                        chests[idx].lock_time = CHEST_LOCK_TIME;
+                        unsigned char buf[1 + 4];
                         buf[0] = static_cast<unsigned char>(dc::net::MsgType::ChestGranted);
-                        std::memcpy(buf + 1, &idx, sizeof idx);
-                        net.send_to_peer(ev.peer, buf, sizeof buf, true);   // only the requester
+                        std::memcpy(buf + 1, &idx, 4);
+                        net.send_to_peer(ev.peer, buf, sizeof buf, true);   // -> client opens its menu
                     }
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::BuyItem
+                           && ev.data.size() >= 9) {
+                    // A client buys a slot. Valid only if it holds the lock, the slot is
+                    // untaken, and it can afford it. Grant -> client applies the upgrade.
+                    uint32_t idx, slot; std::memcpy(&idx, ev.data.data() + 1, 4); std::memcpy(&slot, ev.data.data() + 5, 4);
+                    HostClient* hc = nullptr;
+                    for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
+                    if (hc && idx < chests.size() && slot < 4 && chests[idx].locked_by == hc->id
+                        && !chests[idx].taken[slot] && hc->currency >= chests[idx].cost) {
+                        hc->currency -= chests[idx].cost;
+                        chests[idx].taken[slot] = true;            // replicated in the snapshot
+                        chests[idx].locked_by = NO_LOCK;           // buying closes the menu -> unlock
+                        unsigned char gbuf[1 + 1];
+                        gbuf[0] = static_cast<unsigned char>(dc::net::MsgType::ItemGranted);
+                        gbuf[1] = static_cast<unsigned char>(chests[idx].contents[slot]);
+                        net.send_to_peer(ev.peer, gbuf, sizeof gbuf, true);
+                    }
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::ReleaseChest
+                           && ev.data.size() >= 5) {
+                    // Client closed the menu without buying -> drop its lock.
+                    uint32_t idx; std::memcpy(&idx, ev.data.data() + 1, 4);
+                    HostClient* hc = nullptr;
+                    for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
+                    if (hc && idx < chests.size() && chests[idx].locked_by == hc->id) chests[idx].locked_by = NO_LOCK;
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::BuyDrone
+                           && ev.data.size() >= 5) {
+                    // Client buys a ground drone: validate (unbought, near, can afford, room
+                    // for another minion) -> mark bought, deduct, grant the minion.
+                    uint32_t idx; std::memcpy(&idx, ev.data.data() + 1, 4);
+                    HostClient* hc = nullptr;
+                    for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
+                    if (hc && idx < drone_vendors.size() && !drone_vendors[idx].bought
+                        && hc->currency >= DRONE_COST && hc->input.minion_count < 4) {
+                        const float dx = drone_vendors[idx].x - hc->body.position[0];
+                        const float dz = drone_vendors[idx].z - hc->body.position[2];
+                        if (dx*dx + dz*dz <= (CHEST_REACH + 1.5f) * (CHEST_REACH + 1.5f)) {
+                            hc->currency -= DRONE_COST; drone_vendors[idx].bought = true;
+                            unsigned char gbuf[1]; gbuf[0] = static_cast<unsigned char>(dc::net::MsgType::DroneGranted);
+                            net.send_to_peer(ev.peer, gbuf, sizeof gbuf, true);
+                        }
+                    }
+                } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::DroneGranted) {
+                    if (player.minion_count < 4) player.minion_count++;   // got the drone
+                } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::ItemGranted
+                           && ev.data.size() >= 2) {
+                    // Host approved our purchase: apply the upgrade + close the menu.
+                    uint8_t ut = ev.data[1];
+                    if (ut < UPGRADE_COUNT) apply_pickup(static_cast<Upgrade>(ut));
+                    if (menu_chest >= 0) { menu_chest = -1; window.set_relative_mouse(true); }
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::AssignId && ev.data.size() >= 5) {
                     std::memcpy(&my_id, ev.data.data() + 1, 4);
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::ChestGranted
-                           && ev.data.size() >= 5 && !choosing) {
-                    // Host approved our chest: it already deducted our wallet and
-                    // marked the chest open. Open the upgrade menu (card pick is local;
-                    // its stat mods flow back to the host via our replicated loadout).
-                    choosing = true;
-                    menu_click_prev = true;
-                    window.set_relative_mouse(false);
+                           && ev.data.size() >= 5) {
+                    // Host gave us the lock: open the purchase menu for that chest.
+                    uint32_t idx; std::memcpy(&idx, ev.data.data() + 1, 4);
+                    if (idx < chests.size()) { menu_chest = static_cast<int>(idx); window.set_relative_mouse(false); }
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::Snapshot && ev.data.size() >= 5) {
                     const unsigned char* p = ev.data.data() + 1;
                     auto read_u32 = [&]() { uint32_t v; std::memcpy(&v, p, 4); p += 4; return v; };
@@ -545,6 +794,7 @@ int main(int argc, char** argv) {
                             player.position[0] = s.x; player.position[1] = s.y; player.position[2] = s.z;
                             player.health = s.health;
                             currency = s.currency;   // our own wallet (host-authoritative)
+                            my_damage = s.damage_dealt;   // our own total (host-authoritative)
                             player.stamina -= s.block_spent;   // stamina the host spent resolving our blocks
                             if (player.stamina < 0.0f) player.stamina = 0.0f;
                             if (s.hit_flash > player.hit_flash) player.hit_flash = s.hit_flash;  // host says we got hit
@@ -552,6 +802,11 @@ int main(int argc, char** argv) {
                             Remote r{}; r.id = s.id;
                             r.pos[0] = s.x; r.pos[1] = s.y; r.pos[2] = s.z;
                             r.yaw = s.yaw; r.pitch = s.pitch; r.anim_time = s.anim_time; r.moving = s.moving != 0;
+                            r.damage_dealt = s.damage_dealt;
+                            r.elements = s.elements;
+                            r.minions = s.minions;
+                            r.minion_range = s.minion_range;
+                            r.trail_life = s.trail_life;
                             r.ghost = s.health <= 0.0f;
                             r.punching = s.punching != 0; r.blocking = s.blocking != 0;
                             r.punch_time = s.punch_time; r.block_time = s.block_time;
@@ -575,7 +830,10 @@ int main(int argc, char** argv) {
                         en.position[0] = e.x; en.position[1] = 0.0f; en.position[2] = e.z; en.yaw = e.yaw;
                         en.anim_time = e.anim_time; en.attacking = e.attacking != 0;
                         en.attack_time = e.attack_time; en.hit_flash = e.hit_flash;
+                        en.punch_anim = e.punch_anim;
                         en.kind = static_cast<dc::entity::EnemyKind>(e.kind);
+                        en.burn_time = (e.status & 1) ? 1.0f : 0.0f;   // sentinels so the render emits fire/ice
+                        en.slow_time = (e.status & 2) ? 1.0f : 0.0f;
                         entities.items.push_back(en);
                     }
                     uint32_t nc = read_u32();
@@ -588,8 +846,15 @@ int main(int argc, char** argv) {
                     uint32_t nh = read_u32();
                     for (uint32_t k = 0; k < nh; ++k) {
                         unsigned char o = *p++;
-                        if (k < chests.size() && o) chests[k].opened = true;
+                        unsigned char tk = *p++;
+                        if (k < chests.size()) {
+                            chests[k].opened = o != 0;
+                            for (int j = 0; j < 4; ++j) chests[k].taken[j] = (tk & (1u << j)) != 0;
+                        }
                     }
+                    // Drone vendors: mirror the bought flags.
+                    uint32_t nv = read_u32();
+                    for (uint32_t k = 0; k < nv; ++k) { unsigned char b = *p++; if (k < drone_vendors.size()) drone_vendors[k].bought = b != 0; }
                     // Projectiles: render-only mirror of the host's flying shots.
                     uint32_t npr = read_u32();
                     entities.projectiles.clear();
@@ -598,7 +863,20 @@ int main(int argc, char** argv) {
                         dc::entity::Projectile pr;
                         pr.pos[0] = ps.x; pr.pos[1] = ps.y; pr.pos[2] = ps.z;
                         pr.color[0] = ps.r; pr.color[1] = ps.g; pr.color[2] = ps.b;
+                        pr.vel[0] = ps.vx; pr.vel[1] = ps.vy; pr.vel[2] = ps.vz; pr.beam = ps.beam != 0;
                         entities.projectiles.push_back(pr);
+                    }
+                    // Damage numbers spawned by the host this tick: float them locally.
+                    uint32_t nd = read_u32();
+                    for (uint32_t k = 0; k < nd; ++k) {
+                        dc::net::DamageNumState ds; std::memcpy(&ds, p, sizeof ds); p += sizeof ds;
+                        dmg_numbers.push_back({ {ds.x, ds.y, ds.z}, ds.amount, 0.0f, ds.crit != 0 });
+                    }
+                    // Enemy deaths this tick: play the same sand-crumble locally.
+                    uint32_t ndeath = read_u32();
+                    for (uint32_t k = 0; k < ndeath; ++k) {
+                        float dxyz[3]; std::memcpy(dxyz, p, sizeof dxyz); p += sizeof dxyz;
+                        burst_sand(dxyz[0], dxyz[1], dxyz[2]);
                     }
                 }
             }
@@ -614,14 +892,33 @@ int main(int argc, char** argv) {
         // the other window during net testing). Re-captures on resume.
         bool esc_now = input.key_down(SDL_SCANCODE_ESCAPE);
         if (esc_now && !esc_prev) {
-            paused = !paused;
-            if (paused) { window.set_relative_mouse(false); pause_click_prev = true; }
-            else if (!choosing) window.set_relative_mouse(true);
+            if (menu_chest >= 0) {
+                // Close the chest menu without buying: tell the host to drop our lock.
+                if (net.role == dc::net::Role::Client) {
+                    uint32_t idx = static_cast<uint32_t>(menu_chest);
+                    unsigned char buf[1 + 4]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::ReleaseChest);
+                    std::memcpy(buf + 1, &idx, 4); net.send_to_host(buf, sizeof buf, true);
+                } else {
+                    chests[menu_chest].locked_by = NO_LOCK;
+                }
+                menu_chest = -1; window.set_relative_mouse(true);
+            } else {
+                paused = !paused;
+                if (paused) { window.set_relative_mouse(false); pause_click_prev = true; }
+                else window.set_relative_mouse(true);
+            }
         }
         esc_prev = esc_now;
 
-        // Any open UI (upgrade cards or pause) freezes player control.
-        const bool ui_open = choosing || paused;
+        // Hold Tab: damage leaderboard + your items. Frees the cursor to hover items;
+        // releases back to mouselook (unless another menu owns the cursor).
+        bool tab_now = input.key_down(SDL_SCANCODE_TAB);
+        if (tab_now && !tab_prev && !paused && menu_chest < 0) { scoreboard = true;  window.set_relative_mouse(false); }
+        if (!tab_now && tab_prev && scoreboard)                { scoreboard = false; if (!paused && menu_chest < 0) window.set_relative_mouse(true); }
+        tab_prev = tab_now;
+
+        // Any open UI (upgrade cards, pause, or scoreboard) freezes player control.
+        const bool ui_open = menu_chest >= 0 || paused || scoreboard;
         // Dead = ghost: you can still walk around to spectate, but can't fight, block,
         // use specials, or buy chests. Movement is intentionally NOT gated on this.
         const bool dead = player.health <= 0.0f;
@@ -631,20 +928,67 @@ int main(int argc, char** argv) {
                                        - (input.key_down(SDL_SCANCODE_S) ? 1.0f : 0.0f);
         float strafe  = ui_open ? 0.0f : (input.key_down(SDL_SCANCODE_D) ? 1.0f : 0.0f)
                                        - (input.key_down(SDL_SCANCODE_A) ? 1.0f : 0.0f);
-        bool jump = !ui_open && input.key_down(SDL_SCANCODE_SPACE);
         bool moving = (forward != 0.0f || strafe != 0.0f);
         // Exhaustion: hitting 0 stamina winds you until it recovers past a threshold.
-        // (Otherwise regen re-enables sprint/block one frame at a time = stutter-sprint.)
         const float EXHAUST_RECOVER = player.stamina_max * 0.25f;
         if (player.stamina <= 0.0f) exhausted = true;
         else if (player.stamina >= EXHAUST_RECOVER) exhausted = false;
-        // Run while holding Shift (needs stamina). Drains stamina (applied below).
-        bool sprinting = moving && !exhausted && input.key_down(SDL_SCANCODE_LSHIFT);
-        player.speed = sprinting ? dc::entity::RUN_SPEED : dc::entity::MOVE_SPEED;
-        player.update(forward, strafe, jump, dt, *map, terrain);
+        player.speed = dc::entity::MOVE_SPEED;
+        // Jump costs stamina, and only fires when it actually launches (on the ground +
+        // affordable + not exhausted). Spend it here; player.update does the launch.
+        bool jump = !ui_open && input.key_down(SDL_SCANCODE_SPACE) && player.on_ground
+                  && !exhausted && player.stamina >= dc::entity::JUMP_STAMINA;
+        if (jump) player.stamina -= dc::entity::JUMP_STAMINA * player.stamina_mult;
 
-        // Walk clock: advance while moving (faster while sprinting), reset when idle.
-        if (moving) anim_time += dt * (sprinting ? 1.7f : 1.0f); else anim_time = 0.0f;
+        // Shift, edge-triggered: a dodge-strafe burst (stamina, brief i-frames) in the move
+        // direction. Holding Shift then carries into a sprint (below) — strafe into a run.
+        bool shift_now = input.key_down(SDL_SCANCODE_LSHIFT);
+        if (shift_now && !shift_prev && !ui_open && !dead
+            && player.dash_cd <= 0.0f && player.stamina >= player.dash_cost) {
+            // Dash direction from the move input (world space), backward when neutral.
+            const float cy = std::cos(player.yaw), sy = std::sin(player.yaw);
+            float dx = cy * forward - sy * strafe;   // walk*fwd + right*strafe; right = (-sin,0,cos)
+            float dz = sy * forward + cy * strafe;
+            float dl = std::sqrt(dx * dx + dz * dz);
+            if (dl < 1e-4f) { dx = -cy; dz = -sy; dl = 1.0f; }   // standing -> dash backward
+            dx /= dl; dz /= dl;
+            player.dash_vel[0] = dx * player.dash_speed; player.dash_vel[2] = dz * player.dash_speed;
+            player.iframes = player.dash_iframes;
+            player.dash_cd = player.dash_cooldown * player.cooldown_mult;
+            player.stamina -= player.dash_cost * player.stamina_mult;
+            if (player.supersonic_damage > 0.0f) {   // spiral-gust visual on every peer; host queues the damage
+                ss_anim = SS_ANIM_TIME; glm_vec3_copy(player.position, ss_pos);
+                if (net.role != dc::net::Role::Client)
+                    supersonic_blasts.push_back({ player.position[0], player.position[2], player.supersonic_damage, my_id });
+            }
+            if (net.role == dc::net::Role::Client) {
+                dc::net::DashCast dc{}; dc.dx = dx; dc.dz = dz;
+                dc.speed = player.dash_speed; dc.iframes = player.dash_iframes; dc.decay = player.dash_decay;
+                dc.supersonic = player.supersonic_damage;
+                unsigned char buf[1 + sizeof dc];
+                buf[0] = static_cast<unsigned char>(dc::net::MsgType::DashCast);
+                std::memcpy(buf + 1, &dc, sizeof dc);
+                net.send_to_host(buf, sizeof buf, true);
+            }
+        }
+        shift_prev = shift_now;
+        // Sprint: keep holding Shift (after the dash burst) to run faster — strafe into a
+        // sprint. Drains stamina while running (pauses regen below); stops when you run out
+        // or are exhausted.
+        const bool sprinting = input.key_down(SDL_SCANCODE_LSHIFT) && !ui_open && !dead
+                             && moving && !exhausted && player.stamina > 0.0f;
+        player.speed = sprinting ? dc::entity::MOVE_SPEED * 1.7f : dc::entity::MOVE_SPEED;
+        player.update(forward, strafe, jump, dt, *map, terrain);
+        {   // launch off a pad (predicted on every peer), flung in the current move direction
+            const float cy = std::cos(player.yaw), sy = std::sin(player.yaw);
+            float dx = cy*forward - sy*strafe, dz = sy*forward + cy*strafe, dl = std::sqrt(dx*dx + dz*dz);
+            if (dl > 1e-4f) { dx /= dl; dz /= dl; } else { dx = dz = 0.0f; }
+            apply_updraft(player, dx, dz);
+        }
+        if (net.role != dc::net::Role::Client) apply_fallout(player);   // damage is host-authoritative
+
+        // Walk clock: advance while moving, reset when idle.
+        if (moving) anim_time += dt; else anim_time = 0.0f;
 
         // --- Networked player sync (host side) ---
         // The client sends its InputCmd later, once combat flags (strike/blocking)
@@ -655,19 +999,28 @@ int main(int argc, char** argv) {
             for (auto& hc : host_clients) {
                 hc.body.yaw = hc.input.yaw; hc.body.pitch = hc.input.pitch;
                 hc.body.update(hc.input.forward, hc.input.strafe, hc.input.jump != 0, dt, *map, terrain);
+                {   // host runs clients' launch (flung in their move direction) + safety net
+                    const float cy = std::cos(hc.input.yaw), sy = std::sin(hc.input.yaw);
+                    float dx = cy*hc.input.forward - sy*hc.input.strafe, dz = sy*hc.input.forward + cy*hc.input.strafe;
+                    const float dl = std::sqrt(dx*dx + dz*dz);
+                    if (dl > 1e-4f) { dx /= dl; dz /= dl; } else { dx = dz = 0.0f; }
+                    apply_updraft(hc.body, dx, dz);
+                }
+                apply_fallout(hc.body);
                 bool m = (hc.input.forward != 0.0f || hc.input.strafe != 0.0f);
                 hc.anim_time = m ? hc.anim_time + dt : 0.0f;
                 if (hc.body.hit_flash > 0.0f) hc.body.hit_flash -= dt;   // decay the flash
                 if (hc.body.health > 0.0f) {                              // passive regen (not ghosts)
-                    hc.body.health += hc.body.health_regen * dt;
+                    hc.body.health += hc.input.health_regen * dt;          // client's own (upgradeable) regen
                     if (hc.body.health > hc.body.stats.max_health) hc.body.health = hc.body.stats.max_health;
                 }
             }
             // (Remotes are rebuilt after combat, so hit_flash this frame is included.)
         }
 
-        // Block held (right mouse): needs a shield and some stamina. You can't block
-        // and swing at once, so holding block also forbids starting a swing (below).
+        // Block held (right mouse): needs a shield and some stamina. The shield is on the
+        // right arm and the swing is on the left, so you can do both at once (each drains
+        // its own stamina).
         bool block_held = player.shield.has_value() && !exhausted && !ui_open && !dead
                         && input.mouse_down(SDL_BUTTON_RIGHT);
 
@@ -690,7 +1043,7 @@ int main(int argc, char** argv) {
             && player.stamina >= player.shield->stamina_per_bash) {
             bash.active = true; bash.time = 0.0f; bash.radius = 0.0f; bash.hit_ids.clear();
             player.stamina -= player.shield->stamina_per_bash * player.stamina_mult;
-            bash_cd = player.shield->bash_cooldown;
+            bash_cd = player.shield->bash_cooldown * player.cooldown_mult;
             // Event model: tell the host once (reliable). It runs the damage + tells
             // everyone else; we just predicted the visual above.
             if (net.role == dc::net::Role::Client) {
@@ -715,7 +1068,7 @@ int main(int argc, char** argv) {
             orbit.angle = 0.0f; orbit.spin = 0.0f; orbit.tick = 0.0f;
             orbit.hit_ids.clear();
             player.stamina -= player.weapon->stamina_per_orbit * player.stamina_mult;
-            orbit_cd = player.weapon->orbit_cooldown;
+            orbit_cd = player.weapon->orbit_cooldown * player.cooldown_mult;
             if (net.role == dc::net::Role::Client) {   // reliable cast: host runs damage + broadcasts
                 const auto& w = *player.weapon;
                 dc::net::OrbitCast oc;
@@ -731,7 +1084,7 @@ int main(int argc, char** argv) {
         }
         // Start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
         // the difference is resolved at the strike frame below.
-        if (!punching && !block_held && !thrown.active && !ui_open && !dead) {
+        if (!punching && !thrown.active && !ui_open && !dead) {
             if (player.weapon && input.key_down(SDL_SCANCODE_1)
                 && throw_cd <= 0.0f && player.stamina >= throw_cost) {
                 punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = true;
@@ -756,7 +1109,7 @@ int main(int argc, char** argv) {
                     glm_vec3_copy(player.position, thrown.pos);
                     vec3 f; player.front(f);   // already normalized
                     glm_vec3_copy(f, thrown.dir);
-                    throw_cd = player.weapon->throw_cooldown;
+                    throw_cd = player.weapon->throw_cooldown * player.cooldown_mult;
                     if (net.role == dc::net::Role::Client) {   // reliable cast: host flies + damages it
                         const auto& w = *player.weapon;
                         dc::net::ThrownCast tc;
@@ -773,29 +1126,52 @@ int main(int argc, char** argv) {
                     }
                 } else {
                     player_strike = true;
+                    // Air-slash "cut" at full extension: a thin bright crescent of motes
+                    // launched forward along the aim (bowed in the middle so it reads as a
+                    // slash edge, not a round puff).
+                    vec3 aim; player.front(aim);
+                    vec3 wup = {0.0f, 1.0f, 0.0f}; if (std::fabs(aim[1]) > 0.9f) { wup[0] = 1.0f; wup[1] = 0.0f; }
+                    vec3 rgt, up2;
+                    glm_vec3_cross(aim, wup, rgt);  glm_vec3_normalize(rgt);
+                    glm_vec3_cross(rgt, aim, up2);  glm_vec3_normalize(up2);
+                    const int N = 22;
+                    const float HALF = 1.2f, BOW = 0.7f, spd = 17.0f;
+                    for (int i = 0; i < N; ++i) {
+                        const float ti = static_cast<float>(i) / (N - 1) * 2.0f - 1.0f;   // -1..1 along the edge
+                        const float lat = ti * HALF, bow = (1.0f - ti * ti) * BOW;        // crescent: middle forward
+                        const float skew = 0.12f;   // slight diagonal tilt (was 0.3 — straighter, less clockwise)
+                        Spark s;
+                        s.pos[0] = player.position[0] + aim[0]*0.6f + up2[0]*lat + rgt[0]*lat*skew + aim[0]*bow;
+                        s.pos[1] = player.position[1] - 0.1f + aim[1]*0.6f + up2[1]*lat + rgt[1]*lat*skew + aim[1]*bow;
+                        s.pos[2] = player.position[2] + aim[2]*0.6f + up2[2]*lat + rgt[2]*lat*skew + aim[2]*bow;
+                        s.vel[0] = aim[0]*spd; s.vel[1] = aim[1]*spd; s.vel[2] = aim[2]*spd;
+                        s.color[0] = 1.0f; s.color[1] = 1.0f; s.color[2] = 1.0f;
+                        s.age = 0.0f; s.life = 0.28f;
+                        sparks.push_back(s);
+                    }
                 }
             }
             if (!model_data.punch.valid() || punch_time >= model_data.punch.duration) {
                 punching = false;
-                if (!punch_is_throw) attack_cd = atk_cd_dur;
+                if (!punch_is_throw) attack_cd = atk_cd_dur * player.cooldown_mult;
             }
         }
 
-        // Block animation: raise the shield while held (and not mid-swing). It only
-        // actually mitigates once the raise finishes (block_time reaches the clip end);
-        // block_speed scales how fast it gets there, so timing matters.
+        // Block animation: raise the shield while held (right arm — independent of the
+        // left-arm swing, so you can block and swing together). It only actually mitigates
+        // once the raise finishes (block_time reaches the clip end); block_speed scales it.
         const float block_speed = player.shield ? player.shield->block_speed : 1.0f;
-        blocking = block_held && !punching;                 // animating the raise/hold
+        blocking = block_held;                              // animating the raise/hold
         if (blocking) block_time += dt * block_speed; else block_time = 0.0f;
         bool block_ready = blocking && model_data.block.valid()
                          && block_time >= model_data.block.duration;   // shield fully up
 
 
-        // Stamina: blocking and running drain it (and pause regen); otherwise it
-        // regenerates. Running dry drops the shield / blocks swings / ends the run.
-        if (blocking)      player.stamina -= player.shield->stamina_per_sec * dt * player.stamina_mult;
+        // Stamina: blocking or sprinting drains it (and pauses regen); otherwise it
+        // regenerates. (Dash and jump spend a lump sum at their triggers above.)
+        if (blocking)       player.stamina -= player.shield->stamina_per_sec * dt * player.stamina_mult;
         else if (sprinting) player.stamina -= dc::entity::RUN_STAMINA_PER_SEC * dt * player.stamina_mult;
-        else               player.stamina += player.stamina_regen * dt;
+        else                player.stamina += player.stamina_regen * dt;
         if (player.stamina > player.stamina_max) player.stamina = player.stamina_max;
         if (player.stamina < 0.0f) player.stamina = 0.0f;
 
@@ -806,62 +1182,82 @@ int main(int argc, char** argv) {
             if (player.health > player.stats.max_health) player.health = player.stats.max_health;
         }
 
-        // Interact (E, edge-triggered): buy the nearest closed chest within reach.
+        // Interact (E, edge-triggered): open the nearest chest's purchase menu if it has
+        // items left and isn't in use (one player at a time).
         bool e_now = input.key_down(SDL_SCANCODE_E);
         if (e_now && !e_prev && !ui_open && !dead) {
-            const float reach = 3.0f;            // world units
-            int best = -1;
-            float best_d2 = reach * reach;
-            for (std::size_t i = 0; i < chests.size(); ++i) {
-                if (chests[i].opened) continue;
-                float cx = (chests[i].col + 0.5f) * dc::world::TILE;
-                float cz = (chests[i].row + 0.5f) * dc::world::TILE;
-                float dx = cx - player.position[0], dz = cz - player.position[2];
-                float d2 = dx * dx + dz * dz;
-                if (d2 < best_d2) { best_d2 = d2; best = static_cast<int>(i); }
+            // Drone vendor in reach takes priority over a chest: pay DRONE_COST -> +1 minion.
+            int dbest = -1; float dbest2 = CHEST_REACH * CHEST_REACH;
+            for (std::size_t i = 0; i < drone_vendors.size(); ++i) {
+                if (drone_vendors[i].bought) continue;
+                const float dx = drone_vendors[i].x - player.position[0], dz = drone_vendors[i].z - player.position[2];
+                const float d2 = dx*dx + dz*dz;
+                if (d2 < dbest2) { dbest2 = d2; dbest = static_cast<int>(i); }
             }
-            if (best >= 0 && currency >= chests[best].cost) {
-                if (net.role == dc::net::Role::Client) {
-                    // Ask the host to open it. The host re-validates (funds + still
-                    // closed), deducts our wallet, and replies ChestGranted -> we open
-                    // the upgrade menu then. Reliable so the request isn't dropped.
-                    uint32_t idx = static_cast<uint32_t>(best);
-                    unsigned char buf[1 + sizeof idx];
-                    buf[0] = static_cast<unsigned char>(dc::net::MsgType::OpenChest);
-                    std::memcpy(buf + 1, &idx, sizeof idx);
-                    net.send_to_host(buf, sizeof buf, true);
-                } else {
-                    // Host/standalone: pay, open, and present the upgrade menu now.
-                    currency -= chests[best].cost;
-                    chests[best].opened = true;     // one-way open
-                    choosing = true;                // modal upgrade pick (freezes movement)
-                    menu_click_prev = true;         // ignore the in-flight E/click frame
-                    window.set_relative_mouse(false);  // free the cursor for clicking cards
+            if (dbest >= 0) {   // standing at a drone vendor: try to buy (don't also open a chest)
+                if (currency >= DRONE_COST && player.minion_count < 4) {
+                    if (net.role == dc::net::Role::Client) {       // host validates + grants -> we add the drone
+                        uint32_t idx = static_cast<uint32_t>(dbest);
+                        unsigned char buf[1 + 4]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::BuyDrone);
+                        std::memcpy(buf + 1, &idx, 4); net.send_to_host(buf, sizeof buf, true);
+                    } else {                                       // host/standalone: buy now
+                        currency -= DRONE_COST; drone_vendors[dbest].bought = true; player.minion_count++;
+                    }
+                }
+            } else {
+                int best = -1; float best_d2 = CHEST_REACH * CHEST_REACH;
+                for (std::size_t i = 0; i < chests.size(); ++i) {
+                    if (chests[i].remaining() == 0) continue;        // depleted: nothing to buy
+                    const float cx = (chests[i].col + 0.5f) * dc::world::TILE;
+                    const float cz = (chests[i].row + 0.5f) * dc::world::TILE;
+                    const float dx = cx - player.position[0], dz = cz - player.position[2];
+                    const float d2 = dx * dx + dz * dz;
+                    if (d2 < best_d2) { best_d2 = d2; best = static_cast<int>(i); }
+                }
+                if (best >= 0) {
+                    if (net.role == dc::net::Role::Client) {         // host grants the lock -> ChestGranted opens our menu
+                        uint32_t idx = static_cast<uint32_t>(best);
+                        unsigned char buf[1 + 4]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::OpenChest);
+                        std::memcpy(buf + 1, &idx, 4); net.send_to_host(buf, sizeof buf, true);
+                    } else if (chests[best].locked_by == NO_LOCK) {  // host/standalone: open now (lock to id 0)
+                        chests[best].opened = true; chests[best].locked_by = 0; chests[best].lock_time = CHEST_LOCK_TIME;
+                        menu_chest = best; window.set_relative_mouse(false);
+                    }
                 }
             }
         }
         e_prev = e_now;
 
-        // Upgrade menu: click a card to pick its upgrade, which closes the menu.
-        if (choosing) {
+        // Purchase menu: click a remaining item to buy ONE for the chest's price, which
+        // closes the menu (and releases the lock for the next player).
+        if (menu_chest >= 0 && menu_chest < static_cast<int>(chests.size())) {
+            Chest& mc = chests[menu_chest];
             float mx, my; input.mouse_pos(mx, my);
             int ww, wh; window.window_size(ww, wh);
-            const float nx = (ww > 0) ? (mx / ww) * 2.0f - 1.0f : 0.0f;   // pixel -> NDC
+            const float nx = (ww > 0) ? (mx / ww) * 2.0f - 1.0f : 0.0f;
             const float ny = (wh > 0) ? 1.0f - (my / wh) * 2.0f : 0.0f;
             const bool click = input.mouse_down(SDL_BUTTON_LEFT);
             if (click && !menu_click_prev) {
-                for (int i = 0; i < 4; ++i) {
-                    const float x0 = card_x0(i), x1 = x0 + CARD_W;
-                    if (nx >= x0 && nx <= x1 && ny >= CARD_BOT && ny <= CARD_TOP) {
-                        apply_upgrade(player, cards[i]);
-                        choosing = false;
-                        window.set_relative_mouse(true);
-                        break;
+                for (int s = 0; s < 4; ++s) {
+                    if (mc.taken[s]) continue;
+                    const float x0 = card_x0(s), x1 = x0 + CARD_W;
+                    if (nx < x0 || nx > x1 || ny < CARD_BOT || ny > CARD_TOP) continue;
+                    if (currency < mc.cost) break;               // can't afford it
+                    if (net.role == dc::net::Role::Client) {      // host validates + grants (ItemGranted closes the menu)
+                        unsigned char buf[1 + 4 + 4]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::BuyItem);
+                        uint32_t ci = static_cast<uint32_t>(menu_chest), sl = static_cast<uint32_t>(s);
+                        std::memcpy(buf + 1, &ci, 4); std::memcpy(buf + 5, &sl, 4);
+                        net.send_to_host(buf, sizeof buf, true);
+                    } else {                                      // host/standalone: buy now
+                        currency -= mc.cost; mc.taken[s] = true; apply_pickup(mc.contents[s]);
+                        mc.locked_by = NO_LOCK; menu_chest = -1; window.set_relative_mouse(true);
                     }
+                    break;
                 }
             }
             menu_click_prev = click;
         }
+
 
         // Pause menu: click the red Quit button to exit.
         if (paused) {
@@ -882,6 +1278,13 @@ int main(int argc, char** argv) {
                 ch.open_t += dt;
                 if (ch.open_t > chest_dur) ch.open_t = chest_dur;
             }
+        }
+        // Host: keep my own menu's lock alive while it's open; expire stale locks (a
+        // client that opened a menu and never closed it / dropped) after the timeout.
+        if (net.role != dc::net::Role::Client) {
+            if (menu_chest >= 0 && menu_chest < static_cast<int>(chests.size())) chests[menu_chest].lock_time = CHEST_LOCK_TIME;
+            for (auto& ch : chests)
+                if (ch.locked_by != NO_LOCK) { ch.lock_time -= dt; if (ch.lock_time <= 0.0f) ch.locked_by = NO_LOCK; }
         }
 
         // Update torch particles (each flame flickers on its own phase) and pick
@@ -929,10 +1332,16 @@ int main(int argc, char** argv) {
         }
         j_prev = j_now;
 
-        // Debug: V toggles the combat cones + the title-bar readout.
+        // V toggles first/third person (third is the default). ` toggles hitbox/cone
+        // rendering + the debug readout.
         bool v_now = input.key_down(SDL_SCANCODE_V);
-        if (v_now && !v_prev) { debug_cone = !debug_cone; if (!debug_cone) window.set_title("dungeoncrawl"); }
+        if (v_now && !v_prev) first_person = !first_person;
         v_prev = v_now;
+        bool grave_now = input.key_down(SDL_SCANCODE_GRAVE);
+        if (grave_now && !grave_prev) { show_hitboxes = !show_hitboxes; window.set_title(show_hitboxes ? "dungeoncrawl  [hitboxes]" : "dungeoncrawl"); }
+        grave_prev = grave_now;
+
+        frame_hits.clear();   // collect this frame's damage events (specials + melee below)
 
         // Thrown sword: spin, fly out `throw_distance`, then boomerang back to the
         // player; damage enemies in its path (once per leg). Runs before the enemy
@@ -957,8 +1366,8 @@ int main(int argc, char** argv) {
                 else { thrown.pos[0] += hx / hd * step; thrown.pos[1] += hy / hd * step; thrown.pos[2] += hz / hd * step; }
             }
             if (net.role != dc::net::Role::Client)   // damage is host-authoritative; client flight is cosmetic
-                dc::entity::radius_attack(entities, thrown.pos, w.throw_radius * w.throw_size * player.sword_scale,
-                                          w.throw_damage * player.damage_mult, player.stats.knockback, thrown.hit_ids);
+                host_damage += dc::entity::radius_attack(entities, thrown.pos, w.throw_radius * w.throw_size * player.sword_scale,
+                                          w.throw_damage * player.damage_mult, player.stats.knockback, thrown.hit_ids, &frame_hits);
         }
 
         // Orbit special: revolve + spin the swords; damage on periodic ticks (each
@@ -978,8 +1387,8 @@ int main(int argc, char** argv) {
                     vec3 p = { player.position[0] + std::cos(a) * w.orbit_radius, 0.0f,
                                player.position[2] + std::sin(a) * w.orbit_radius };
                     if (net.role != dc::net::Role::Client)   // host-authoritative damage
-                        dc::entity::radius_attack(entities, p, w.orbit_hit_radius * player.sword_scale,
-                                                  w.orbit_damage * player.damage_mult, player.stats.knockback, orbit.hit_ids);
+                        host_damage += dc::entity::radius_attack(entities, p, w.orbit_hit_radius * player.sword_scale,
+                                                  w.orbit_damage * player.damage_mult, player.stats.knockback, orbit.hit_ids, &frame_hits);
                 }
             }
         }
@@ -993,8 +1402,8 @@ int main(int argc, char** argv) {
             bash.radius = (bash.time / s.bash_duration) * s.bash_radius;
             if (net.role != dc::net::Role::Client) {
                 vec3 c = { player.position[0], 0.0f, player.position[2] };
-                dc::entity::radius_attack(entities, c, bash.radius,
-                                          s.bash_damage * player.damage_mult, s.bash_knockback, bash.hit_ids);
+                host_damage += dc::entity::radius_attack(entities, c, bash.radius,
+                                          s.bash_damage * player.damage_mult, s.bash_knockback, bash.hit_ids, &frame_hits);
             }
             if (bash.time >= s.bash_duration) bash.active = false;
         }
@@ -1021,7 +1430,7 @@ int main(int argc, char** argv) {
                     }
                     if (hc.thrown_active) {
                         vec3 tp = { hc.thrown_pos[0], 0.0f, hc.thrown_pos[2] };
-                        dc::entity::radius_attack(entities, tp, hc.throw_radius, hc.throw_damage, hc.throw_knockback, hc.thrown_hits);
+                        hc.damage_dealt += dc::entity::radius_attack(entities, tp, hc.throw_radius, hc.throw_damage, hc.throw_knockback, hc.thrown_hits, &frame_hits);
                     }
                 }
                 // Orbit: revolve + tick damage on the host's own 0.25s cadence.
@@ -1037,8 +1446,8 @@ int main(int argc, char** argv) {
                             float a = hc.orbit_angle + (6.2831853f * i) / hc.orbit_count;
                             vec3 op = { hc.body.position[0] + std::cos(a) * hc.orbit_radius, 0.0f,
                                         hc.body.position[2] + std::sin(a) * hc.orbit_radius };
-                            dc::entity::radius_attack(entities, op, hc.orbit_hit_radius,
-                                                      hc.orbit_damage, hc.orbit_knockback, hc.orbit_hits);
+                            hc.damage_dealt += dc::entity::radius_attack(entities, op, hc.orbit_hit_radius,
+                                                      hc.orbit_damage, hc.orbit_knockback, hc.orbit_hits, &frame_hits);
                         }
                     }
                     if (hc.orbit_time >= hc.orbit_duration) hc.orbit_active = false;
@@ -1051,8 +1460,8 @@ int main(int argc, char** argv) {
                     hc.bash_radius = (hc.bash_duration > 1e-4f)
                                    ? (hc.bash_time / hc.bash_duration) * hc.bash_max_radius : 0.0f;
                     vec3 c = { hc.body.position[0], 0.0f, hc.body.position[2] };
-                    dc::entity::radius_attack(entities, c, hc.bash_radius,
-                                              hc.bash_damage, hc.bash_knockback, hc.bash_hits);
+                    hc.damage_dealt += dc::entity::radius_attack(entities, c, hc.bash_radius,
+                                              hc.bash_damage, hc.bash_knockback, hc.bash_hits, &frame_hits);
                     if (hc.bash_time >= hc.bash_duration) hc.bash_active = false;
                 }
             }
@@ -1065,7 +1474,13 @@ int main(int argc, char** argv) {
         dc::entity::PlayerCombat pc{};
         pc.id = my_id;                 // host/standalone = 0; client = its assigned id
         pc.alive = !dead;              // ghosts aren't targeted and deal no damage
+        pc.invincible = player.iframes > 0.0f;   // mid-dodge: no damage lands
         glm_vec3_copy(player.position, pc.pos);
+        { const float idt = dt > 1e-4f ? 1.0f / dt : 0.0f;   // velocity, so enemies lead their shots
+          pc.vel[0] = (player.position[0] - player_prev[0]) * idt;
+          pc.vel[1] = (player.position[1] - player_prev[1]) * idt;
+          pc.vel[2] = (player.position[2] - player_prev[2]) * idt;
+          glm_vec3_copy(player.position, player_prev); }
         { vec3 aim; player.front(aim); glm_vec3_copy(aim, pc.aim); }   // 3D look dir for the swing cone
         pc.yaw = player.yaw;
         pc.strike = player_strike;
@@ -1100,6 +1515,10 @@ int main(int argc, char** argv) {
         } else {
             pc.blocking = false;   // no shield -> can't block
         }
+        pc.crit_chance = player.crit_chance; pc.crit_mult = player.crit_mult;
+        pc.burn_dps = player.fire_dps; pc.burn_duration = player.fire_duration;
+        pc.slow_factor = player.ice_slow; pc.slow_duration = player.ice_duration;
+        pc.earth_knock = player.earth_knock;
         players.push_back(pc);
 
         // Client: send our input + resolved combat loadout now that pc is built (its
@@ -1117,6 +1536,13 @@ int main(int argc, char** argv) {
             cmd.weight = pc.weight; cmd.block_cos = pc.block_cos; cmd.block_rate = pc.block_rate;
             cmd.stamina = player.stamina;
             cmd.sword_scale = player.sword_scale;
+            cmd.crit_chance = player.crit_chance; cmd.crit_mult = player.crit_mult;
+            cmd.health_regen = player.health_regen;
+            cmd.fire_dps = player.fire_dps; cmd.fire_duration = player.fire_duration;
+            cmd.slow_factor = player.ice_slow; cmd.slow_duration = player.ice_duration;
+            cmd.earth_knock = player.earth_knock;
+            cmd.minion_count = static_cast<uint8_t>(player.minion_count); cmd.minion_damage = player.minion_damage; cmd.minion_range = player.minion_range;
+            cmd.trail_damage = player.trail_damage; cmd.trail_life = player.trail_life;
             // (Specials are no longer streamed — they're sent as reliable cast events
             // at their trigger points; the host runs + broadcasts them.)
             unsigned char buf[1 + sizeof cmd];
@@ -1131,7 +1557,13 @@ int main(int argc, char** argv) {
             dc::entity::PlayerCombat cc{};
             cc.id = hc.id;
             cc.alive = hc.body.health > 0.0f;
+            cc.invincible = hc.body.iframes > 0.0f;   // mid-dodge i-frames
             glm_vec3_copy(hc.body.position, cc.pos);
+            { const float idt = dt > 1e-4f ? 1.0f / dt : 0.0f;   // velocity for shot leading
+              cc.vel[0] = (hc.body.position[0] - hc.prev_pos[0]) * idt;
+              cc.vel[1] = (hc.body.position[1] - hc.prev_pos[1]) * idt;
+              cc.vel[2] = (hc.body.position[2] - hc.prev_pos[2]) * idt;
+              glm_vec3_copy(hc.body.position, hc.prev_pos); }
             cc.yaw = hc.body.yaw;
             cc.strike           = hc.input.strike != 0;
             // 3D aim from the client's reported yaw+pitch.
@@ -1149,6 +1581,10 @@ int main(int argc, char** argv) {
             cc.block_cos        = hc.input.block_cos;
             cc.block_rate       = hc.input.block_rate;
             cc.stamina          = hc.input.stamina;   // its reported stamina drives block negation
+            cc.crit_chance      = hc.input.crit_chance; cc.crit_mult = hc.input.crit_mult;
+            cc.burn_dps = hc.input.fire_dps; cc.burn_duration = hc.input.fire_duration;
+            cc.slow_factor = hc.input.slow_factor; cc.slow_duration = hc.input.slow_duration;
+            cc.earth_knock = hc.input.earth_knock;
             players.push_back(cc);
         }
 
@@ -1160,14 +1596,14 @@ int main(int argc, char** argv) {
         for (auto& p : players) {
             int gc = static_cast<int>(p.pos[0] / dc::world::TILE);
             int gr = static_cast<int>(p.pos[2] / dc::world::TILE);
-            flows.push_back(dc::world::compute_flow(*map, gc, gr));
+            flows.push_back(dc::world::compute_flow(*map, gc, gr, &tile_heights, dc::entity::ENEMY_MAX_CLIMB));
         }
 
         // Enemy sim is host-authoritative; clients render replicated enemies instead.
         frame_deaths.clear();
         std::vector<dc::entity::EnemyHitPlayer> hits;
         if (net.role != dc::net::Role::Client) {
-            dc::entity::update_enemies(entities, *map, flows, players, hits, dt, &frame_deaths);
+            dc::entity::update_enemies(entities, *map, flows, players, hits, dt, &frame_deaths, &frame_hits, &tile_heights);
             // Advance ranged enemies' shots; their hits add into the same `hits`.
             dc::entity::update_projectiles(entities, *map, players, hits, dt);
             // out[0] -> local player.
@@ -1179,6 +1615,7 @@ int main(int argc, char** argv) {
             if (hit.hit) player.hit_flash = dc::entity::FLASH_TIME;   // damage got through -> flash red
             player.stamina -= hit.stamina_cost;                      // blocking spent this much stamina
             if (player.stamina < 0.0f) player.stamina = 0.0f;
+            host_damage += hit.dealt;                                // melee damage we dealt this tick
             // out[i+1] -> connected clients' bodies (health + knockback only; their
             // own stamina/flash are cosmetic and handled client-side for now).
             for (std::size_t i = 0; i < host_clients.size(); ++i) {
@@ -1189,7 +1626,51 @@ int main(int argc, char** argv) {
                 b.knock_vel[0] += h.knock[0];
                 b.knock_vel[2] += h.knock[2];
                 if (h.hit) b.hit_flash = dc::entity::FLASH_TIME;   // unblocked -> flash red
+                host_clients[i].damage_dealt += h.dealt;           // melee damage this client dealt
             }
+
+            // Gunner minions: on a per-player volley timer, every minion shoots the nearest
+            // enemy in range (focus-fire; total = count * damage). Host-authoritative, so a
+            // damage number goes out in frame_hits and the kill drops loot next tick.
+            auto minion_volley = [&](float px, float pz, int count, float dmg, float range) -> float {
+                if (count <= 0) return 0.0f;
+                dc::entity::Entity* best = nullptr; float bd2 = range * range;
+                for (auto& en : entities.items) {
+                    if (en.type != dc::entity::EntityType::Enemy || !en.alive || en.health <= 0.0f) continue;
+                    const float dx = en.position[0] - px, dz = en.position[2] - pz, d2 = dx*dx + dz*dz;
+                    if (d2 < bd2) { bd2 = d2; best = &en; }
+                }
+                if (!best) return 0.0f;
+                const float vol = dmg * count;
+                const float dealt = (vol < best->health) ? vol : (best->health > 0.0f ? best->health : 0.0f);
+                best->health -= vol; best->hit_flash = dc::entity::FLASH_TIME;
+                frame_hits.push_back({ {best->position[0], best->position[1], best->position[2]}, vol, false });
+                return dealt;
+            };
+            minion_fire_cd -= dt;
+            if (minion_fire_cd <= 0.0f && player.minion_count > 0) {
+                host_damage += minion_volley(player.position[0], player.position[2], player.minion_count, player.minion_damage, player.minion_range);
+                minion_fire_cd = MINION_FIRE_INTERVAL;
+            }
+            for (auto& hc : host_clients) {
+                hc.minion_fire_cd -= dt;
+                if (hc.minion_fire_cd <= 0.0f && hc.input.minion_count > 0) {
+                    hc.damage_dealt += minion_volley(hc.body.position[0], hc.body.position[2], hc.input.minion_count, hc.input.minion_damage, hc.input.minion_range);
+                    hc.minion_fire_cd = MINION_FIRE_INTERVAL;
+                }
+            }
+
+            // Supersonic dodge shockwaves queued this frame (local + clients): one big
+            // knockback + damage burst each, credited to the dasher.
+            for (const auto& bl : supersonic_blasts) {
+                std::vector<uint32_t> hit;
+                const vec3 c = { bl.x, 0.0f, bl.z };
+                const float dealt = dc::entity::radius_attack(entities, c, SUPERSONIC_RADIUS, bl.dmg, SUPERSONIC_KNOCK, hit, &frame_hits);
+                if (bl.owner == 0) host_damage += dealt;
+                else for (auto& hc : host_clients) if (hc.id == bl.owner) { hc.damage_dealt += dealt; break; }
+            }
+            supersonic_blasts.clear();
+
             // Rebuild remotes from the (now combat-resolved) client bodies so their
             // hit-flash/swing/block show this frame.
             remotes.clear();
@@ -1202,6 +1683,7 @@ int main(int argc, char** argv) {
                 r.punching = hc.input.anim_punch != 0; r.blocking = hc.input.anim_block != 0;
                 r.punch_time = hc.input.punch_time; r.block_time = hc.input.block_time;
                 r.hit_flash = hc.body.hit_flash; r.sword_scale = hc.input.sword_scale;
+                r.damage_dealt = static_cast<float>(hc.damage_dealt);
                 r.thrown_active = hc.thrown_active;
                 r.thrown_x = hc.thrown_pos[0]; r.thrown_y = hc.thrown_pos[1]; r.thrown_z = hc.thrown_pos[2];
                 r.thrown_spin = hc.thrown_spin; r.thrown_size = hc.thrown_size;
@@ -1214,10 +1696,71 @@ int main(int argc, char** argv) {
         }
         if (player.hit_flash > 0.0f) player.hit_flash -= dt;   // decay the flash (cosmetic, both sides)
 
-        // Drop a coin where each enemy died (frame_deaths holds xyz triples).
+        // Trailblazer: drop burning segments behind each player leaving a trail (every
+        // peer, for visuals); the host damages enemies standing in the fire.
+        {
+            struct TOwner { uint32_t id; float x, z, life, dmg; };
+            std::vector<TOwner> owners;
+            if (player.trail_life > 0.0f && !dead)
+                owners.push_back({ my_id, player.position[0], player.position[2], player.trail_life, player.trail_damage });
+            for (const auto& rp : remotes) if (!rp.ghost && rp.trail_life > 0.0f) {
+                float dmg = 0.0f;   // host knows each client's trail damage (clients don't damage)
+                if (net.role != dc::net::Role::Client)
+                    for (auto& hc : host_clients) if (hc.id == rp.id) { dmg = hc.input.trail_damage; break; }
+                owners.push_back({ rp.id, rp.pos[0], rp.pos[2], rp.trail_life, dmg });
+            }
+            for (std::size_t i = 0; i < trails.size();) {   // drop trails whose owner is gone
+                bool present = false; for (auto& o : owners) if (o.id == trails[i].id) { present = true; break; }
+                if (!present) { trails[i] = trails.back(); trails.pop_back(); } else ++i;
+            }
+            for (auto& o : owners) {
+                Trail* t = nullptr; for (auto& tr : trails) if (tr.id == o.id) { t = &tr; break; }
+                if (!t) { trails.push_back({ o.id, 0, 0, 0, 0, false, {} }); t = &trails.back(); }
+                t->dmg = o.dmg; t->life = o.life;
+                const float mdx = o.x - t->last_x, mdz = o.z - t->last_z;
+                if (!t->init || mdx*mdx + mdz*mdz > TRAIL_DROP*TRAIL_DROP) {
+                    t->segs.push_back({ o.x, o.z, 0.0f }); t->last_x = o.x; t->last_z = o.z; t->init = true;
+                }
+                for (std::size_t i = 0; i < t->segs.size();) {
+                    t->segs[i].age += dt;
+                    if (t->segs[i].age >= t->life) { t->segs[i] = t->segs.back(); t->segs.pop_back(); } else ++i;
+                }
+            }
+            if (net.role != dc::net::Role::Client) {   // host: burn enemies standing in a trail
+                for (auto& t : trails) {
+                    if (t.dmg <= 0.0f) continue;
+                    for (auto& e : entities.items) {
+                        if (e.type != dc::entity::EntityType::Enemy || !e.alive || e.health <= 0.0f) continue;
+                        bool inFire = false;
+                        for (auto& sg : t.segs) { const float dx = e.position[0]-sg.x, dz = e.position[2]-sg.z;
+                            if (dx*dx + dz*dz < TRAIL_RADIUS*TRAIL_RADIUS) { inFire = true; break; } }
+                        if (!inFire) continue;
+                        const float dealt = t.dmg * dt;
+                        e.health -= dealt; e.hit_flash = dc::entity::FLASH_TIME;
+                        if (t.id == 0) host_damage += dealt;
+                        else for (auto& hc : host_clients) if (hc.id == t.id) { hc.damage_dealt += dealt; break; }
+                    }
+                }
+            }
+        }
+
+        // Floating damage numbers: age + cull existing, then spawn this frame's hits.
+        // (On a client frame_hits is empty — it spawns from the snapshot section instead.)
+        for (std::size_t i = 0; i < dmg_numbers.size();) {
+            dmg_numbers[i].age += dt;
+            if (dmg_numbers[i].age >= DMG_LIFE) { dmg_numbers[i] = dmg_numbers.back(); dmg_numbers.pop_back(); }
+            else ++i;
+        }
+        for (const auto& hn : frame_hits)
+            dmg_numbers.push_back({ {hn.pos[0], hn.pos[1], hn.pos[2]}, hn.amount, 0.0f, hn.crit });
+
+        // Drop a coin where each enemy died (frame_deaths holds xyz triples), and burst the
+        // body into a cloud of sand: lots of tan motes thrown outward + up that fall and fade,
+        // so the enemy looks like it crumbles away.
         for (std::size_t i = 0; i + 2 < frame_deaths.size(); i += 3) {
             Coin c; c.pos[0] = frame_deaths[i]; c.pos[1] = frame_deaths[i + 1]; c.pos[2] = frame_deaths[i + 2];
             coins.push_back(c);
+            burst_sand(c.pos[0], c.pos[1], c.pos[2]);   // host/standalone crumble (clients do it off the snapshot)
         }
 
         // Coins: settle briefly (so they're always visible), then magnet toward the
@@ -1273,6 +1816,10 @@ int main(int argc, char** argv) {
               s.x = player.position[0]; s.y = player.position[1]; s.z = player.position[2];
               s.yaw = player.yaw; s.pitch = player.pitch; s.anim_time = anim_time;
               s.health = player.health; s.moving = moving ? 1 : 0; s.currency = currency;
+              s.damage_dealt = static_cast<float>(host_damage);
+              s.elements = elem_mask(player.fire_dps, player.ice_slow, player.earth_knock);
+              s.minions = static_cast<uint8_t>(player.minion_count); s.minion_range = player.minion_range;
+              s.trail_life = player.trail_life;
               s.punching = punching ? 1 : 0; s.blocking = blocking ? 1 : 0;
               s.punch_time = punch_time; s.block_time = block_time;
               s.hit_flash = player.hit_flash; s.sword_scale = player.sword_scale;
@@ -1296,6 +1843,10 @@ int main(int argc, char** argv) {
                 s.x = hc.body.position[0]; s.y = hc.body.position[1]; s.z = hc.body.position[2];
                 s.yaw = hc.body.yaw; s.pitch = hc.body.pitch; s.anim_time = hc.anim_time;
                 s.health = hc.body.health; s.moving = m ? 1 : 0; s.currency = hc.currency;
+                s.damage_dealt = static_cast<float>(hc.damage_dealt);
+                s.elements = elem_mask(hc.input.fire_dps, hc.input.slow_factor, hc.input.earth_knock);
+                s.minions = hc.input.minion_count; s.minion_range = hc.input.minion_range;
+                s.trail_life = hc.input.trail_life;
                 s.punching = hc.input.anim_punch; s.blocking = hc.input.anim_block;
                 s.punch_time = hc.input.punch_time; s.block_time = hc.input.block_time;
                 s.hit_flash = hc.body.hit_flash; s.sword_scale = hc.input.sword_scale;
@@ -1312,7 +1863,9 @@ int main(int argc, char** argv) {
                 if (en.type != dc::entity::EntityType::Enemy) continue;
                 dc::net::EnemyState e{}; e.x = en.position[0]; e.z = en.position[2]; e.yaw = en.yaw;
                 e.anim_time = en.anim_time; e.attack_time = en.attack_time; e.hit_flash = en.hit_flash;
+                e.punch_anim = en.punch_anim;
                 e.attacking = en.attacking ? 1 : 0; e.kind = static_cast<uint8_t>(en.kind);
+                e.status = (en.burn_time > 0.0f ? 1 : 0) | (en.slow_time > 0.0f ? 2 : 0);
                 put(&e, sizeof e);
             }
             uint32_t nc = static_cast<uint32_t>(coins.size()); put(&nc, 4);
@@ -1320,14 +1873,32 @@ int main(int argc, char** argv) {
             // Chest open-state (stable map order, so an index identifies the same chest
             // on every peer). One byte each — cheap, and lets clients render opens.
             uint32_t nh = static_cast<uint32_t>(chests.size()); put(&nh, 4);
-            for (auto& ch : chests) { unsigned char o = ch.opened ? 1 : 0; put(&o, 1); }
+            for (auto& ch : chests) {
+                unsigned char o = ch.opened ? 1 : 0; put(&o, 1);
+                unsigned char tk = 0; for (int k = 0; k < 4; ++k) if (ch.taken[k]) tk |= (1u << k);  // which slots bought
+                put(&tk, 1);
+            }
+            // Drone vendors: just the bought flags (positions are deterministic).
+            uint32_t nv = static_cast<uint32_t>(drone_vendors.size()); put(&nv, 4);
+            for (auto& dv : drone_vendors) { unsigned char b = dv.bought ? 1 : 0; put(&b, 1); }
             // In-flight projectiles (ranged enemy shots) for clients to render.
             uint32_t npr = static_cast<uint32_t>(entities.projectiles.size()); put(&npr, 4);
             for (auto& pr : entities.projectiles) {
                 dc::net::ProjectileState ps{}; ps.x = pr.pos[0]; ps.y = pr.pos[1]; ps.z = pr.pos[2];
                 ps.r = pr.color[0]; ps.g = pr.color[1]; ps.b = pr.color[2];
+                ps.vx = pr.vel[0]; ps.vy = pr.vel[1]; ps.vz = pr.vel[2]; ps.beam = pr.beam ? 1 : 0;
                 put(&ps, sizeof ps);
             }
+            // Damage numbers spawned this tick (so every client floats the same numbers).
+            uint32_t nd = static_cast<uint32_t>(frame_hits.size()); put(&nd, 4);
+            for (const auto& hn : frame_hits) {
+                dc::net::DamageNumState ds{}; ds.x = hn.pos[0]; ds.y = hn.pos[1]; ds.z = hn.pos[2];
+                ds.amount = hn.amount; ds.crit = hn.crit ? 1 : 0;
+                put(&ds, sizeof ds);
+            }
+            // Enemy deaths this tick (xyz triples) so clients play the same sand-crumble.
+            uint32_t ndeath = static_cast<uint32_t>(frame_deaths.size() / 3); put(&ndeath, 4);
+            put(frame_deaths.data(), frame_deaths.size() * sizeof(float));
             net.broadcast(buf.data(), buf.size(), false);
         }
 
@@ -1352,6 +1923,10 @@ int main(int argc, char** argv) {
                 sp.update(dt, entities, *map);
             }
 
+        // Local player's hand-bone world position this frame (set at the sword render
+        // below), so elemental sparks emit right off the blade.
+        vec3 blade_pos = {0.0f, 0.0f, 0.0f}; bool blade_ok = false;
+
         // Build the animation layers for this frame: walk drives the body, punch
         // is masked to the armL bone so you can punch while walking. (No layers
         // when idle -> rest pose.)
@@ -1364,13 +1939,13 @@ int main(int argc, char** argv) {
         dc::renderer::Mat4 head_world;
         dc::renderer::Mat4 l_hand_world;
         dc::renderer::Mat4 r_hand_world;
-        // First person: head-look only (body undrawn; gear aims via the viewmodel tilt).
-        // Third-person debug (V): pitch the body so your own avatar hinges to aim, same
-        // as remotes — charming, and lets you see what everyone else sees.
-        dc::renderer::pose_model(model_data, layers, debug_cone ? 0.0f : player.pitch, part_world,
+        // Third person (default): pitch the BODY so your avatar hinges to aim, like remotes.
+        // First person (V): head-look only (body undrawn; gear aims via the viewmodel tilt).
+        const bool tp = !first_person;
+        dc::renderer::pose_model(model_data, layers, tp ? 0.0f : player.pitch, part_world,
                                  { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
                                  { &head_world, &l_hand_world, &r_hand_world },
-                                 debug_cone ? player.pitch : 0.0f);
+                                 tp ? player.pitch : 0.0f);
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
@@ -1386,7 +1961,7 @@ int main(int argc, char** argv) {
         glm_rotate_y(placement, -player.yaw + MODEL_YAW_OFFSET, placement);
 
         int w, h; window.framebuffer_size(w, h);
-        camera.third_person = debug_cone;   // debug view (V): pull back so you see yourself + the cones
+        camera.third_person = tp;   // third person by default; V drops to first person
         renderer.begin_frame(*map, camera, player, dt, w, h);
         renderer.set_light(light_pos, light_color, LIGHT_RADIUS);
         renderer.draw_map(mesh);
@@ -1394,9 +1969,8 @@ int main(int argc, char** argv) {
         const float GHOST_ALPHA = 0.18f;               // dead remote players render faint + translucent
         // First person (default): don't draw our own body/helmet — only the held sword
         // and shield, as a "viewmodel" tilted by pitch about the eye so the gear aims
-        // where we point. Debug third-person (V): draw the full body + helmet instead,
-        // and attach the gear normally (no view tilt) so you can see the swing + cones.
-        const bool tp = camera.third_person;
+        // where we point. Third person (default): draw the full body + helmet instead,
+        // and attach the gear normally (no view tilt). (`tp` computed above.)
         mat4 vm_place;
         {
             mat4 tilt; glm_mat4_identity(tilt);
@@ -1443,6 +2017,8 @@ int main(int argc, char** argv) {
         if (player.weapon && !thrown.active) {
             mat4 sword_place;
             glm_mat4_mul(gear_place, l_hand_world.m, sword_place);
+            blade_pos[0] = sword_place[3][0]; blade_pos[1] = sword_place[3][1]; blade_pos[2] = sword_place[3][2];
+            blade_ok = true;   // emit sparks from the hand bone
             vec3 sws = { player.sword_scale, player.sword_scale, player.sword_scale };
             glm_scale(sword_place, sws);   // blue upgrade grows the blade
             vec3 sword_color = { 0.8f, 0.8f, 0.9f };
@@ -1533,10 +2109,40 @@ int main(int argc, char** argv) {
         };
         for (const auto& en : entities.items) {
             if (en.type != dc::entity::EntityType::Enemy) continue;
-            if (en.kind == dc::entity::EnemyKind::Flying) {   // a hovering 2-tall cube
+            if (en.kind == dc::entity::EnemyKind::Flying) {   // hovering eye (cube fallback)
                 const float gx = en.position[0], gz = en.position[2];
                 const float cy = terrain.height(gx, gz) + dc::entity::FLY_HOVER;
-                append_cube(gx, cy, gz, 0.7f, 1.0f, 0.7f);
+                if (eye_loaded) {
+                    // Face the target: en.yaw tracks it horizontally in the sim; the pitch
+                    // is computed toward the nearest player, so the eye peers down at floor
+                    // targets and tilts UP when a player launches above it. Gentle hover bob.
+                    const float EYE_YAW_OFFSET = MODEL_YAW_OFFSET + glm_rad(90.0f);   // eye's forward is +90 from the player rig's
+                    const float bob = 0.12f * std::sin(t_now * 2.0f + gx);
+                    const float eye_y = cy + bob;
+                    // Nearest player's eye height, for the vertical look angle.
+                    float best = 1e30f, ty = eye_y;
+                    auto consider = [&](float px, float py, float pz) {
+                        const float dx = px - gx, dz = pz - gz, d2 = dx*dx + dz*dz;
+                        if (d2 < best) { best = d2; ty = py; }
+                    };
+                    if (!dead) consider(player.position[0], player.position[1], player.position[2]);
+                    for (const auto& rp : remotes) if (!rp.ghost) consider(rp.pos[0], rp.pos[1], rp.pos[2]);
+                    const float horiz = std::sqrt(best) > 0.3f ? std::sqrt(best) : 0.3f;
+                    float eye_pitch = std::atan2(ty - eye_y, horiz);          // + = look up, - = look down
+                    if (eye_pitch >  1.3f) eye_pitch =  1.3f;                 // clamp near-vertical
+                    if (eye_pitch < -1.3f) eye_pitch = -1.3f;
+                    dc::renderer::pose_model(eye_data, {}, 0.0f, enemy_part_world);   // static (rest pose)
+                    mat4 eplace; glm_mat4_identity(eplace);
+                    vec3 epos = { gx, eye_y, gz };
+                    glm_translate(eplace, epos);
+                    glm_rotate_y(eplace, -en.yaw + EYE_YAW_OFFSET, eplace);   // look toward the target
+                    glm_rotate_z(eplace, eye_pitch, eplace);                  // pitch about the eye's right axis (Z) -> no roll
+                    vec3 col = { 1.0f, 1.0f, 1.0f };
+                    if (en.hit_flash > 0.0f) { vec3 red = {1.0f,0.2f,0.2f}; glm_vec3_lerp(col, red, en.hit_flash/dc::entity::FLASH_TIME, col); }
+                    renderer.draw_model(eye_model, enemy_part_world, eplace, col);
+                } else {
+                    append_cube(gx, cy, gz, 0.7f, 1.0f, 0.7f);
+                }
                 continue;
             }
             std::vector<dc::renderer::AnimLayer> el;
@@ -1676,22 +2282,45 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Enemy projectiles: glowing spheres (additive billboards), per-shot color.
+        // Enemy projectiles: most are glowing spheres; eye "lasers" (beam) render as a
+        // long, thin, red glowing capsule stretched along their travel direction.
         {
-            const float ps = 0.3f;
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
             for (const auto& pr : entities.projectiles) {
-                vec3 ctr = { pr.pos[0], pr.pos[1], pr.pos[2] };
+                const vec3 ctr = { pr.pos[0], pr.pos[1], pr.pos[2] };
                 const float cr = pr.color[0], cg = pr.color[1], cb = pr.color[2];
-                auto P = [&](float ax, float ay) {
-                    particle_verts.insert(particle_verts.end(), {
-                        ctr[0] + (R[0] * ax + U[0] * ay) * ps,
-                        ctr[1] + (R[1] * ax + U[1] * ay) * ps,
-                        ctr[2] + (R[2] * ax + U[2] * ay) * ps,
-                        cr, cg, cb, 1.0f });
-                };
-                P(-1,-1); P(1,-1); P(1,1);
-                P(-1,-1); P(1,1); P(-1,1);
+                if (pr.beam) {
+                    // World-space ribbon: long axis = the 3D travel direction (so the beam
+                    // is parallel to where it's going, tilting up at elevated targets); the
+                    // width axis = perpendicular, in the plane facing the camera.
+                    float lx = pr.vel[0], ly = pr.vel[1], lz = pr.vel[2];
+                    float ll = std::sqrt(lx*lx + ly*ly + lz*lz);
+                    if (ll > 1e-4f) { lx /= ll; ly /= ll; lz /= ll; } else { lx = 1; ly = 0; lz = 0; }
+                    const float fx = R[1]*U[2]-R[2]*U[1], fy = R[2]*U[0]-R[0]*U[2], fz = R[0]*U[1]-R[1]*U[0];  // cam forward
+                    float wx = ly*fz - lz*fy, wy = lz*fx - lx*fz, wz = lx*fy - ly*fx;   // perp = L x F
+                    float wl = std::sqrt(wx*wx + wy*wy + wz*wz);
+                    if (wl > 1e-4f) { wx /= wl; wy /= wl; wz /= wl; } else { wx = R[0]; wy = R[1]; wz = R[2]; }
+                    const float LEN = 1.6f, WID = 0.12f;
+                    auto P = [&](float al, float ac, float gw, float gr, float gg, float gb, float a) {
+                        const float L = al * LEN * gw, Wd = ac * WID * (gw > 1.0f ? 3.0f : 1.0f);
+                        particle_verts.insert(particle_verts.end(), {
+                            ctr[0] + lx*L + wx*Wd, ctr[1] + ly*L + wy*Wd, ctr[2] + lz*L + wz*Wd, gr, gg, gb, a });
+                    };
+                    // Bright thin core...
+                    P(-1,-1,1,cr,cg,cb,1); P(1,-1,1,cr,cg,cb,1); P(1,1,1,cr,cg,cb,1);
+                    P(-1,-1,1,cr,cg,cb,1); P(1,1,1,cr,cg,cb,1); P(-1,1,1,cr,cg,cb,1);
+                    // ...wrapped in a wider, fainter red glow.
+                    P(-1,-1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f); P(1,-1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f); P(1,1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f);
+                    P(-1,-1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f); P(1,1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f); P(-1,1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f);
+                } else {
+                    const float ps = 0.3f;
+                    auto P = [&](float ax, float ay) {
+                        particle_verts.insert(particle_verts.end(), {
+                            ctr[0] + (R[0]*ax + U[0]*ay) * ps, ctr[1] + (R[1]*ax + U[1]*ay) * ps,
+                            ctr[2] + (R[2]*ax + U[2]*ay) * ps, cr, cg, cb, 1.0f });
+                    };
+                    P(-1,-1); P(1,-1); P(1,1);  P(-1,-1); P(1,1); P(-1,1);
+                }
             }
         }
 
@@ -1730,8 +2359,9 @@ int main(int argc, char** argv) {
                                 rp.bash_radius, 0.4f);
         }
 
-        // Chest price tags: the cost in 7-segment digits, billboarded above each
-        // unopened chest, shrinking with distance and culled when far (declutter).
+        // Chest price tags: the cost in 7-segment digits, billboarded above each chest
+        // that still has items, shrinking with distance and culled when far (declutter).
+        // Depleted chests show nothing (and stay open).
         {
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
             const float COST_MAX = 0.30f;                 // world height cap (near)
@@ -1747,7 +2377,7 @@ int main(int argc, char** argv) {
                 P(u0,v0); P(u1,v1); P(u0,v1);
             };
             for (const auto& ch : chests) {
-                if (ch.opened) continue;
+                if (ch.remaining() == 0) continue;   // depleted: no price
                 float cx = (ch.col + 0.5f) * dc::world::TILE, cz = (ch.row + 0.5f) * dc::world::TILE;
                 float dx = cx - player.position[0], dz = cz - player.position[2];
                 float dist = std::sqrt(dx * dx + dz * dz);
@@ -1769,10 +2399,189 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Drone vendors: a steel-blue gunner drone resting on the ground with its price
+        // (gold 7-seg) floating above. Disappears once bought.
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            for (const auto& dv : drone_vendors) {
+                if (dv.bought) continue;
+                const float gy = terrain.height(dv.x, dv.z);
+                // The drone: a glowing circle hovering just above the ground, gentle bob.
+                const float by = gy + 0.35f + std::sin(t_now * 2.0f + dv.x) * 0.06f;
+                const int N = 14; const float s = 0.33f;
+                for (int k = 0; k < N; ++k) {
+                    const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                    auto P = [&](float u, float v) {
+                        particle_verts.insert(particle_verts.end(), {
+                            dv.x + (R[0]*u + U[0]*v), by + (R[1]*u + U[1]*v), dv.z + (R[2]*u + U[2]*v), 0.55f, 0.7f, 0.95f, 0.95f });
+                    };
+                    P(0, 0); P(s*std::cos(a0), s*std::sin(a0)); P(s*std::cos(a1), s*std::sin(a1));
+                }
+                // Floating price (gold), like a chest tag.
+                auto pquad = [&](const vec3 base, float u0, float v0, float u1, float v1, float sc) {
+                    auto P = [&](float u, float v) {
+                        particle_verts.insert(particle_verts.end(), {
+                            base[0] + (R[0]*u + U[0]*v) * sc, base[1] + (R[1]*u + U[1]*v) * sc,
+                            base[2] + (R[2]*u + U[2]*v) * sc, 1.0f, 0.85f, 0.2f, 1.0f });
+                    };
+                    P(u0,v0); P(u1,v0); P(u1,v1);  P(u0,v0); P(u1,v1); P(u0,v1);
+                };
+                char num[16]; std::snprintf(num, sizeof num, "%d", DRONE_COST);
+                const int n = static_cast<int>(std::strlen(num));
+                const float dw = 0.6f, dh = 1.0f, dt2 = 0.16f, gap = dw + 0.3f, total = n * gap - 0.3f;
+                vec3 base = { dv.x, gy + 1.7f, dv.z };
+                for (int i = 0; i < n; ++i) {
+                    float ox = -total * 0.5f + i * gap;
+                    seven_seg(num[i] - '0', dw, dh, dt2, [&](float u0, float v0, float u1, float v1) {
+                        pquad(base, ox + u0, v0, ox + u1, v1, 0.3f);
+                    });
+                }
+            }
+        }
+
+        // Updraft pads: a column of cool-blue motes rising from each pad (looping phase =
+        // a continuous stream), so the launch spots are obvious.
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            const float colH = 3.2f; const int M = 12;
+            for (const auto& u : updrafts) {
+                const float base = terrain.height(u.x, u.z) + 0.1f;
+                for (int i = 0; i < M; ++i) {
+                    const float ph = std::fmod(run_time * 1.6f + colH * i / M, colH);   // 0..colH rising
+                    const float al = (1.0f - ph / colH) * 0.5f;                          // fade toward the top
+                    const float mx = u.x + std::sin(run_time * 3.0f + i * 1.7f) * 0.25f;
+                    const float mz = u.z + std::cos(run_time * 2.3f + i * 1.1f) * 0.25f;
+                    const float my = base + ph, s = 0.07f;
+                    auto P = [&](float uu, float vv) {
+                        particle_verts.insert(particle_verts.end(), {
+                            mx + (R[0]*uu + U[0]*vv), my + (R[1]*uu + U[1]*vv), mz + (R[2]*uu + U[2]*vv), 0.3f, 0.7f, 1.0f, al });
+                    };
+                    P(-s,-s); P(s,-s); P(s,s); P(-s,-s); P(s,s); P(-s,s);
+                }
+            }
+        }
+
+
+        // Trailblazer fire: orange embers along each trail segment, rising + fading as the
+        // segment burns out.
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            for (auto& t : trails) {
+                if (t.life <= 0.0f) continue;
+                for (auto& sg : t.segs) {
+                    const float fade = 1.0f - sg.age / t.life;
+                    if (fade <= 0.0f) continue;
+                    const float by = terrain.height(sg.x, sg.z) + 0.15f + (1.0f - fade) * 0.5f;   // rise as it ages
+                    const float sz = 0.16f * fade + 0.05f, al = fade * 0.5f;
+                    const float jx = std::sin(run_time * 7.0f + sg.x) * 0.12f * fade;
+                    const float jz = std::cos(run_time * 6.0f + sg.z) * 0.12f * fade;
+                    const float px = sg.x + jx, pz = sg.z + jz;
+                    auto P = [&](float u, float v) {
+                        particle_verts.insert(particle_verts.end(), {
+                            px + (R[0]*u + U[0]*v), by + (R[1]*u + U[1]*v), pz + (R[2]*u + U[2]*v), 1.0f, 0.45f, 0.1f, al });
+                    };
+                    P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
+                }
+            }
+        }
+
+        // Supersonic dodge gust: a counter-clockwise spiral of white motes bursting out
+        // from where you dodged, expanding + fading over its short life (less spherical).
+        if (ss_anim > 0.0f) {
+            ss_anim -= dt;
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            const float prog = 1.0f - ss_anim / SS_ANIM_TIME;       // 0..1 expand
+            const float maxR = SUPERSONIC_RADIUS * prog;
+            const float al = (1.0f - prog) * 0.6f;                  // fade as it expands
+            const float baseY = terrain.height(ss_pos[0], ss_pos[2]) + 0.5f;
+            const int ARMS = 3, PER = 14;
+            for (int arm = 0; arm < ARMS; ++arm)
+                for (int j = 1; j <= PER; ++j) {
+                    const float fr = static_cast<float>(j) / PER;
+                    const float rr = maxR * fr;
+                    const float ang = arm * (6.2831853f / ARMS) + fr * 6.0f + run_time * 4.0f;   // CCW swirl
+                    const float px = ss_pos[0] + std::cos(ang) * rr, pz = ss_pos[2] + std::sin(ang) * rr;
+                    const float py = baseY + fr * 0.5f, sz = 0.06f;
+                    auto P = [&](float u, float v) {
+                        particle_verts.insert(particle_verts.end(), {
+                            px + (R[0]*u + U[0]*v), py + (R[1]*u + U[1]*v), pz + (R[2]*u + U[2]*v), 0.85f, 0.92f, 1.0f, al });
+                    };
+                    P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
+                }
+        }
+
+        // Melee forcefield bursts: when a melee enemy punches, an expanding shell of
+        // orange shockwave motes blasts outward to MELEE_FORCEFIELD_RADIUS and fades. Driven
+        // by the replicated punch_anim, so every peer sees it.
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            for (const auto& en : entities.items) {
+                if (en.type != dc::entity::EntityType::Enemy || en.punch_anim <= 0.0f) continue;
+                const float prog = 1.0f - en.punch_anim / dc::entity::PUNCH_ANIM_TIME;   // 0..1 expand
+                const float rr   = dc::entity::MELEE_FORCEFIELD_RADIUS * prog;
+                const float al   = (1.0f - prog) * 0.7f;                                  // fade as it grows
+                const float sz   = 0.10f + 0.10f * prog;                                  // motes grow with the shell
+                const vec3  c    = { en.position[0], terrain.height(en.position[0], en.position[2]) + 1.0f, en.position[2] };
+                const int RINGS = 5, SEGS = 12;
+                for (int ri = 0; ri <= RINGS; ++ri) {
+                    const float theta = 3.14159265f * ri / RINGS;        // 0..pi (pole to pole)
+                    const float st = std::sin(theta), ct = std::cos(theta);
+                    for (int si = 0; si < SEGS; ++si) {
+                        const float phi = 6.2831853f * si / SEGS + prog * 2.0f;   // slight swirl as it expands
+                        const float px = c[0] + rr * st * std::cos(phi);
+                        const float py = c[1] + rr * ct;
+                        const float pz = c[2] + rr * st * std::sin(phi);
+                        auto P = [&](float u, float v) {
+                            particle_verts.insert(particle_verts.end(), {
+                                px + (R[0]*u + U[0]*v), py + (R[1]*u + U[1]*v), pz + (R[2]*u + U[2]*v),
+                                1.0f, 0.55f, 0.2f, al });
+                        };
+                        P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
+                    }
+                }
+            }
+        }
+
+        // Floating damage numbers: billboarded 7-seg digits over each hit enemy. World-
+        // sized, so perspective shrinks them with distance and grows them up close (like
+        // the chest price tags). They rise + fade over their life; crits are gold + bigger.
+        if (!dmg_numbers.empty()) {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            auto quad = [&](const vec3 base, float u0, float v0, float u1, float v1, float sc,
+                            float r, float g, float b, float al) {
+                auto P = [&](float u, float v) {
+                    particle_verts.insert(particle_verts.end(), {
+                        base[0] + (R[0]*u + U[0]*v) * sc, base[1] + (R[1]*u + U[1]*v) * sc,
+                        base[2] + (R[2]*u + U[2]*v) * sc, r, g, b, al });
+                };
+                P(u0,v0); P(u1,v0); P(u1,v1);
+                P(u0,v0); P(u1,v1); P(u0,v1);
+            };
+            for (const auto& fn : dmg_numbers) {
+                const float t = fn.age / DMG_LIFE;
+                const float al = (1.0f - t) * (1.0f - t);          // ease-out fade
+                const float sc = fn.crit ? 0.36f : 0.26f;          // crits a touch larger
+                const float r = 1.0f, g = fn.crit ? 0.82f : 1.0f, b = fn.crit ? 0.18f : 1.0f;  // gold crit / white
+                char num[16]; std::snprintf(num, sizeof num, "%d", static_cast<int>(fn.amount + 0.5f));
+                const int n = static_cast<int>(std::strlen(num));
+                const float dw = 0.55f, dh = 0.9f, dtk = 0.14f, gap = dw + 0.28f;
+                const float total = n * gap - 0.28f;
+                vec3 base = { fn.pos[0],
+                              terrain.height(fn.pos[0], fn.pos[2]) + fn.pos[1] + 1.8f + fn.age * DMG_RISE,
+                              fn.pos[2] };
+                for (int i = 0; i < n; ++i) {
+                    float ox = -total * 0.5f + i * gap;
+                    seven_seg(num[i] - '0', dw, dh, dtk, [&](float u0, float v0, float u1, float v1) {
+                        quad(base, ox + u0, v0, ox + u1, v1, sc, r, g, b, al);
+                    });
+                }
+            }
+        }
+
         // Debug: draw the combat cones as flat fans on the floor in front of the
         // player (reuses the additive particle pass: 7 floats/vertex pos+rgba).
         // Red = sword/attack arc; blue = shield block arc.
-        if (debug_cone) {
+        if (show_hitboxes) {
             auto draw_cone = [&](float cx, float cz, float center_yaw, float half, float radius,
                                  float r, float g, float b) {
                 const int segs = 18;
@@ -1829,10 +2638,138 @@ int main(int argc, char** argv) {
                 draw_cone(thrown.pos[0], thrown.pos[2], 0.0f, 3.14159265f,
                           player.weapon->throw_radius * player.weapon->throw_size * player.sword_scale, 0.9f, 0.2f, 0.2f);
         }
+        // Elemental sword sparks: spawn from each player's blade (by their element mask),
+        // then simulate + draw as small billboards. Fire rises, ice sinks, earth scatters.
+        {
+            auto frand = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
+            auto emit = [&](const vec3 base, uint8_t mask) {
+                if (mask == 0 || sparks.size() > 600) return;
+                auto add = [&](float vx, float vy, float vz, float r, float g, float b, float life) {
+                    Spark s;
+                    s.pos[0] = base[0] + (frand() - 0.5f) * 0.12f; s.pos[1] = base[1] + (frand() - 0.5f) * 0.12f;
+                    s.pos[2] = base[2] + (frand() - 0.5f) * 0.12f;
+                    s.vel[0] = vx; s.vel[1] = vy; s.vel[2] = vz;
+                    s.color[0] = r; s.color[1] = g; s.color[2] = b; s.age = 0.0f; s.life = life;
+                    sparks.push_back(s);
+                };
+                // Spawn very rarely (roughly one per second per element).
+                if ((mask & 1) && frand() < 0.04f) add((frand()-0.5f)*0.4f, 1.2f+frand()*0.8f, (frand()-0.5f)*0.4f, 1.0f, 0.5f, 0.12f, 0.5f);  // fire: rise
+                if ((mask & 2) && frand() < 0.035f) add((frand()-0.5f)*0.5f, -0.5f-frand()*0.4f, (frand()-0.5f)*0.5f, 0.45f, 0.8f, 1.0f, 0.7f);  // ice: sink
+                if ((mask & 4) && frand() < 0.03f) { float a = frand()*6.2831853f; add(std::cos(a)*0.8f, 0.2f, std::sin(a)*0.8f, 0.6f, 0.45f, 0.22f, 0.55f); }  // earth: scatter
+            };
+            if (!dead && blade_ok) {  // off the local player's hand bone, nudged forward into view
+                vec3 f; player.front(f);
+                vec3 base = { blade_pos[0] + f[0] * 0.45f, blade_pos[1] + 0.1f, blade_pos[2] + f[2] * 0.45f };
+                emit(base, elem_mask(player.fire_dps, player.ice_slow, player.earth_knock));
+            }
+            for (const auto& rp : remotes) {
+                if (rp.ghost || rp.elements == 0) continue;
+                const float c = std::cos(rp.yaw), s2 = std::sin(rp.yaw);
+                vec3 base = { rp.pos[0] + c*0.5f, rp.pos[1] - 0.3f, rp.pos[2] + s2*0.5f };
+                emit(base, rp.elements);
+            }
+            // Burning / slowed enemies emit fire / ice off their bodies.
+            for (const auto& en : entities.items) {
+                if (en.type != dc::entity::EntityType::Enemy) continue;
+                const uint8_t em = (en.burn_time > 0.0f ? 1 : 0) | (en.slow_time > 0.0f ? 2 : 0);
+                if (!em) continue;
+                const float ey = terrain.height(en.position[0], en.position[2])
+                               + (en.kind == dc::entity::EnemyKind::Flying ? dc::entity::FLY_HOVER : 0.0f) + 0.9f;
+                vec3 base = { en.position[0], ey, en.position[2] };
+                emit(base, em);
+            }
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            for (std::size_t i = 0; i < sparks.size();) {
+                sparks[i].age += dt;
+                if (sparks[i].age >= sparks[i].life) { sparks[i] = sparks.back(); sparks.pop_back(); continue; }
+                sparks[i].vel[1] -= sparks[i].grav * dt;   // debris falls; elemental sparks have grav 0
+                sparks[i].pos[0] += sparks[i].vel[0]*dt; sparks[i].pos[1] += sparks[i].vel[1]*dt; sparks[i].pos[2] += sparks[i].vel[2]*dt;
+                const float fade = 1.0f - sparks[i].age / sparks[i].life;
+                const float al = fade * 0.28f * sparks[i].alpha_mul;   // dim (additive) but visible
+                const float sz = (0.04f * fade + 0.012f) * sparks[i].size_mul;
+                const vec3& p = sparks[i].pos; const vec3& cc = sparks[i].color;
+                auto P = [&](float u, float v) {
+                    particle_verts.insert(particle_verts.end(), {
+                        p[0] + (R[0]*u + U[0]*v), p[1] + (R[1]*u + U[1]*v), p[2] + (R[2]*u + U[2]*v), cc[0], cc[1], cc[2], al });
+                };
+                P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
+                ++i;
+            }
+        }
+
+        // Gunner minions: each drone EASES toward a loose slot near its owner (lags when
+        // you move, so it reads as reacting), and fires small red lasers at the nearest
+        // enemy in range. Simulated per-peer for visuals; the host does the real damage.
+        {
+            struct Owner { uint32_t id; float x, y, z; int count; float range; };
+            std::vector<Owner> owners;
+            if (!dead) owners.push_back({ my_id, player.position[0], player.position[1], player.position[2], player.minion_count, player.minion_range });
+            for (const auto& rp : remotes) if (!rp.ghost && rp.minions > 0)
+                owners.push_back({ rp.id, rp.pos[0], rp.pos[1], rp.pos[2], rp.minions, rp.minion_range });
+            for (std::size_t i = 0; i < swarms.size();) {   // drop swarms whose owner is gone
+                bool present = false; for (auto& o : owners) if (o.id == swarms[i].id) { present = true; break; }
+                if (!present) { swarms[i] = swarms.back(); swarms.pop_back(); } else ++i;
+            }
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            const float fx = R[1]*U[2]-R[2]*U[1], fy = R[2]*U[0]-R[0]*U[2], fz = R[0]*U[1]-R[1]*U[0];  // cam forward
+            // A thin camera-facing red laser ribbon from A to B.
+            auto beam = [&](float ax,float ay,float az, float bx,float by,float bz, float wid, float al) {
+                float lx=bx-ax, ly=by-ay, lz=bz-az; const float ll=std::sqrt(lx*lx+ly*ly+lz*lz);
+                if (ll < 1e-3f) return; lx/=ll; ly/=ll; lz/=ll;
+                float wx=ly*fz-lz*fy, wy=lz*fx-lx*fz, wz=lx*fy-ly*fx; const float wl=std::sqrt(wx*wx+wy*wy+wz*wz);
+                if (wl>1e-4f){wx/=wl;wy/=wl;wz/=wl;} else {wx=R[0];wy=R[1];wz=R[2];}
+                auto V=[&](float ex,float ey,float ez,float sg){ particle_verts.insert(particle_verts.end(),
+                    { ex+wx*wid*sg, ey+wy*wid*sg, ez+wz*wid*sg, 1.0f, 0.12f, 0.06f, al }); };
+                V(ax,ay,az,-1); V(bx,by,bz,-1); V(bx,by,bz,1);  V(ax,ay,az,-1); V(bx,by,bz,1); V(ax,ay,az,1);
+            };
+            const float ease = 1.0f - std::exp(-MINION_FOLLOW_K * dt);   // exponential lag toward the slot
+            for (auto& o : owners) {
+                if (o.count <= 0) continue;
+                DroneSwarm* sw = nullptr;
+                for (auto& s : swarms) if (s.id == o.id) { sw = &s; break; }
+                if (!sw) { swarms.push_back({ o.id, {}, {} }); sw = &swarms.back(); }
+                for (int i = 0; i < o.count && i < 4; ++i) {
+                    const float ang = 6.2831853f * i / 4 + 0.7f;   // fixed loose formation slot
+                    const float tx = o.x + std::cos(ang) * MINION_FOLLOW_RADIUS;
+                    const float ty = o.y - 0.4f;
+                    const float tz = o.z + std::sin(ang) * MINION_FOLLOW_RADIUS;
+                    if (!sw->spawned[i]) { sw->pos[i][0] = tx; sw->pos[i][1] = ty; sw->pos[i][2] = tz; sw->spawned[i] = true; }
+                    sw->pos[i][0] += (tx - sw->pos[i][0]) * ease;   // ease in (laggy)
+                    sw->pos[i][1] += (ty - sw->pos[i][1]) * ease;
+                    sw->pos[i][2] += (tz - sw->pos[i][2]) * ease;
+                    const float mx = sw->pos[i][0], my = sw->pos[i][1] + std::sin(run_time*3.0f + i) * 0.06f, mz = sw->pos[i][2];
+                    const float s = 0.17f; const int N = 12;
+                    for (int k = 0; k < N; ++k) {
+                        const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                        auto P = [&](float u, float v) {
+                            particle_verts.insert(particle_verts.end(), {
+                                mx + (R[0]*u + U[0]*v), my + (R[1]*u + U[1]*v), mz + (R[2]*u + U[2]*v), 0.55f, 0.7f, 0.95f, 0.9f });
+                        };
+                        P(0, 0); P(s*std::cos(a0), s*std::sin(a0)); P(s*std::cos(a1), s*std::sin(a1));
+                    }
+                    // Fire a red laser at the nearest enemy in range, in brief bursts.
+                    const bool firing = std::fmod(run_time * 1.6f + i * 0.31f, MINION_FIRE_INTERVAL) < 0.12f;
+                    if (firing) {
+                        float bd2 = o.range * o.range; const dc::entity::Entity* tgt = nullptr;
+                        for (const auto& en : entities.items) {
+                            if (en.type != dc::entity::EntityType::Enemy || !en.alive) continue;
+                            const float ex = en.position[0]-mx, ez = en.position[2]-mz, e2 = ex*ex + ez*ez;
+                            if (e2 < bd2) { bd2 = e2; tgt = &en; }
+                        }
+                        if (tgt) {
+                            const float ey = terrain.height(tgt->position[0], tgt->position[2])
+                                           + (tgt->kind == dc::entity::EnemyKind::Flying ? dc::entity::FLY_HOVER : 1.0f);
+                            beam(mx, my, mz, tgt->position[0], ey, tgt->position[2], 0.045f, 0.95f);
+                        }
+                    }
+                }
+            }
+        }
+
         renderer.draw_particles(particle_verts);
 
         // Debug readout in the title bar (cheap stand-in for on-screen text).
-        if (debug_cone) {
+        if (show_hitboxes) {
             char buf[160];
             const char* atk = punching ? "SWING" : "-";
             const char* blk = block_ready ? "BLOCK" : (blocking ? "raising" : "-");
@@ -1851,6 +2788,162 @@ int main(int argc, char** argv) {
                     x0,y0,0.0f, r,g,b,a,  x1,y1,0.0f, r,g,b,a,  x0,y1,0.0f, r,g,b,a });
             };
             auto clamp01 = [](float f) { return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f); };
+            // One HUD triangle (pos3 + rgba, like hud_rect). Lets us draw placeholder
+            // item shapes beyond axis-aligned rects.
+            auto hud_tri = [&](float ax, float ay, float bx, float by, float cx, float cy,
+                               float r, float g, float b, float a) {
+                hud.insert(hud.end(), { ax,ay,0.0f, r,g,b,a,  bx,by,0.0f, r,g,b,a,  cx,cy,0.0f, r,g,b,a });
+            };
+            // Framebuffer size + aspect, for pixel-sized text and aspect-correct icons
+            // (x extents divided by aspect so squares look square and circles round).
+            int fbw, fbh; window.framebuffer_size(fbw, fbh);
+            const float aspect = (fbw > 0 && fbh > 0) ? static_cast<float>(fbw) / fbh : 1.0f;
+            // A placeholder item icon: shape `sh` centered at (cx,cy) with NDC-y half-size s.
+            auto icon_shape = [&](float cx, float cy, float s, IconShape sh,
+                                  float r, float g, float b, float a) {
+                const float sx = s / aspect;
+                switch (sh) {
+                    case IconShape::Square:
+                        hud_rect(cx - sx, cy - s, cx + sx, cy + s, r, g, b, a);
+                        break;
+                    case IconShape::Triangle:
+                        hud_tri(cx, cy + s, cx - sx, cy - s, cx + sx, cy - s, r, g, b, a);
+                        break;
+                    case IconShape::Diamond:
+                        hud_tri(cx, cy + s, cx + sx, cy, cx, cy - s, r, g, b, a);
+                        hud_tri(cx, cy + s, cx, cy - s, cx - sx, cy, r, g, b, a);
+                        break;
+                    case IconShape::Circle: {
+                        const int N = 16;
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                            hud_tri(cx, cy, cx + sx * std::cos(a0), cy + s * std::sin(a0),
+                                    cx + sx * std::cos(a1), cy + s * std::sin(a1), r, g, b, a);
+                        }
+                        break;
+                    }
+                    case IconShape::Cross: {
+                        const float t = s * 0.38f;            // arm half-thickness
+                        hud_rect(cx - t / aspect, cy - s, cx + t / aspect, cy + s, r, g, b, a);  // vertical bar
+                        hud_rect(cx - sx, cy - t, cx + sx, cy + t, r, g, b, a);                  // horizontal bar
+                        break;
+                    }
+                    case IconShape::Arrow:   // right-pointing triangle (motion)
+                        hud_tri(cx + sx, cy, cx - sx, cy + s, cx - sx, cy - s, r, g, b, a);
+                        break;
+                    case IconShape::Hourglass:   // bowtie: two triangles meeting at the center
+                        hud_tri(cx - sx, cy + s, cx + sx, cy + s, cx, cy, r, g, b, a);
+                        hud_tri(cx - sx, cy - s, cx + sx, cy - s, cx, cy, r, g, b, a);
+                        break;
+                    case IconShape::Star: {      // 4-point sparkle: a thin vertical + thin horizontal diamond
+                        const float th = 0.34f;
+                        hud_tri(cx, cy + s, cx + sx * th, cy, cx, cy - s, r, g, b, a);
+                        hud_tri(cx, cy + s, cx, cy - s, cx - sx * th, cy, r, g, b, a);
+                        hud_tri(cx - sx, cy, cx, cy + s * th, cx + sx, cy, r, g, b, a);
+                        hud_tri(cx - sx, cy, cx + sx, cy, cx, cy - s * th, r, g, b, a);
+                        break;
+                    }
+                    case IconShape::Pentagon: {  // fan with a point straight up
+                        const int N = 5;
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 1.5707963f + 6.2831853f * k / N, a1 = 1.5707963f + 6.2831853f * (k + 1) / N;
+                            hud_tri(cx, cy, cx + sx * std::cos(a0), cy + s * std::sin(a0),
+                                    cx + sx * std::cos(a1), cy + s * std::sin(a1), r, g, b, a);
+                        }
+                        break;
+                    }
+                    case IconShape::Hexagon: {   // flat-top hexagon fan
+                        const int N = 6;
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                            hud_tri(cx, cy, cx + sx * std::cos(a0), cy + s * std::sin(a0),
+                                    cx + sx * std::cos(a1), cy + s * std::sin(a1), r, g, b, a);
+                        }
+                        break;
+                    }
+                    case IconShape::Flame:    // tall narrow triangle (apex up)
+                        hud_tri(cx, cy + s, cx - sx * 0.7f, cy - s, cx + sx * 0.7f, cy - s, r, g, b, a);
+                        break;
+                    case IconShape::IceShard:  // apex-down triangle
+                        hud_tri(cx, cy - s, cx - sx, cy + s, cx + sx, cy + s, r, g, b, a);
+                        break;
+                    case IconShape::Brick:     // wide short rectangle
+                        hud_rect(cx - sx, cy - s * 0.55f, cx + sx, cy + s * 0.55f, r, g, b, a);
+                        break;
+                    case IconShape::Pip: {     // small filled circle (minion)
+                        const int N = 12;
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                            hud_tri(cx, cy, cx + sx * 0.7f * std::cos(a0), cy + s * 0.7f * std::sin(a0),
+                                    cx + sx * 0.7f * std::cos(a1), cy + s * 0.7f * std::sin(a1), r, g, b, a);
+                        }
+                        break;
+                    }
+                    case IconShape::Ammo:      // tall narrow rectangle (bullet)
+                        hud_rect(cx - sx * 0.38f, cy - s, cx + sx * 0.38f, cy + s, r, g, b, a);
+                        break;
+                    case IconShape::Streak:    // diagonal comet streak (two triangles)
+                        hud_tri(cx - sx, cy - s, cx - sx * 0.4f, cy - s, cx + sx, cy + s, r, g, b, a);
+                        hud_tri(cx - sx, cy - s, cx + sx, cy + s, cx + sx * 0.4f, cy + s, r, g, b, a);
+                        break;
+                    case IconShape::Boom: {    // starburst: spikes radiating out
+                        const int N = 8;
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 0.5f) / N;
+                            hud_tri(cx, cy, cx + sx * std::cos(a0), cy + s * std::sin(a0),
+                                    cx + sx * 0.45f * std::cos(a1), cy + s * 0.45f * std::sin(a1), r, g, b, a);
+                            const float a2 = 6.2831853f * (k + 1) / N;
+                            hud_tri(cx, cy, cx + sx * 0.45f * std::cos(a1), cy + s * 0.45f * std::sin(a1),
+                                    cx + sx * std::cos(a2), cy + s * std::sin(a2), r, g, b, a);
+                        }
+                        break;
+                    }
+                }
+            };
+            // Cursor in NDC, but only while a menu is open (otherwise the mouse drives the
+            // first-person look and is captured). Used for hover-to-describe.
+            const bool cursor_free = (menu_chest >= 0 || paused || scoreboard);
+            float mxn = -2.0f, myn = -2.0f;
+            if (cursor_free) {
+                float mx, my; input.mouse_pos(mx, my);
+                int ww, wh; window.window_size(ww, wh);
+                mxn = (ww > 0) ? (mx / ww) * 2.0f - 1.0f : 0.0f;
+                myn = (wh > 0) ? 1.0f - (my / wh) * 2.0f : 0.0f;
+            }
+            // Hovered-item tooltip, resolved during the icon/card build below and drawn
+            // (panel into `hud`, text after) just before/after draw_hud.
+            const UpgradeDef* tip = nullptr;
+            float tip_x = 0.0f, tip_y = 0.0f;        // desired top-left anchor (NDC)
+
+            // Scoreboard data (hold Tab): every player's damage total, sorted descending.
+            // Insertion sort — player counts are tiny, avoids pulling in <algorithm>.
+            struct ScoreRow { uint32_t id; double dmg; bool local; };
+            std::vector<ScoreRow> scores;
+            if (scoreboard) {
+                scores.push_back({ my_id, (net.role == dc::net::Role::Client) ? (double)my_damage : host_damage, true });
+                for (const auto& rp : remotes) scores.push_back({ rp.id, (double)rp.damage_dealt, false });
+                for (std::size_t a = 1; a < scores.size(); ++a) {
+                    ScoreRow key = scores[a]; std::size_t b = a;
+                    while (b > 0 && scores[b - 1].dmg < key.dmg) { scores[b] = scores[b - 1]; --b; }
+                    scores[b] = key;
+                }
+            }
+            // Format a damage value as 12 / 3.4K / 1.2M.
+            auto fmt_dmg = [](double v, char* out, std::size_t n) {
+                if (v >= 1e6)      std::snprintf(out, n, "%.1fM", v / 1e6);
+                else if (v >= 1e3) std::snprintf(out, n, "%.1fK", v / 1e3);
+                else               std::snprintf(out, n, "%.0f", v);
+            };
+            // Scoreboard panel + leaderboard-row layout (shared by the rects here and the
+            // text pass after draw_hud).
+            const float sb_x0 = -0.55f, sb_x1 = 0.55f, sb_top = 0.72f, sb_bot = -0.62f;
+            const float sb_row_h = 0.085f, sb_rows_top = 0.50f;
+            const float sb_item_s = 0.05f, sb_item_chip = 0.064f, sb_item_step = 0.135f;
+            const float sb_items_y = sb_rows_top - scores.size() * sb_row_h - 0.12f;
+            // Shared item-icon row layout (top-left, under the coin counter): reused by
+            // the hud-build loop and the stack-count text loop after draw_hud.
+            const float inv_s = 0.034f, inv_chip = 0.047f, inv_step = 0.094f;
+            const float inv_y = 0.72f, inv_x0 = -0.92f;
             const float x0 = -0.96f, x1 = -0.56f;
             // Health bar (red), just above the stamina bar.
             const float hy0 = -0.88f, hy1 = -0.84f;
@@ -1888,6 +2981,25 @@ int main(int argc, char** argv) {
                 for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
             }
 
+            // Item inventory (top-left, under the coins): one chip per upgrade held, with
+            // its placeholder shape + color. Stack counts are drawn as text after draw_hud;
+            // hovering a chip (cursor free) shows its description.
+            {
+                float ix = inv_x0;
+                for (int i = 0; i < UPGRADE_COUNT; ++i) {
+                    if (inventory[i] <= 0) continue;
+                    const UpgradeDef& d = upgrade_def(static_cast<Upgrade>(i));
+                    const float sxr = inv_chip / aspect;
+                    hud_rect(ix - sxr, inv_y - inv_chip, ix + sxr, inv_y + inv_chip, 0.08f, 0.08f, 0.10f, 0.8f);
+                    icon_shape(ix, inv_y, inv_s, d.shape, d.r, d.g, d.b, 1.0f);
+                    if (cursor_free && !scoreboard && mxn >= ix - sxr && mxn <= ix + sxr
+                        && myn >= inv_y - inv_chip && myn <= inv_y + inv_chip) {
+                        tip = &d; tip_x = ix - sxr; tip_y = inv_y - inv_chip - 0.012f;
+                    }
+                    ix += inv_step;
+                }
+            }
+
             // Special-ability icons (bottom-right): "1" throw, "2" orbit (weapon),
             // "3" shield-bash (shield), each boxed. On use a white overlay fills the box
             // and drains down as the cooldown elapses (height = remaining / total).
@@ -1920,14 +3032,23 @@ int main(int argc, char** argv) {
             if (death_flash > 0.0f)
                 hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.7f, 0.0f, 0.0f, clamp01(death_flash / 1.2f) * 0.6f);
 
-            // Upgrade menu: dim the scene + 4 color-coded cards to click.
-            if (choosing) {
+            // Chest purchase menu: dim + 4 cards (icon band + border); sold slots are blank.
+            // Hovering a buyable card shows its description tooltip. Text drawn after draw_hud.
+            if (menu_chest >= 0 && menu_chest < static_cast<int>(chests.size())) {
+                const Chest& mc = chests[menu_chest];
                 hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.5f);   // dim backdrop
-                for (int i = 0; i < 4; ++i) {
-                    const float x0 = card_x0(i), x1 = x0 + CARD_W;
-                    float r, g, b; upgrade_color(cards[i], r, g, b);
-                    hud_rect(x0 - 0.008f, CARD_BOT - 0.008f, x1 + 0.008f, CARD_TOP + 0.008f, 0.95f, 0.95f, 0.95f, 0.95f);  // border
-                    hud_rect(x0, CARD_BOT, x1, CARD_TOP, r, g, b, 0.95f);   // card
+                for (int s = 0; s < 4; ++s) {
+                    const float cx0 = card_x0(s), cx1 = cx0 + CARD_W;
+                    const bool sold = mc.taken[s];
+                    const UpgradeDef& d = upgrade_def(mc.contents[s]);
+                    const bool hot = cursor_free && !sold && mxn >= cx0 && mxn <= cx1 && myn >= CARD_BOT && myn <= CARD_TOP;
+                    const float bw = hot ? 0.014f : 0.008f;
+                    hud_rect(cx0 - bw, CARD_BOT - bw, cx1 + bw, CARD_TOP + bw, 0.97f, 0.97f, 0.97f, 0.97f);  // border
+                    if (sold) { hud_rect(cx0, CARD_BOT, cx1, CARD_TOP, 0.09f, 0.09f, 0.10f, 0.95f); continue; }
+                    hud_rect(cx0, CARD_BOT, cx1, CARD_TOP, 0.12f, 0.12f, 0.14f, 0.96f);                      // backing
+                    hud_rect(cx0, 0.08f, cx1, CARD_TOP, d.r * 0.5f, d.g * 0.5f, d.b * 0.5f, 0.9f);           // color band
+                    icon_shape((cx0 + cx1) * 0.5f, 0.25f, 0.10f, d.shape, d.r, d.g, d.b, 1.0f);
+                    if (hot) { tip = &d; tip_x = mxn + 0.012f; tip_y = myn - 0.012f; }
                 }
             }
 
@@ -1948,7 +3069,161 @@ int main(int argc, char** argv) {
                 hud_rect(QX0 - 0.01f, QY0 - 0.01f, QX1 + 0.01f, QY1 + 0.01f, 0.95f, 0.95f, 0.95f, 0.95f);  // border
                 hud_rect(QX0, QY0, QX1, QY1, 0.8f, 0.15f, 0.15f, 0.95f);     // red = quit
             }
+
+            // Scoreboard (hold Tab): dim + a centered panel. Row highlight for your own
+            // row, and a row of your item chips (hoverable). Text drawn after draw_hud.
+            if (scoreboard) {
+                hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.6f);                    // dim
+                hud_rect(sb_x0 - 0.012f, sb_bot - 0.012f, sb_x1 + 0.012f, sb_top + 0.012f, 0.9f, 0.9f, 0.95f, 0.95f);  // border
+                hud_rect(sb_x0, sb_bot, sb_x1, sb_top, 0.07f, 0.07f, 0.10f, 0.97f);            // panel
+                // Highlight the local player's leaderboard row.
+                for (std::size_t i = 0; i < scores.size(); ++i) {
+                    const float ry1 = sb_rows_top - i * sb_row_h, ry0 = ry1 - sb_row_h;
+                    if (scores[i].local)
+                        hud_rect(sb_x0 + 0.02f, ry0 + 0.006f, sb_x1 - 0.02f, ry1 - 0.006f, 0.20f, 0.35f, 0.55f, 0.55f);
+                }
+                // Your item chips, centered, below the rows. Hover -> tooltip.
+                int held = 0; for (int i = 0; i < UPGRADE_COUNT; ++i) if (inventory[i] > 0) ++held;
+                float ix = -((held - 1) * 0.5f) * sb_item_step;
+                for (int i = 0; i < UPGRADE_COUNT; ++i) {
+                    if (inventory[i] <= 0) continue;
+                    const UpgradeDef& d = upgrade_def(static_cast<Upgrade>(i));
+                    const float sxr = sb_item_chip / aspect;
+                    hud_rect(ix - sxr, sb_items_y - sb_item_chip, ix + sxr, sb_items_y + sb_item_chip, 0.10f, 0.10f, 0.13f, 0.95f);
+                    icon_shape(ix, sb_items_y, sb_item_s, d.shape, d.r, d.g, d.b, 1.0f);
+                    if (mxn >= ix - sxr && mxn <= ix + sxr
+                        && myn >= sb_items_y - sb_item_chip && myn <= sb_items_y + sb_item_chip) {
+                        tip = &d; tip_x = ix - sxr; tip_y = sb_items_y - sb_item_chip - 0.012f;
+                    }
+                    ix += sb_item_step;
+                }
+            }
+
+            // Tooltip panel (sized to the wider of name/description, clamped on-screen).
+            // Its rects go into the HUD now; the text is drawn just after draw_hud.
+            const float tip_px = 15.0f;
+            float tip_panel_x = 0.0f, tip_panel_top = 0.0f, tip_lineh = 0.0f;
+            if (tip) {
+                const float wn = renderer.text_width(tip->name, tip_px, fbw);
+                const float wd = renderer.text_width(tip->desc, tip_px, fbw);
+                const float pad = 0.014f;
+                const float pw = (wn > wd ? wn : wd) + pad * 2.0f;
+                tip_lineh = tip_px / fbh * 2.0f * 1.5f;
+                const float ph = tip_lineh * 2.0f + pad;
+                float px = tip_x, top = tip_y;
+                if (px + pw > 0.98f)   px = 0.98f - pw;
+                if (px < -0.98f)       px = -0.98f;
+                if (top > 0.98f)       top = 0.98f;
+                if (top - ph < -0.98f) top = -0.98f + ph;
+                tip_panel_x = px; tip_panel_top = top;
+                hud_rect(px - 0.006f, top - ph - 0.006f, px + pw + 0.006f, top + 0.006f, 0.9f, 0.9f, 0.95f, 0.95f);  // border
+                hud_rect(px, top - ph, px + pw, top, 0.06f, 0.06f, 0.09f, 0.96f);                                    // panel
+            }
+
             renderer.draw_hud(hud);
+
+            // --- Text overlays (separate glyph pass, drawn on top of the HUD rects) ---
+            // Item stack counts: bottom-right of each inventory chip.
+            {
+                float ix = inv_x0;
+                for (int i = 0; i < UPGRADE_COUNT; ++i) {
+                    if (inventory[i] <= 0) continue;
+                    char cnt[8]; std::snprintf(cnt, sizeof cnt, "%d", inventory[i]);
+                    const float cpx = 14.0f;
+                    const float w = renderer.text_width(cnt, cpx, fbw);
+                    vec3 white = {1.0f, 1.0f, 1.0f};
+                    renderer.draw_text(cnt, ix + inv_chip / aspect - w - 0.004f, inv_y - 0.028f,
+                                       cpx, white, 1.0f, fbw, fbh);
+                    ix += inv_step;
+                }
+            }
+            // Scoreboard text: title, column headers, ranked rows, and your item counts.
+            if (scoreboard) {
+                vec3 white = {0.95f, 0.97f, 1.0f}, gray = {0.70f, 0.75f, 0.82f}, gold = {1.0f, 0.85f, 0.30f};
+                { const char* t = "SCOREBOARD"; const float tpx = 26.0f;
+                  renderer.draw_text(t, -renderer.text_width(t, tpx, fbw) * 0.5f, sb_top - 0.045f, tpx, gold, 1.0f, fbw, fbh); }
+                { const float hpx = 12.0f;
+                  renderer.draw_text("PLAYER", sb_x0 + 0.04f, sb_rows_top + 0.028f, hpx, gray, 1.0f, fbw, fbh);
+                  const char* dh = "DAMAGE"; const float w = renderer.text_width(dh, hpx, fbw);
+                  renderer.draw_text(dh, sb_x1 - 0.04f - w, sb_rows_top + 0.028f, hpx, gray, 1.0f, fbw, fbh); }
+                const float rpx = 18.0f;
+                for (std::size_t i = 0; i < scores.size(); ++i) {
+                    char name[28];
+                    const char* you = scores[i].local ? " (you)" : "";
+                    if (scores[i].id == 0) std::snprintf(name, sizeof name, "Host%s", you);
+                    else                   std::snprintf(name, sizeof name, "P%u%s", (unsigned)scores[i].id, you);
+                    char dmg[16]; fmt_dmg(scores[i].dmg, dmg, sizeof dmg);
+                    const float ty = (sb_rows_top - i * sb_row_h) - 0.014f;
+                    renderer.draw_text(name, sb_x0 + 0.04f, ty, rpx, white, 1.0f, fbw, fbh);
+                    const float w = renderer.text_width(dmg, rpx, fbw);
+                    renderer.draw_text(dmg, sb_x1 - 0.04f - w, ty, rpx, gold, 1.0f, fbw, fbh);
+                }
+                renderer.draw_text("ITEMS", sb_x0 + 0.04f, sb_items_y + sb_item_chip + 0.03f, 12.0f, gray, 1.0f, fbw, fbh);
+                int held = 0; for (int i = 0; i < UPGRADE_COUNT; ++i) if (inventory[i] > 0) ++held;
+                if (held == 0) {
+                    const char* none = "(none yet)";
+                    renderer.draw_text(none, -renderer.text_width(none, 15.0f, fbw) * 0.5f, sb_items_y, 15.0f, gray, 1.0f, fbw, fbh);
+                } else {
+                    float ix = -((held - 1) * 0.5f) * sb_item_step;
+                    for (int i = 0; i < UPGRADE_COUNT; ++i) {
+                        if (inventory[i] <= 0) continue;
+                        char cnt[8]; std::snprintf(cnt, sizeof cnt, "%d", inventory[i]);
+                        const float cpx = 15.0f; const float w = renderer.text_width(cnt, cpx, fbw);
+                        vec3 wht = {1.0f, 1.0f, 1.0f};
+                        renderer.draw_text(cnt, ix + sb_item_chip / aspect - w - 0.004f, sb_items_y - 0.04f, cpx, wht, 1.0f, fbw, fbh);
+                        ix += sb_item_step;
+                    }
+                }
+            }
+
+            // Quit-button label (pause menu).
+            if (paused) {
+                const float qpx = 22.0f;
+                const float w = renderer.text_width("QUIT", qpx, fbw);
+                vec3 white = {1.0f, 0.95f, 0.95f};
+                renderer.draw_text("QUIT", (QX0 + QX1) * 0.5f - w * 0.5f, (QY0 + QY1) * 0.5f + 0.02f,
+                                   qpx, white, 1.0f, fbw, fbh);
+            }
+            // Tooltip text over its panel.
+            if (tip) {
+                vec3 white = {0.97f, 0.97f, 1.0f}, gray = {0.72f, 0.77f, 0.85f};
+                renderer.draw_text(tip->name, tip_panel_x + 0.014f, tip_panel_top - 0.006f, tip_px, white, 1.0f, fbw, fbh);
+                renderer.draw_text(tip->desc, tip_panel_x + 0.014f, tip_panel_top - tip_lineh - 0.006f, tip_px, gray, 1.0f, fbw, fbh);
+            }
+
+            // Chest purchase menu text: title + each card's name and price ("SOLD" for
+            // bought slots). Cards/icons are drawn in the HUD pass above; hover -> tooltip.
+            if (menu_chest >= 0 && menu_chest < static_cast<int>(chests.size())) {
+                const Chest& mc = chests[menu_chest];
+                vec3 white = {0.97f, 0.97f, 1.0f}, gold = {1.0f, 0.85f, 0.3f}, dimc = {0.5f, 0.5f, 0.55f};
+                { const char* t = "CHOOSE ONE"; renderer.draw_text(t, -renderer.text_width(t, 22.0f, fbw) * 0.5f, CARD_TOP + 0.10f, 22.0f, gold, 1.0f, fbw, fbh); }
+                for (int s = 0; s < 4; ++s) {
+                    const float cx0 = card_x0(s), cxc = cx0 + CARD_W * 0.5f;
+                    if (mc.taken[s]) {
+                        const char* t = "SOLD";
+                        renderer.draw_text(t, cxc - renderer.text_width(t, 16.0f, fbw) * 0.5f, 0.04f, 16.0f, dimc, 1.0f, fbw, fbh);
+                        continue;
+                    }
+                    const UpgradeDef& d = upgrade_def(mc.contents[s]);
+                    renderer.draw_text(d.name, cxc - renderer.text_width(d.name, 15.0f, fbw) * 0.5f, -0.02f, 15.0f, white, 1.0f, fbw, fbh);
+                    char price[16]; std::snprintf(price, sizeof price, "%d g", mc.cost);
+                    const bool afford = currency >= mc.cost;
+                    renderer.draw_text(price, cxc - renderer.text_width(price, 14.0f, fbw) * 0.5f, -0.30f, 14.0f, afford ? gold : dimc, 1.0f, fbw, fbh);
+                }
+            }
+
+            // Debug overlay text (toggle with V): on-screen readout via the glyph renderer.
+            if (show_hitboxes) {
+                int tw, th; window.framebuffer_size(tw, th);
+                char buf[160];
+                const char* atk = punching ? "SWING" : "-";
+                const char* blk = block_ready ? "BLOCK" : (blocking ? "raising" : "-");
+                std::snprintf(buf, sizeof buf,
+                              "hp %.0f   stam %.0f   coins %d   enemies %zu   atk %s   shield %s",
+                              player.health, player.stamina, currency, entities.items.size(), atk, blk);
+                vec3 tcol = {0.85f, 0.95f, 1.0f};
+                renderer.draw_text(buf, -0.97f, 0.80f, 18.0f, tcol, 0.9f, tw, th);
+            }
         }
 
         window.swap();
@@ -1962,6 +3237,7 @@ int main(int argc, char** argv) {
     torch_model.destroy();
     player_model.destroy();
     sword_model.destroy();
+    if (eye_loaded) eye_model.destroy();
     mesh.destroy();
     terrain_mesh.destroy();
     flyer_mesh.destroy();

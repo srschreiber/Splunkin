@@ -3,13 +3,19 @@
 
 namespace dc::world {
 
-FlowField compute_flow_multi(const Map& map, const std::vector<int>& cols, const std::vector<int>& rows) {
+FlowField compute_flow_multi(const Map& map, const std::vector<int>& cols, const std::vector<int>& rows,
+                             const std::vector<float>* heights, float max_climb) {
     FlowField f;
     f.width = map.width;
     f.height = map.height;
     f.dist.assign(static_cast<std::size_t>(map.width) * map.height, -1);
 
     auto idx = [&](int c, int r) { return static_cast<std::size_t>(r) * f.width + c; };
+    // Can an enemy travel FROM cell a TO cell b? Free to drop, capped climbing up.
+    auto can_move = [&](int ac, int ar, int bc, int br) {
+        if (!heights) return true;
+        return (*heights)[idx(bc, br)] - (*heights)[idx(ac, ar)] <= max_climb;
+    };
     std::queue<std::pair<int,int>> q;
     const std::size_t ng = (cols.size() < rows.size()) ? cols.size() : rows.size();
     for (std::size_t i = 0; i < ng; ++i) {   // seed BFS from every goal at distance 0
@@ -31,6 +37,10 @@ FlowField compute_flow_multi(const Map& map, const std::vector<int>& cols, const
             if (nc < 0 || nr < 0 || nc >= f.width || nr >= f.height) continue;
             if (map.at(nc, nr) == Cell::Solid) continue;
             if (f.dist[idx(nc, nr)] != -1) continue;   // already visited
+            // BFS expands outward from the goal, but an enemy travels INWARD (nc,nr)->(c,r),
+            // so validate THAT direction: only give the neighbor a distance if an enemy
+            // standing on it could actually step toward the goal (one-way climb rule).
+            if (!can_move(nc, nr, c, r)) continue;
             f.dist[idx(nc, nr)] = d + 1;
             q.push({nc, nr});
         }
@@ -38,23 +48,29 @@ FlowField compute_flow_multi(const Map& map, const std::vector<int>& cols, const
     return f;
 }
 
-FlowField compute_flow(const Map& map, int goal_col, int goal_row) {
-    return compute_flow_multi(map, { goal_col }, { goal_row });
+FlowField compute_flow(const Map& map, int goal_col, int goal_row,
+                       const std::vector<float>* heights, float max_climb) {
+    return compute_flow_multi(map, { goal_col }, { goal_row }, heights, max_climb);
 }
 
 bool flow_step(const FlowField& flow, int col, int row,
-               uint32_t& rng, int& out_col, int& out_row) {
+               uint32_t& rng, int& out_col, int& out_row,
+               const std::vector<float>* heights, float max_climb) {
     const int here = flow.at(col, row);
     if (here <= 0) return false;   // unreachable, or already at the goal
 
-    // Collect the neighbors that are strictly closer (here - 1).
+    auto idx = [&](int c, int r) { return static_cast<std::size_t>(r) * flow.width + c; };
+    // Collect the neighbors that are strictly closer (here - 1) AND actually steppable
+    // (can't climb a cliff face to a closer-but-higher tile).
     const int dc[4] = { 1, -1, 0, 0 };
     const int dr[4] = { 0, 0, 1, -1 };
     int best_c[4], best_r[4], n = 0;
     for (int k = 0; k < 4; ++k) {
         const int nc = col + dc[k], nr = row + dr[k];
         const int d = flow.at(nc, nr);
-        if (d == here - 1) { best_c[n] = nc; best_r[n] = nr; ++n; }
+        if (d != here - 1) continue;
+        if (heights && (*heights)[idx(nc, nr)] - (*heights)[idx(col, row)] > max_climb) continue;
+        best_c[n] = nc; best_r[n] = nr; ++n;
     }
     if (n == 0) return false;
 

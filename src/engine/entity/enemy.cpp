@@ -23,6 +23,28 @@ Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind) {
 
 namespace {
 constexpr float RETARGET_LOCK = 0.6f;   // min seconds between hit-driven target switches
+// LCG step -> a float in [0,1); same generator as pathfind's wander.
+float rng01(uint32_t& s) { s = s * 1664525u + 1013904223u; return (s >> 8) * (1.0f / 16777216.0f); }
+
+// Unit xz aim direction from (fx,fz) toward a target that's moving (tgt.pos + tgt.vel),
+// led so a projectile of speed `spd` intercepts it. Solves |D + V t| = spd t for the
+// soonest t > 0; falls back to a straight shot if the target outruns the bullet.
+void lead_dir(float fx, float fz, const PlayerCombat& tgt, float spd, float& ox, float& oz) {
+    const float Dx = tgt.pos[0] - fx, Dz = tgt.pos[2] - fz;
+    const float vx = tgt.vel[0], vz = tgt.vel[2];
+    const float a = vx*vx + vz*vz - spd*spd, b = 2.0f*(Dx*vx + Dz*vz), c = Dx*Dx + Dz*Dz;
+    float t = -1.0f;
+    if (std::fabs(a) < 1e-3f) { if (std::fabs(b) > 1e-4f) t = -c / b; }
+    else { const float disc = b*b - 4.0f*a*c;
+           if (disc >= 0.0f) { const float sq = std::sqrt(disc);
+               const float t1 = (-b - sq) / (2.0f*a), t2 = (-b + sq) / (2.0f*a);
+               t = (t1 > 0.0f && (t2 <= 0.0f || t1 < t2)) ? t1 : t2; } }
+    float ax = Dx, az = Dz;
+    if (t > 0.0f) { ax = Dx + vx*t; az = Dz + vz*t; }
+    const float l = std::sqrt(ax*ax + az*az);
+    if (l > 1e-4f) { ox = ax / l; oz = az / l; }
+    else { const float dl = std::sqrt(Dx*Dx + Dz*Dz); ox = dl > 1e-4f ? Dx/dl : 1.0f; oz = dl > 1e-4f ? Dz/dl : 0.0f; }
+}
 int   tile_of(float v)     { return static_cast<int>(v / dc::world::TILE); }
 float tile_center(int t)   { return (t + 0.5f) * dc::world::TILE; }
 // Knockback delivered = max(0, attacker knockback - target weight).
@@ -54,11 +76,12 @@ int pick_target(const Entity& e, const std::vector<PlayerCombat>& players, float
 // it doesn't jitter), falling back to a straight line at (fx,fz) when off the field.
 // Shared by melee chase and ranged approach. Advances the walk clock when it moves.
 void flow_advance(Entity& e, const dc::world::Map& map, const dc::world::FlowField& flow,
-                  uint32_t& rng, float fx, float fz, float dt) {
+                  uint32_t& rng, float fx, float fz, float dt, float speed_mult = 1.0f,
+                  const std::vector<float>* heights = nullptr, float max_climb = 1e9f) {
     const int cc = tile_of(e.position[0]), cr = tile_of(e.position[2]);
     if (e.tgt_col < 0 || (cc == e.tgt_col && cr == e.tgt_row)) {
         int nc, nr;
-        if (dc::world::flow_step(flow, cc, cr, rng, nc, nr)) { e.tgt_col = nc; e.tgt_row = nr; }
+        if (dc::world::flow_step(flow, cc, cr, rng, nc, nr, heights, max_climb)) { e.tgt_col = nc; e.tgt_row = nr; }
         else { e.tgt_col = -1; e.tgt_row = -1; }
     }
     float gx, gz;
@@ -68,7 +91,7 @@ void flow_advance(Entity& e, const dc::world::Map& map, const dc::world::FlowFie
     const float ml = std::sqrt(mx * mx + mz * mz);
     if (ml > 1e-4f) {
         mx /= ml; mz /= ml;
-        const float step = ENEMY_SPEED * dt;
+        const float step = ENEMY_SPEED * speed_mult * dt;
         const float npx = e.position[0] + mx * step, npz = e.position[2] + mz * step;
         if (!dc::world::circle_hits_solid(map, npx, e.position[2], ENEMY_RADIUS)) e.position[0] = npx;
         if (!dc::world::circle_hits_solid(map, e.position[0], npz, ENEMY_RADIUS)) e.position[2] = npz;
@@ -82,12 +105,14 @@ void flow_advance(Entity& e, const dc::world::Map& map, const dc::world::FlowFie
 void update_enemies(EntityList& list, const dc::world::Map& map,
                     const std::vector<dc::world::FlowField>& flows, const std::vector<PlayerCombat>& players,
                     std::vector<EnemyHitPlayer>& out, float dt,
-                    std::vector<float>* deaths) {
+                    std::vector<float>* deaths, std::vector<HitNumber>* hits,
+                    const std::vector<float>* tile_heights) {
     out.assign(players.size(), EnemyHitPlayer{});
-    // Remaining block stamina per player this tick, drawn down as the shield negates
-    // hits (so several attackers in one frame can't each spend the same stamina).
-    std::vector<float> block_sta(players.size());
-    for (std::size_t i = 0; i < players.size(); ++i) block_sta[i] = players[i].stamina;
+    // Frontal-shield block pool (same model as projectiles): a blocking player spends
+    // block_rate stamina per point of melee-forcefield damage to negate it, drawn down
+    // across multiple punches this tick.
+    std::vector<float> bsta(players.size());
+    for (std::size_t i = 0; i < players.size(); ++i) bsta[i] = players[i].stamina;
     const float kdamp = std::exp(-KNOCK_DAMP * dt);
     if (players.empty()) return;
 
@@ -97,6 +122,25 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         if (e.hit_flash > 0.0f)   e.hit_flash -= dt;
         if (e.attack_cd > 0.0f)   e.attack_cd -= dt;
         if (e.retarget_cd > 0.0f) e.retarget_cd -= dt;
+        if (e.slow_time > 0.0f)   e.slow_time -= dt;
+        if (e.punch_anim > 0.0f)  e.punch_anim -= dt;
+
+        // Fire burn: deal burn_dps in BURN_INTERVAL chunks while it lasts (a number per
+        // tick), credited to whoever lit it. A burn tick can kill (checked below).
+        if (e.burn_time > 0.0f) {
+            e.burn_time -= dt;
+            e.burn_tick -= dt;
+            if (e.burn_tick <= 0.0f) {
+                e.burn_tick = BURN_INTERVAL;
+                const float bd = e.burn_dps * BURN_INTERVAL;
+                const float dealt = (bd < e.health) ? bd : (e.health > 0.0f ? e.health : 0.0f);
+                e.health -= bd;
+                if (hits) hits->push_back({ {e.position[0], e.position[1], e.position[2]}, bd, false });
+                for (std::size_t pi = 0; pi < players.size(); ++pi)
+                    if (players[pi].id == e.burn_owner) { out[pi].dealt += dealt; break; }
+            }
+            if (e.health <= 0.0f) { e.alive = false; continue; }   // burned to death
+        }
 
         // --- Each striking player's hit on this enemy (in their reach + cone).
         // Remember who landed the last blow this frame for retarget-on-hit. ---
@@ -115,11 +159,22 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
             if (d <= pc.strike_reach && d > 1e-4f) {
                 const float dot = (tx * pc.aim[0] + ty * pc.aim[1] + tz * pc.aim[2]) / d;
                 if (dot >= pc.strike_cos) {
-                    e.health -= pc.strike_damage;
+                    bool crit = pc.crit_chance > 0.0f && rng01(list.rng) < pc.crit_chance;
+                    const float dmg = crit ? pc.strike_damage * pc.crit_mult : pc.strike_damage;
+                    out[pi].dealt += (dmg < e.health) ? dmg : (e.health > 0.0f ? e.health : 0.0f);
+                    if (hits) hits->push_back({ {e.position[0], e.position[1], e.position[2]}, dmg, crit });
+                    e.health -= dmg;
                     e.hit_flash = FLASH_TIME;
-                    const float kb = knock_amount(pc.strike_knockback, e.stats.weight);
+                    const float kb = knock_amount(pc.strike_knockback + pc.earth_knock, e.stats.weight);
                     e.knock_vel[0] += (tx / d) * kb;   // knockback stays horizontal
                     e.knock_vel[2] += (tz / d) * kb;
+                    // Elemental brands: light the burn / refresh the slow.
+                    if (pc.burn_dps > 0.0f) {
+                        e.burn_time = pc.burn_duration;
+                        if (pc.burn_dps > e.burn_dps) e.burn_dps = pc.burn_dps;
+                        e.burn_owner = pc.id;
+                    }
+                    if (pc.slow_factor < 1.0f) { e.slow_time = pc.slow_duration; e.slow_factor = pc.slow_factor; }
                     struck = true; struck_by = pc.id;
                 }
             }
@@ -158,6 +213,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         const float dist = std::sqrt(tdx * tdx + tdz * tdz);
         if (!e.attacking && dist > 1e-4f) e.yaw = std::atan2(tdz, tdx);   // track, commit during a melee swing
         const dc::world::FlowField& flow = flows[ti];
+        const float move_mult = (e.slow_time > 0.0f) ? e.slow_factor : 1.0f;   // ice slow
 
         if (ranged) {
             // Flying is a ranged variant: longer range, hovers (position[1] untouched
@@ -171,18 +227,20 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 e.attack_cd = fire_int;
                 Projectile pr;
                 pr.pos[0] = e.position[0]; pr.pos[1] = flying ? FLY_HOVER : 1.0f; pr.pos[2] = e.position[2];
-                pr.vel[0] = (tdx / dist) * shot_spd;
-                pr.vel[2] = (tdz / dist) * shot_spd;
+                float ax, az; lead_dir(e.position[0], e.position[2], tgt, shot_spd, ax, az);   // predictive aim
+                pr.vel[0] = ax * shot_spd;
+                pr.vel[2] = az * shot_spd;
+                pr.vel[1] = (dist > 0.1f) ? (tgt.pos[1] - pr.pos[1]) * shot_spd / dist : 0.0f;   // climb to the target's height
                 pr.damage = dmg; pr.knockback = RANGED_KNOCKBACK; pr.life = RANGED_SHOT_LIFE;
-                if (flying) { pr.color[0] = 1.0f; pr.color[1] = 0.5f; pr.color[2] = 0.2f; }   // orange flyer bolts
+                if (flying) { pr.color[0] = 1.0f; pr.color[1] = 0.12f; pr.color[2] = 0.08f; pr.beam = true; }   // red glowing laser
                 list.projectiles.push_back(pr);
             }
             // Keep its distance: close to the standoff band, back straight off if the
             // target crowds it (still firing the whole time).
             if (dist > standoff + RANGED_BACKUP_MARGIN) {
-                flow_advance(e, map, flow, list.rng, tgt.pos[0], tgt.pos[2], dt);
+                flow_advance(e, map, flow, list.rng, tgt.pos[0], tgt.pos[2], dt, move_mult, tile_heights, ENEMY_MAX_CLIMB);
             } else if (dist < standoff - RANGED_BACKUP_MARGIN && dist > 1e-4f) {
-                const float mx = -tdx / dist, mz = -tdz / dist, step = RANGED_BACKUP_SPEED * dt;   // retreat slowly
+                const float mx = -tdx / dist, mz = -tdz / dist, step = RANGED_BACKUP_SPEED * move_mult * dt;   // retreat slowly
                 const float npx = e.position[0] + mx * step, npz = e.position[2] + mz * step;
                 if (!dc::world::circle_hits_solid(map, npx, e.position[2], ENEMY_RADIUS)) e.position[0] = npx;
                 if (!dc::world::circle_hits_solid(map, e.position[0], npz, ENEMY_RADIUS)) e.position[2] = npz;
@@ -193,48 +251,96 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
             continue;
         }
 
-        // --- Melee: swing on a cooldown (facing committed at the swing's start so
-        // they can sidestep/back out), and chase via the flow field. ---
-        if (!e.attacking && dist <= ENEMY_ATTACK_RANGE && e.attack_cd <= 0.0f) {
-            e.attacking = true; e.attack_time = 0.0f; e.attack_yaw = e.yaw;
+        // --- Melee: punch on a cooldown, LEADING the player so the forcefield lands where
+        // they're heading (not where they were). The enemy keeps closing through the whole
+        // wind-up and commits the swing while still a bit outside range — by the time the
+        // punch lands it has closed the gap and the player has walked into the blast. ---
+        // Predict the player's position at the moment a punch would land (windup remaining).
+        const float tland = e.attacking ? (ENEMY_ATTACK_WINDUP - e.attack_time) : ENEMY_ATTACK_WINDUP;
+        const float lead_x = tgt.pos[0] + tgt.vel[0] * tland;
+        const float lead_z = tgt.pos[2] + tgt.vel[2] * tland;
+        const float ldx = lead_x - e.position[0], ldz = lead_z - e.position[2];
+        const float lead_dist = std::sqrt(ldx * ldx + ldz * ldz);
+        if (lead_dist > 1e-4f) { e.yaw = std::atan2(ldz, ldx); e.attack_yaw = e.yaw; }  // face/track the intercept point
+        // How far the enemy will still close before the punch lands (it never stops moving).
+        const float closing = ENEMY_SPEED * MELEE_SPEED_MULT * move_mult * tland;
+        if (!e.attacking && e.attack_cd <= 0.0f &&
+            lead_dist - closing <= MELEE_FORCEFIELD_RADIUS - 0.5f) {   // will be in range when it lands
+            e.attacking = true; e.attack_time = 0.0f;
         }
         if (e.attacking) {
             e.attack_time += dt;
             if (e.attack_time >= ENEMY_ATTACK_WINDUP) {
-                const PlayerCombat& pc = tgt;
-                const float adx = pc.pos[0] - e.position[0], adz = pc.pos[2] - e.position[2];
-                const float ad = std::sqrt(adx * adx + adz * adz);
-                const float afx = std::cos(e.attack_yaw), afz = std::sin(e.attack_yaw);
-                const bool in_cone = ad > 1e-4f && ad <= ENEMY_ATTACK_REACH
-                                   && ((adx / ad) * afx + (adz / ad) * afz) >= ENEMY_ATTACK_CONE;
-                if (in_cone) {
-                    float dmg = e.stats.attack_damage;
-                    float kb  = knock_amount(e.stats.knockback, pc.weight);
-                    const float front = (-adx / ad) * std::cos(pc.yaw) + (-adz / ad) * std::sin(pc.yaw);
-                    // Frontal shield: spend block_rate stamina per point of damage to
-                    // negate it. Out of stamina -> the unaffordable remainder lands.
-                    if (pc.blocking && pc.block_rate > 0.0f && front >= pc.block_cos) {
-                        const float cost_full = pc.block_rate * dmg;            // to negate it all
-                        const float spent = block_sta[ti] < cost_full ? block_sta[ti] : cost_full;
-                        block_sta[ti] -= spent;
-                        const float negated = spent / pc.block_rate;            // damage absorbed
-                        const float taken = dmg > negated ? dmg - negated : 0.0f;
-                        out[ti].stamina_cost += spent;
-                        if (negated > 0.0f) out[ti].blocked = true;
-                        kb *= (dmg > 1e-6f ? taken / dmg : 0.0f);               // knockback only for the part that lands
-                        dmg = taken;
+                // Punch: slam out a spherical forcefield. Every living, non-dodging player
+                // within MELEE_FORCEFIELD_RADIUS takes substantial damage and a hard radial
+                // shove. A frontal shield blocks it like anything else (spends stamina to
+                // negate); the other counterplay is the wind-up telegraph (dodge i-frames or
+                // clear the radius before it lands).
+                for (std::size_t pi = 0; pi < players.size(); ++pi) {
+                    const PlayerCombat& pc = players[pi];
+                    if (!pc.alive || pc.invincible) continue;
+                    const float dx = pc.pos[0] - e.position[0], dz = pc.pos[2] - e.position[2];
+                    const float d2 = dx * dx + dz * dz;
+                    if (d2 > MELEE_FORCEFIELD_RADIUS * MELEE_FORCEFIELD_RADIUS) continue;
+                    const float d = std::sqrt(d2);
+                    float dmg = MELEE_FORCEFIELD_DAMAGE;
+                    const float kb = MELEE_FORCEFIELD_KNOCKBACK;   // shove always lands (block stops damage, not the blast)
+                    // Frontal shield negates the DAMAGE (spends block_rate stamina per point).
+                    if (pc.blocking && pc.block_rate > 0.0f && d > 1e-4f) {
+                        const float front = (-dx / d) * std::cos(pc.yaw) + (-dz / d) * std::sin(pc.yaw);
+                        if (front >= pc.block_cos) {
+                            const float cost_full = pc.block_rate * dmg;
+                            const float spent = bsta[pi] < cost_full ? bsta[pi] : cost_full;
+                            bsta[pi] -= spent;
+                            const float negated = spent / pc.block_rate;
+                            out[pi].stamina_cost += spent;
+                            if (negated > 0.0f) out[pi].blocked = true;
+                            dmg = dmg > negated ? dmg - negated : 0.0f;
+                        }
                     }
-                    out[ti].damage += dmg;
-                    if (dmg > 0.0f) out[ti].hit = true;                         // flash only if damage got through
-                    out[ti].knock[0] += (adx / ad) * kb;   // shove that player away from this enemy
-                    out[ti].knock[2] += (adz / ad) * kb;
+                    out[pi].damage += dmg;
+                    if (dmg > 0.0f) out[pi].hit = true;
+                    if (d > 1e-4f) {   // shove radially outward from the punch (unblockable)
+                        out[pi].knock[0] += (dx / d) * kb;
+                        out[pi].knock[2] += (dz / d) * kb;
+                    } else {           // dead-center: shove along the enemy's facing
+                        out[pi].knock[0] += std::cos(e.attack_yaw) * kb;
+                        out[pi].knock[2] += std::sin(e.attack_yaw) * kb;
+                    }
                 }
+                e.punch_anim = PUNCH_ANIM_TIME;   // forcefield-sphere visual (replicated)
                 e.attacking = false;
                 e.attack_cd = ENEMY_ATTACK_INTERVAL;
             }
         }
-        if (dist > ENEMY_ATTACK_RANGE * 0.7f) flow_advance(e, map, flow, list.rng, tgt.pos[0], tgt.pos[2], dt);
-        else e.anim_time = 0.0f;   // point-blank: hold position, keep swinging
+        // Never pause to swing: keep chasing the LEAD point (even mid-wind-up) until
+        // essentially on top of it. This is what makes the timed punch actually connect.
+        if (lead_dist > ENEMY_RADIUS + 0.3f)
+            flow_advance(e, map, flow, list.rng, lead_x, lead_z, dt, move_mult * MELEE_SPEED_MULT, tile_heights, ENEMY_MAX_CLIMB);
+        else e.anim_time = 0.0f;   // on top of the target: hold, keep swinging
+    }
+
+    // Soft separation: nudge each enemy away from nearby enemies (strength grows as
+    // they close, out to ENEMY_SEPARATION_DIST) so they don't stack on one tile. Applied
+    // in place with the same per-axis wall slide as normal movement.
+    for (auto& ea : list.items) {
+        if (!ea.alive || ea.type != EntityType::Enemy) continue;
+        float px = 0.0f, pz = 0.0f;
+        for (auto& eb : list.items) {
+            if (&eb == &ea || !eb.alive || eb.type != EntityType::Enemy) continue;
+            const float dx = ea.position[0] - eb.position[0];
+            const float dz = ea.position[2] - eb.position[2];
+            const float d2 = dx * dx + dz * dz;
+            if (d2 >= ENEMY_SEPARATION_DIST * ENEMY_SEPARATION_DIST || d2 < 1e-6f) continue;
+            const float d = std::sqrt(d2);
+            const float w = 1.0f - d / ENEMY_SEPARATION_DIST;   // 0 at the edge, 1 when coincident
+            px += (dx / d) * w; pz += (dz / d) * w;
+        }
+        if (px == 0.0f && pz == 0.0f) continue;
+        const float mx = px * ENEMY_SEPARATION_SPEED * dt;
+        const float mz = pz * ENEMY_SEPARATION_SPEED * dt;
+        if (!dc::world::circle_hits_solid(map, ea.position[0] + mx, ea.position[2], ENEMY_RADIUS)) ea.position[0] += mx;
+        if (!dc::world::circle_hits_solid(map, ea.position[0], ea.position[2] + mz, ENEMY_RADIUS)) ea.position[2] += mz;
     }
 
     // Drop dead enemies (swap-pop; order doesn't matter), reporting where each died.
@@ -262,16 +368,21 @@ void update_projectiles(EntityList& list, const dc::world::Map& map,
     for (std::size_t i = 0; i < list.projectiles.size();) {
         Projectile& p = list.projectiles[i];
         p.life -= dt;
-        p.pos[0] += p.vel[0] * dt; p.pos[2] += p.vel[2] * dt;
+        p.pos[0] += p.vel[0] * dt; p.pos[1] += p.vel[1] * dt; p.pos[2] += p.vel[2] * dt;   // 3D travel
         bool gone = (p.life <= 0.0f)
                   || dc::world::circle_hits_solid(map, p.pos[0], p.pos[2], RANGED_SHOT_RADIUS);
         if (!gone) {
-            // First living player within reach takes the hit; the shot is spent.
+            // First living player within reach takes the hit; the shot is spent. The hit is
+            // a vertical capsule: close in xz AND within the player's body height band (so
+            // a shot only connects at the right elevation — being up high matters).
             for (std::size_t pi = 0; pi < players.size(); ++pi) {
-                if (!players[pi].alive) continue;
+                if (!players[pi].alive || players[pi].invincible) continue;   // dodging -> shot passes through
                 const float dx = players[pi].pos[0] - p.pos[0], dz = players[pi].pos[2] - p.pos[2];
                 const float d2 = dx * dx + dz * dz;
-                if (d2 <= PROJECTILE_HIT_DIST * PROJECTILE_HIT_DIST) {
+                const float feet = players[pi].pos[1] - dc::world::EYE_HEIGHT;
+                const bool in_band = p.pos[1] >= feet - PROJECTILE_HIT_DIST
+                                  && p.pos[1] <= players[pi].pos[1] + PROJECTILE_HIT_DIST;
+                if (d2 <= PROJECTILE_HIT_DIST * PROJECTILE_HIT_DIST && in_band) {
                     const PlayerCombat& pc = players[pi];
                     const float d = std::sqrt(d2);
                     float dmg = p.damage, kb = p.knockback;
@@ -306,9 +417,11 @@ void update_projectiles(EntityList& list, const dc::world::Map& map,
     }
 }
 
-void radius_attack(EntityList& list, const vec3 center, float radius,
-                   float damage, float knockback, std::vector<uint32_t>& already_hit) {
+float radius_attack(EntityList& list, const vec3 center, float radius,
+                    float damage, float knockback, std::vector<uint32_t>& already_hit,
+                    std::vector<HitNumber>* hits) {
     const float r2 = radius * radius;
+    float total_dealt = 0.0f;
     for (auto& e : list.items) {
         if (!e.alive || e.type != EntityType::Enemy) continue;
         // skip enemies already hit this pass
@@ -321,6 +434,8 @@ void radius_attack(EntityList& list, const vec3 center, float radius,
         const float d2 = dx * dx + dz * dz;
         if (d2 > r2) continue;
 
+        total_dealt += (damage < e.health) ? damage : (e.health > 0.0f ? e.health : 0.0f);
+        if (hits) hits->push_back({ {e.position[0], e.position[1], e.position[2]}, damage, false });
         e.health -= damage;
         e.hit_flash = FLASH_TIME;
         const float d = std::sqrt(d2);
@@ -329,6 +444,7 @@ void radius_attack(EntityList& list, const vec3 center, float radius,
         if (e.health <= 0.0f) e.alive = false;   // update_enemies compacts dead next tick
         already_hit.push_back(e.id);
     }
+    return total_dealt;
 }
 
 } // namespace dc::entity

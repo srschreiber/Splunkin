@@ -11,7 +11,7 @@ struct Camera {
     float fov_y  = 1.2217305f;   // 70 degrees in radians
     float near_z = 0.05f;
     float far_z  = 100.0f;
-    bool third_person = false;   // debug: pull the eye back behind the player to see self + cones
+    bool third_person = true;    // default view: eye pulled back behind the player (V toggles FP)
     float distance = 3.0f;       // third-person: how far the eye sits behind the player
     vec3 smoothed_eye = {0.0f, 0.0f, 0.0f};   // exponentially-smoothed camera position
     bool eye_initialized = false;             // snap on the first frame, then smooth

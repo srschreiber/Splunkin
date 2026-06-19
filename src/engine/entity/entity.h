@@ -46,6 +46,7 @@ struct Entity {
     float attack_time = 0.0f;   // into the attack swing
     float attack_cd   = 0.0f;   // time until the next attack is allowed
     float attack_yaw  = 0.0f;   // facing committed at the swing's start (for the hit cone)
+    float punch_anim  = 0.0f;   // melee forcefield-burst visual timer (counts down; replicated)
 
     // committed next path cell (so flow-following doesn't jitter each frame)
     int  tgt_col = -1, tgt_row = -1;
@@ -55,6 +56,14 @@ struct Entity {
     // rewrites it (rate-limited by retarget_cd). 0 = none yet -> pick nearest.
     uint32_t target_id   = NO_TARGET;
     float    retarget_cd = 0.0f;
+
+    // Elemental status effects (applied by an elemental melee strike).
+    float    burn_time   = 0.0f;   // seconds of fire burn remaining
+    float    burn_dps    = 0.0f;   // burn damage per second
+    float    burn_tick   = 0.0f;   // countdown to the next burn damage tick
+    uint32_t burn_owner  = 0;      // player id who lit it (scoreboard credit)
+    float    slow_time   = 0.0f;   // seconds of ice slow remaining
+    float    slow_factor = 1.0f;   // movement multiplier while slowed (1 = normal)
     bool alive = true;
 };
 
@@ -67,6 +76,7 @@ struct Projectile {
     float damage    = 0.0f;
     float knockback = 0.0f;
     float life      = 0.0f;   // seconds remaining before it fizzles
+    bool  beam      = false;  // render as a stretched glowing laser (eye), not a sphere
 };
 
 // The world's dynamic entities plus the sim's RNG seed. The RNG lives here (in

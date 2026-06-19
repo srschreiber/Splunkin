@@ -30,15 +30,17 @@ void push_quad(std::vector<float>& out,
 }
 
 // One triangle with a computed flat (per-face) normal — for the faceted terrain.
-void push_tri(std::vector<float>& out, const float a[3], const float b[3], const float c[3]) {
+// `mat` is stashed in the layer slot as the surface material id (0 ground / 1 ramp /
+// 2 plateau top) so the world shader can tint each surface differently.
+void push_tri(std::vector<float>& out, const float a[3], const float b[3], const float c[3], float mat) {
     const float ux = b[0]-a[0], uy = b[1]-a[1], uz = b[2]-a[2];
     const float vx = c[0]-a[0], vy = c[1]-a[1], vz = c[2]-a[2];
     float nx = uy*vz - uz*vy, ny = uz*vx - ux*vz, nz = ux*vy - uy*vx;
     const float len = std::sqrt(nx*nx + ny*ny + nz*nz);
     if (len > 1e-6f) { nx/=len; ny/=len; nz/=len; } else { nx=0; ny=1; nz=0; }
-    push_vertex(out, a[0],a[1],a[2], nx,ny,nz, 0,0, 0);
-    push_vertex(out, b[0],b[1],b[2], nx,ny,nz, 0,0, 0);
-    push_vertex(out, c[0],c[1],c[2], nx,ny,nz, 0,0, 0);
+    push_vertex(out, a[0],a[1],a[2], nx,ny,nz, 0,0, mat);
+    push_vertex(out, b[0],b[1],b[2], nx,ny,nz, 0,0, mat);
+    push_vertex(out, c[0],c[1],c[2], nx,ny,nz, 0,0, mat);
 }
 
 // Chests are Solid (block movement + pathfinding) but render as open floor.
@@ -112,8 +114,11 @@ std::vector<float> build_terrain_mesh(const Map& map, const Terrain& terrain) {
                     float c01[3]{ sx0, H(sx0,sz1), sz1 };
                     float c11[3]{ sx1, H(sx1,sz1), sz1 };
                     float c10[3]{ sx1, H(sx1,sz0), sz0 };
-                    push_tri(v, c00, c01, c11);   // CCW from above -> +Y-ish normals
-                    push_tri(v, c00, c11, c10);
+                    // Material from the facet center (0 ground / 1 ramp / 2 plateau top).
+                    const float mat = static_cast<float>(
+                        terrain.surface_kind((sx0 + sx1) * 0.5f, (sz0 + sz1) * 0.5f));
+                    push_tri(v, c00, c01, c11, mat);   // CCW from above -> +Y-ish normals
+                    push_tri(v, c00, c11, c10, mat);
                 }
             }
         }

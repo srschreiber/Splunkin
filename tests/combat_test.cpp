@@ -20,6 +20,9 @@ int main() {
         std::vector<FlowField> flows{ f };   // one field, for the single player
         std::vector<EnemyHitPlayer> out;
         update_enemies(l, *m, flows, ps, out, dt, deaths);
+        // Melee now punches a radial forcefield (damage applied in update_enemies); ranged
+        // shots still resolve in update_projectiles, into the same out (as main does).
+        update_projectiles(l, *m, ps, out, dt);
         return out.empty() ? EnemyHitPlayer{} : out[0];
     };
 
@@ -48,7 +51,7 @@ int main() {
     assert(list.items[0].position[0] > start_x + 5.0f);   // moved toward the player
     assert(total > 0.0f);                                  // reached and hit the player
 
-    // Blocking with ample stamina fully negates frontal damage (at a stamina cost).
+    // Blocking with ample stamina fully negates the frontal forcefield (at a stamina cost).
     EntityList l2;
     l2.spawn_enemy(pc.pos[0] + 0.5f, pc.pos[2]);   // right next to the player
     l2.items[0].stats.weight = 100.0f;             // don't get knocked away
@@ -62,8 +65,8 @@ int main() {
     assert(blocked_dmg == 0.0f);                            // fully negated (plenty of stamina)
     assert(sta_spent > 0.0f);                               // and it cost stamina to do so
 
-    // Out of stamina: the unaffordable remainder lands. 8 dmg, rate 1, only 4 stamina
-    // -> blocks 4, takes 4 (the example math: shortfall 4 / rate 1 = 4 through).
+    // Out of stamina: the unaffordable remainder lands. rate 1, only 4 stamina -> blocks
+    // 4 damage, the rest gets through (MELEE_FORCEFIELD_DAMAGE - 4).
     EntityList lpb;
     lpb.spawn_enemy(pc.pos[0] + 0.5f, pc.pos[2]);
     lpb.items[0].stats.weight = 100.0f;
@@ -74,7 +77,8 @@ int main() {
         EnemyHitPlayer h = step1(lpb, f, pbk, 0.016f);
         if (h.damage > 0.0f) per_hit = h.damage;
     }
-    assert(per_hit > 3.9f && per_hit < 4.1f);              // 8 - (4 stamina / rate 1) = 4 gets through
+    const float expect_through = dc::entity::MELEE_FORCEFIELD_DAMAGE - 4.0f;   // blocked 4 (4 stamina / rate 1)
+    assert(per_hit > expect_through - 0.1f && per_hit < expect_through + 0.1f);
 
     // A player strike knocks the enemy AWAY from the player (+x here).
     EntityList lk;
@@ -86,8 +90,14 @@ int main() {
         step1(lk, f, st, 0.016f);             // strike imparts knock_vel
         assert(!lk.items.empty());
         assert(lk.items[0].knock_vel[0] > 0.0f);           // pushed in +x (away from player)
-        for (int i = 0; i < 30; ++i) step1(lk, f, pc, 0.016f);  // let it slide
-        assert(lk.items[0].position[0] > kx0);             // actually moved away
+        // It gets shoved away (then aggressively re-closes — so track the PEAK displacement,
+        // not the final spot: the knockback demonstrably moved it back before it recovered).
+        float max_x = lk.items[0].position[0];
+        for (int i = 0; i < 30 && !lk.items.empty(); ++i) {
+            step1(lk, f, pc, 0.016f);
+            if (lk.items[0].position[0] > max_x) max_x = lk.items[0].position[0];
+        }
+        assert(max_x > kx0);                               // the shove actually pushed it away
     }
 
     // A player strike in front kills an enemy in a few hits.
@@ -102,23 +112,19 @@ int main() {
         ++hits;
     }
     assert(l3.items.empty());
-    assert(hits <= 4);   // 30 hp / 12 dmg -> 3 hits
+    assert(hits <= static_cast<int>((ENEMY_MAX_HEALTH + 11.0f) / 12.0f));   // ceil(maxhp / 12 dmg)
 
-    // Committed facing: leaving the enemy's cone/reach during its wind-up whiffs.
+    // Dodge: a mid-dodge (invincible) player takes no damage — the punch projectiles
+    // pass right through, even at point-blank over many ticks.
     EntityList ld;
-    ld.spawn_enemy(pc.pos[0] + 1.0f, pc.pos[2]);   // in range -> will start a swing
-    for (int i = 0; i < 200 && !ld.items[0].attacking; ++i) {
-        FlowField f = compute_flow(*m, pcol, prow);
-        step1(ld, f, pc, 0.016f);     // player stays put until it commits
-    }
-    assert(!ld.items.empty() && ld.items[0].attacking);   // swing committed
-    PlayerCombat moved = pc; moved.pos[2] += 5.0f;         // sidestep far before the strike
+    ld.spawn_enemy(pc.pos[0] + 1.0f, pc.pos[2]);   // in range -> punches every interval
+    PlayerCombat invuln = pc; invuln.invincible = true;
     float whiff = 0.0f;
-    for (int i = 0; i < 60; ++i) {
+    for (int i = 0; i < 200; ++i) {
         FlowField f = compute_flow(*m, pcol, prow);
-        whiff += step1(ld, f, moved, 0.016f).damage;
+        whiff += step1(ld, f, invuln, 0.016f).damage;
     }
-    assert(whiff == 0.0f);   // the committed swing missed
+    assert(whiff == 0.0f);   // i-frames negate every punch
 
     // radius_attack: hits enemies in range once per pass (the thrown sword uses this).
     EntityList lr;

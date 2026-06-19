@@ -25,7 +25,7 @@ int main() {
 
     // Sample a grid: finite + bounded, has real variation, and is MOSTLY flat with
     // only occasional hills.
-    const float MAXH = t.base_amp + t.hill_amp + 1.0f;
+    const float MAXH = t.base_amp + t.hill_amp + t.mound_amp + 1.0f;
     float lo = 1e9f, hi = -1e9f;
     int total = 0, elevated = 0, hilly = 0;
     for (int gx = 0; gx < 120; ++gx)

@@ -22,7 +22,7 @@ static const char* ROOM =
 int main() {
     auto map = dc::world::parse_map(ROOM);
     assert(map.has_value());
-    dc::world::Terrain flat; flat.base_amp = 0.0f; flat.hill_amp = 0.0f;   // height()==0 -> flat ground
+    dc::world::Terrain flat; flat.base_amp = 0.0f; flat.hill_amp = 0.0f; flat.mound_amp = 0.0f;   // height()==0 -> flat ground
 
     // add_look clamps pitch to +-89 deg.
     {

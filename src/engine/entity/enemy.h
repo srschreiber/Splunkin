@@ -8,41 +8,59 @@ namespace dc::entity {
 
 inline constexpr float ENEMY_RADIUS          = 0.4f;   // collision circle
 inline constexpr float ENEMY_SPEED           = 2.5f;   // units/s (a touch slower than the player)
-inline constexpr float ENEMY_MAX_HEALTH      = 30.0f;
-inline constexpr float ENEMY_ATTACK_DAMAGE   = 8.0f;
+inline constexpr float ENEMY_MAX_HEALTH      = 70.0f;  // beefier (fewer but stronger)
+inline constexpr float ENEMY_ATTACK_DAMAGE   = 11.0f;  // hits harder
 inline constexpr float ENEMY_KNOCKBACK       = 7.0f;   // impulse an enemy deals to the player
 inline constexpr float ENEMY_WEIGHT          = 4.0f;   // resists the player's knockback
-inline constexpr float ENEMY_ATTACK_RANGE    = 1.8f;   // start a swing within this of the player
-inline constexpr float ENEMY_ATTACK_REACH    = 2.4f;   // hit connects within this at the strike (long, hard to backpedal out of)
+inline constexpr float ENEMY_ATTACK_RANGE    = 4.5f;   // start a punch within this of the player (long reach)
+inline constexpr float ENEMY_ATTACK_REACH    = 2.8f;   // (unused now the punch is a radial forcefield)
 inline constexpr float ENEMY_ATTACK_CONE     = -0.5f;  // arccos(-.5)=120 deg half-arc (wide; can't just circle out)
-inline constexpr float ENEMY_ATTACK_INTERVAL = 1.2f;   // seconds between attacks
-inline constexpr float ENEMY_ATTACK_WINDUP   = 0.4f;   // swing time before the hit lands (dodge window)
+inline constexpr float ENEMY_ATTACK_INTERVAL = 2.2f;   // seconds between attacks
+inline constexpr float MELEE_SPEED_MULT      = 1.4f;   // melee chase faster than the base enemy speed
+inline constexpr float ENEMY_MAX_CLIMB       = 1.5f;   // max ground rise (world units) an enemy steps up per tile
+                                                       // (ramps/mounds OK; cliffs are one-way — they route to a ramp)
+// Melee enemies PUNCH the ground, releasing a spherical forcefield: a radial shockwave
+// that knocks back hard + does substantial damage to every player within its radius.
+// A frontal shield blocks the DAMAGE (spends stamina), but the knockback shove always
+// lands; otherwise dodge the i-frames or clear the radius during the windup. Big reach
+// + big shove = a real threat.
+inline constexpr float MELEE_FORCEFIELD_RADIUS    = 5.0f;
+inline constexpr float MELEE_FORCEFIELD_DAMAGE    = 22.0f;  // substantial (2x a normal enemy hit)
+inline constexpr float MELEE_FORCEFIELD_KNOCKBACK = 24.0f;  // hard radial shove
+inline constexpr float PUNCH_ANIM_TIME            = 0.45f;  // forcefield-sphere visual duration
+inline constexpr float ENEMY_ATTACK_WINDUP   = 0.4f;   // wind-up before the punch lands (dodge window)
 inline constexpr float ENEMY_STAGGER_SPEED   = 0.5f;   // above this knock speed, AI is suppressed
 inline constexpr float BLOCK_KNOCK_ABSORB    = 0.2f;   // knockback kept when a hit is blocked
+
+// Soft separation: enemies gently repel nearby enemies so they don't pile onto the
+// same tile. The push grows as they close, out to ~arm's length (so they settle a
+// body-or-so apart rather than spreading out across the room).
+inline constexpr float ENEMY_SEPARATION_DIST  = 1.3f;  // repel when centers are within this
+inline constexpr float ENEMY_SEPARATION_SPEED = 2.2f;  // push strength (units/s at max closeness)
 
 // Ranged enemy: keeps its distance and shoots spheres. It advances to RANGED_STANDOFF,
 // backs up (still firing) if a target gets closer than standoff - margin, and drops a
 // target that leaves RANGED_LEASH (out of range = unavailable -> retarget).
-inline constexpr float RANGED_STANDOFF      = 6.0f;    // preferred distance from the target
+inline constexpr float RANGED_STANDOFF      = 9.0f;    // preferred distance (bigger range)
 inline constexpr float RANGED_BACKUP_MARGIN = 1.5f;    // hysteresis band around the standoff
 inline constexpr float RANGED_BACKUP_SPEED  = 1.4f;    // retreat speed (slower than its advance, ENEMY_SPEED)
-inline constexpr float RANGED_LEASH         = 13.0f;   // give up on a target past this
-inline constexpr float RANGED_FIRE_INTERVAL = 1.3f;    // seconds between shots (attack speed)
-inline constexpr float RANGED_DAMAGE        = 7.0f;
+inline constexpr float RANGED_LEASH         = 1.0e9f;  // never give up — aggro is effectively infinite
+inline constexpr float RANGED_FIRE_INTERVAL = 2.0f;    // seconds between shots (rate of fire halved)
+inline constexpr float RANGED_DAMAGE        = 9.0f;
 inline constexpr float RANGED_KNOCKBACK     = 3.0f;
-inline constexpr float RANGED_SHOT_SPEED    = 9.0f;    // projectile travel speed (units/s)
+inline constexpr float RANGED_SHOT_SPEED    = 16.0f;   // projectile travel speed (units/s) — faster
 inline constexpr float RANGED_SHOT_RADIUS   = 0.35f;   // sphere size + hit radius
-inline constexpr float RANGED_SHOT_LIFE     = 2.5f;    // seconds before a shot fizzles
+inline constexpr float RANGED_SHOT_LIFE     = 4.0f;    // seconds before a shot fizzles (longer to reach far targets)
 inline constexpr float PROJECTILE_HIT_DIST  = 0.6f;    // shot within this of a player connects
 
-// Flying enemy: a ranged variant that hovers above the ground with longer range.
+// Flying enemy: a ranged variant that hovers above the ground; fires fast hard lasers.
 // Reachable in melee only by jumping up to it (see the vertical strike reach below).
 inline constexpr float FLY_HOVER         = 2.5f;    // hover height above its ground (relative)
-inline constexpr float FLY_STANDOFF      = 5.0f;    // close enough that a chasing player can corner + jump it
-inline constexpr float FLY_LEASH         = 18.0f;   // better range than ground ranged
-inline constexpr float FLY_FIRE_INTERVAL = 1.6f;
-inline constexpr float FLY_DAMAGE        = 6.0f;
-inline constexpr float FLY_SHOT_SPEED    = 11.0f;
+inline constexpr float FLY_STANDOFF      = 8.0f;    // bigger standoff range
+inline constexpr float FLY_LEASH         = 1.0e9f;  // infinite aggro
+inline constexpr float FLY_FIRE_INTERVAL = 2.2f;    // rate of fire halved
+inline constexpr float FLY_DAMAGE        = 16.0f;   // lasers hit hard
+inline constexpr float FLY_SHOT_SPEED    = 30.0f;   // very fast laser beam
 
 // Melee vertical reach: a swing connects only if the target's height (relative to its
 // ground) is within this window of the player's strike elevation (feet-above-ground,
@@ -59,7 +77,9 @@ inline constexpr float GROUND_BODY_CENTER = 1.0f;  // a ground enemy's aim point
 struct PlayerCombat {
     uint32_t id;          // stable player id (host = 0, clients 1..); enemies target by id
     bool  alive = true;   // dead players (ghosts) are ignored by enemies and deal no damage
+    bool  invincible = false;  // mid-dodge i-frames: still targeted, but takes no damage
     vec3  pos;            // player position (eye)
+    vec3  vel = {0,0,0};  // player velocity (units/s); ranged enemies lead their shots with it
     vec3  aim = {0,0,0};  // 3D look direction (yaw+pitch); the strike is a cone around this
     float yaw;
     bool  blocking;
@@ -76,6 +96,25 @@ struct PlayerCombat {
     float block_cos = 0.0f;  // cos(half-angle) of the shield's frontal arc
     float block_rate = 0.0f; // stamina per point of damage blocked (0 = no shield)
     float stamina   = 0.0f;  // stamina available to spend blocking this tick
+    float crit_chance = 0.0f;  // 0..1 chance a melee strike crits (rolled per enemy hit)
+    float crit_mult   = 2.0f;  // damage multiplier applied on a crit
+    // Elemental brands (a melee strike applies these to the enemy it hits).
+    float burn_dps      = 0.0f;  // fire: burn damage/sec applied on hit (0 = no fire)
+    float burn_duration = 0.0f;  // how long the burn lasts
+    float slow_factor   = 1.0f;  // ice: movement multiplier applied on hit (1 = no ice)
+    float slow_duration = 0.0f;
+    float earth_knock   = 0.0f;  // earth: extra knockback added on hit
+};
+
+inline constexpr float BURN_INTERVAL = 0.5f;   // burn deals damage (+ a number) this often
+
+// A floating damage number to show over an enemy: where it was hit, how much, and
+// whether it was a crit (rendered in a different color). Emitted at the damage site
+// (so killing blows survive the enemy being compacted away the same tick).
+struct HitNumber {
+    vec3  pos;            // enemy position when hit
+    float amount = 0.0f;
+    bool  crit   = false;
 };
 
 // What the enemy tick did to the player (so the caller can apply it — keeps the
@@ -86,6 +125,7 @@ struct EnemyHitPlayer {
     bool  hit     = false;               // damage got through (-> red flash)
     bool  blocked = false;               // the shield absorbed some damage this tick
     float stamina_cost = 0.0f;           // stamina the shield spent blocking (caller deducts)
+    float dealt   = 0.0f;                // damage THIS player dealt to enemies this tick (melee; for the scoreboard)
 };
 
 // Advance enemies one tick against ALL players (co-op). Each player's strike is
@@ -97,11 +137,18 @@ struct EnemyHitPlayer {
 // player i (damage/knock/flash). Pure over (list, map, flows, players) + list.rng.
 // Dead enemies are removed. `deaths` (optional): each removed enemy appends its
 // position as 3 floats (x,y,z) so the caller can drop loot.
+// `hits` (optional): each player strike that connects appends a HitNumber (enemy pos,
+// damage dealt, crit) for floating damage numbers; melee crits are rolled here.
+// `tile_heights` (optional): row-major ground elevation per tile. When given, enemy
+// flow-following obeys the same one-way climb rule as the flow field (can drop off
+// cliffs, can only climb gentle rises/ramps) so they path to ramps instead of walls.
 void update_enemies(EntityList& list, const dc::world::Map& map,
                     const std::vector<dc::world::FlowField>& flows,
                     const std::vector<PlayerCombat>& players,
                     std::vector<EnemyHitPlayer>& out, float dt,
-                    std::vector<float>* deaths = nullptr);
+                    std::vector<float>* deaths = nullptr,
+                    std::vector<HitNumber>* hits = nullptr,
+                    const std::vector<float>* tile_heights = nullptr);
 
 // Advance in-flight projectiles (host-authoritative): move, expire by lifetime, die
 // on walls, and on reaching a LIVING player deal damage + knockback into out[i]
@@ -114,8 +161,10 @@ void update_projectiles(EntityList& list, const dc::world::Map& map,
 // Damage + knock every enemy within `radius` (xz) of `center`, skipping ids already
 // in `already_hit` (so a moving hazard hits each enemy once per pass). Marks the
 // dead; the caller's next update_enemies compacts them. Pure / reusable (thrown
-// sword now, explosions later).
-void radius_attack(EntityList& list, const vec3 center, float radius,
-                   float damage, float knockback, std::vector<uint32_t>& already_hit);
+// sword now, explosions later). Returns the total damage actually dealt (capped at
+// each enemy's remaining health) so the caller can credit it to the attacker.
+float radius_attack(EntityList& list, const vec3 center, float radius,
+                    float damage, float knockback, std::vector<uint32_t>& already_hit,
+                    std::vector<HitNumber>* hits = nullptr);
 
 } // namespace dc::entity

@@ -8,11 +8,14 @@
 namespace dc::entity {
 
 inline constexpr float PLAYER_RADIUS = 0.4f;   // world units
-inline constexpr float GRAVITY       = 20.0f;  // units/s^2
-inline constexpr float JUMP_SPEED    = 6.0f;   // units/s (initial jump velocity)
-inline constexpr float MOVE_SPEED    = 4.0f;   // units/s (walk)
+inline constexpr float MAX_STEP_UP   = 0.6f;   // max terrain rise (ahead) you can walk up; steeper = a wall
+inline constexpr float STEP_LOOKAHEAD = 0.8f;  // how far ahead to sample the rise (so cliffs block at the foot)
+inline constexpr float GRAVITY       = 15.0f;  // units/s^2 (a bit floaty)
+inline constexpr float JUMP_SPEED    = 9.5f;   // units/s (~2.5x the old apex height; height ~ v^2)
+inline constexpr float MOVE_SPEED    = 5.5f;   // units/s (faster, snappier traversal)
 inline constexpr float RUN_SPEED     = 7.0f;   // units/s (hold Shift)
-inline constexpr float RUN_STAMINA_PER_SEC = 12.0f;  // stamina drained while running
+inline constexpr float RUN_STAMINA_PER_SEC = 12.0f;  // stamina drained while sprinting
+inline constexpr float JUMP_STAMINA  = 12.0f;  // stamina spent per jump
 
 // Eye must sit below the head-bonk ceiling, or the vertical clamps would fight.
 static_assert(dc::world::EYE_HEIGHT < dc::world::WALL_HEIGHT - 0.2f,
@@ -33,8 +36,8 @@ struct Shield {
     // Shield-bash nova (3): a white sphere expands from you, knocking everything it
     // sweeps far back for light damage. Very high knockback, slow cooldown.
     float bash_radius     = 4.5f;   // how far the shockwave reaches
-    float bash_damage     = 8.0f;   // low/moderate
-    float bash_knockback  = 55.0f;  // very high (>> enemy weight -> big shove)
+    float bash_damage     = 26.0f;  // hits hard now
+    float bash_knockback  = 85.0f;  // even bigger shove
     float bash_duration   = 0.35f;  // seconds for the sphere to expand fully (quick)
     float bash_cooldown   = 8.0f;   // very slow
     float stamina_per_bash = 55.0f;
@@ -44,8 +47,8 @@ struct Shield {
 // (unarmed) attack; reach/cone define the swing arc — every enemy inside is hit.
 struct Weapon {
     float attack_bonus     = 10.0f;  // added to the player's base attack_damage
-    float reach            = 1.9f;   // swing reach (world units)
-    float cone_cos         = 0.35f;  // arccos(.35) ~70 deg half-arc
+    float reach            = 5.0f;   // swing reach (world units) — long poke, ranged-ish feel
+    float cone_cos         = 0.80f;  // arccos(.80) ~37 deg half-arc — skinny + long
     float attack_speed     = 0.7f;   // swing-animation playback multiplier (lower = slower)
     float cooldown         = 0.25f;  // seconds after a swing before the next is allowed
     float stamina_per_swing = 20.0f; // stamina spent per swing
@@ -85,7 +88,7 @@ struct Player {
     bool  on_ground = true;
     float speed = MOVE_SPEED;              // horizontal move speed (set per-frame: walk vs run)
     float health = PLAYER_MAX_HEALTH;      // clamps at 0 (no death screen yet)
-    float health_regen = 1.5f;             // hp/sec while alive (upgradeable later)
+    float health_regen = 3.0f;             // hp/sec while alive (upgradeable)
     // combat: attack_damage/knockback used when striking, weight resists incoming knockback
     Stats stats = { PLAYER_MAX_HEALTH, 5.0f, 10.0f, 5.0f };  // attack_damage = base/unarmed
     float stamina       = 100.0f;
@@ -97,10 +100,34 @@ struct Player {
     float swing_reach_bonus  = 0.0f;           // blue: + melee reach
     float swing_cone_bonus   = 0.0f;           // blue: widens the swing arc (subtract from cos)
     float sword_scale        = 1.0f;           // blue: also scales the sword model visually
+    float cooldown_mult      = 1.0f;           // cyan: scales every ability cooldown (<1 faster)
+    float crit_chance        = 0.05f;          // gold: base 5% chance a melee strike crits
+    float crit_mult          = 2.0f;           // magenta: crit damage multiplier
+    // Elemental sword brands (0 / 1.0 = not equipped). Each adds a sword particle stream.
+    float fire_dps           = 0.0f;           // fire: burn damage/sec applied on hit
+    float fire_duration      = 3.0f;           // how long the burn lasts
+    float ice_slow           = 1.0f;           // ice: enemy move multiplier on hit (<1 slows)
+    float ice_duration       = 2.5f;           // how long the slow lasts
+    float earth_knock        = 0.0f;           // earth: extra knockback on hit
+    int   minion_count       = 0;              // gunner minions orbiting you (cap 4)
+    float minion_damage      = 5.0f;           // damage per minion volley shot
+    float minion_range       = 18.0f;          // how far minions acquire + shoot targets (upgradeable)
+    float trail_damage       = 0.0f;           // trailblazer: fire-trail damage/sec (0 = not equipped)
+    float trail_life         = 0.0f;           // how long each trail segment burns (upgradable decay)
+    float supersonic_damage  = 0.0f;           // supersonic: dodge shockwave damage (0 = not equipped)
     std::optional<Shield> shield = Shield{};   // equipped shield (nullopt = none)
     std::optional<Weapon> weapon = Weapon{};   // equipped weapon (nullopt = fists)
     vec3  knock_vel = {0.0f, 0.0f, 0.0f};  // horizontal knockback velocity (decays in update)
     float hit_flash = 0.0f;                // red-flash timer (decayed by main)
+    // Dodge-dash (Shift): a burst of velocity with brief invincibility. All upgradeable.
+    float dash_speed    = 24.0f;   // initial burst speed (units/s)
+    float dash_decay    = 8.0f;    // how fast the burst tapers (1/s; higher = shorter dash)
+    float dash_iframes  = 0.35f;   // seconds of invincibility granted
+    float dash_cost     = 25.0f;   // stamina per dash
+    float dash_cooldown = 0.7f;    // seconds between dashes
+    vec3  dash_vel  = {0.0f, 0.0f, 0.0f};  // current dash velocity (decays in update)
+    float iframes   = 0.0f;        // invincible while > 0 (counts down in update)
+    float dash_cd   = 0.0f;        // time until the next dash is allowed (counts down in update)
 
     // Look direction unit vector from yaw/pitch.
     void front(vec3 out) const;
