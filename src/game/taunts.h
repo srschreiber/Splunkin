@@ -33,6 +33,7 @@ inline const char* taunt_text(int i) {
         "stay down",
         "loser",
         "nice try idiot",
+        "my mom never hugged me",
     };
     const int n = static_cast<int>(sizeof(T) / sizeof(T[0]));
     return T[((i % n) + n) % n];
@@ -40,7 +41,33 @@ inline const char* taunt_text(int i) {
 
 inline int taunt_count() {
     // Must match the array above.
-    return 24;
+    return 25;
 }
+
+// Reactive lines, said by the enemy that just hurt you (gloating). Shorter + punchier.
+inline const char* reactive_text(int i) {
+    static const char* T[] = {
+        "eat shit",
+        "got you",
+        "take that",
+        "how do you like that",
+        "stay down",
+        "bleed",
+        "too slow",
+        "sit down",
+        "that gonna hurt",
+        "owned",
+        "get rekt",
+        "feel that",
+        "ouch right",
+        "cry now",
+        "lights out",
+        "boom",
+    };
+    const int n = static_cast<int>(sizeof(T) / sizeof(T[0]));
+    return T[((i % n) + n) % n];
+}
+
+inline int reactive_count() { return 16; }
 
 } // namespace dc::game

@@ -47,12 +47,13 @@ static void speak_async(const std::string& text) {
     std::thread([text]() {
         std::string cmd;
 #if defined(__APPLE__)
-        cmd = "say \"" + text + "\"";
+        cmd = "say -v Alex -r 210 \"" + text + "\"";   // Alex = classic male voice, a touch faster
 #elif defined(__linux__)
-        cmd = "espeak \"" + text + "\" >/dev/null 2>&1 || spd-say \"" + text + "\" >/dev/null 2>&1";
+        cmd = "espeak -v en+m3 -s 175 \"" + text + "\" >/dev/null 2>&1 || spd-say \"" + text + "\" >/dev/null 2>&1";
 #elif defined(_WIN32)
         cmd = "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Speech;"
-              "(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('" + text + "')\"";
+              "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+              "try{$s.SelectVoiceByHints('Male')}catch{};$s.Speak('" + text + "')\"";
 #endif
         if (!cmd.empty()) std::system(cmd.c_str());
         g_tts_active.fetch_sub(1);
@@ -877,17 +878,20 @@ int main(int argc, char** argv) {
 
     // Enemy taunts: floating yellow insults (+ TTS) over attacking enemies. Host picks
     // them (rate-limited + capped); a Taunt event replicates each to everyone.
-    struct FloatTaunt { vec3 pos; uint8_t idx; float age; };
+    struct FloatTaunt { vec3 pos; uint8_t idx; uint8_t reactive; float age; };
     std::vector<FloatTaunt> taunts;
     float taunt_cd = 0.0f;
     constexpr float TAUNT_LIFE = 2.8f, TAUNT_INTERVAL = 1.6f, TAUNT_RANGE = 9.0f;
     constexpr int   MAX_TAUNTS = 3;     // at most this many on screen / talking at once
-    auto spawn_taunt = [&](float x, float y, float z, int idx, bool broadcast) {
-        FloatTaunt t; t.pos[0] = x; t.pos[1] = y; t.pos[2] = z; t.idx = static_cast<uint8_t>(idx); t.age = 0.0f;
+    auto taunt_line = [](int idx, bool reactive) { return reactive ? dc::game::reactive_text(idx) : dc::game::taunt_text(idx); };
+    auto spawn_taunt = [&](float x, float y, float z, int idx, bool reactive, bool broadcast) {
+        FloatTaunt t; t.pos[0] = x; t.pos[1] = y; t.pos[2] = z;
+        t.idx = static_cast<uint8_t>(idx); t.reactive = reactive ? 1 : 0; t.age = 0.0f;
         taunts.push_back(t);
-        speak_async(dc::game::taunt_text(idx));
+        speak_async(taunt_line(idx, reactive));
         if (broadcast && net.role == dc::net::Role::Host) {
-            dc::net::TauntState ts; ts.x = x; ts.y = y; ts.z = z; ts.idx = static_cast<uint8_t>(idx);
+            dc::net::TauntState ts; ts.x = x; ts.y = y; ts.z = z;
+            ts.idx = static_cast<uint8_t>(idx); ts.reactive = reactive ? 1 : 0;
             unsigned char buf[1 + sizeof ts]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::Taunt);
             std::memcpy(buf + 1, &ts, sizeof ts); net.broadcast(buf, sizeof buf, true);
         }
@@ -2894,7 +2898,7 @@ int main(int argc, char** argv) {
                                    + (en.kind == dc::entity::EnemyKind::Flying ? dc::entity::FLY_HOVER + 1.4f : 2.4f);
                     spark_rng = spark_rng * 1664525u + 1013904223u;
                     const int idx = static_cast<int>(spark_rng % static_cast<uint32_t>(dc::game::taunt_count()));
-                    spawn_taunt(en.position[0], hy, en.position[2], idx, true);
+                    spawn_taunt(en.position[0], hy, en.position[2], idx, false, true);
                     taunt_cd = TAUNT_INTERVAL;
                 }
             }
@@ -4672,7 +4676,9 @@ int main(int argc, char** argv) {
             }
 
             // Enemy taunts: project each over its enemy's head, rising + fading in angry yellow.
+            // Held back ~0.22s so the spoken line (which has synth startup latency) lands with it.
             for (const auto& t : taunts) {
+                if (t.age < 0.22f) continue;
                 vec4 wp = { t.pos[0], t.pos[1] + t.age * 0.6f, t.pos[2], 1.0f }, clip;
                 glm_mat4_mulv(renderer.viewproj, wp, clip);
                 if (clip[3] <= 0.05f) continue;                       // behind the camera
