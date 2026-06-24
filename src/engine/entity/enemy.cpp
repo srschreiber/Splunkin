@@ -1,10 +1,11 @@
 #include "engine/entity/enemy.h"
 #include "engine/world/collision.h"
+#include <algorithm>
 #include <cmath>
 
 namespace dc::entity {
 
-Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind) {
+Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind, bool elite) {
     Entity e;
     e.id = next_id++;
     e.type = EntityType::Enemy;
@@ -18,6 +19,15 @@ Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind) {
     } else if (kind == EnemyKind::Flamethrower) {
         e.stats.max_health = FLAME_MAX_HEALTH;   // tanky bruiser
         e.health = e.stats.max_health;
+    }
+    if (elite) {
+        e.elite = true;
+        // Elite flyers get a real health pool (not the one-shot 1.0) so they're a threat.
+        float base = (kind == EnemyKind::Flying) ? ELITE_FLYER_BASE_HP : e.stats.max_health;
+        e.stats.max_health = base * ELITE_HEALTH_MULT;
+        e.health = e.stats.max_health;
+        e.stats.knockback *= ELITE_KNOCKBACK_MULT;
+        e.stats.weight    *= ELITE_WEIGHT_MULT;
     }
     e.alive = true;
     items.push_back(e);
@@ -238,7 +248,13 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 pr.vel[2] = az * shot_spd;
                 pr.vel[1] = (dist > 0.1f) ? (tgt.pos[1] - pr.pos[1]) * shot_spd / dist : 0.0f;   // climb to the target's height
                 pr.damage = dmg; pr.knockback = RANGED_KNOCKBACK; pr.life = RANGED_SHOT_LIFE;
+                pr.radius = RANGED_SHOT_RADIUS;
                 if (flying) { pr.color[0] = 1.0f; pr.color[1] = 0.12f; pr.color[2] = 0.08f; pr.beam = true; }   // red glowing laser
+                if (e.elite) {                          // bigger, harder-hitting elite shot
+                    pr.damage *= ELITE_DAMAGE_MULT; pr.knockback *= ELITE_KNOCKBACK_MULT;
+                    pr.radius *= ELITE_PROJ_MULT;
+                    pr.color[0] = std::min(1.0f, pr.color[0] + 0.3f); pr.color[1] = std::min(1.0f, pr.color[1] + 0.25f); pr.color[2] *= 0.4f;  // golden tint
+                }
                 list.projectiles.push_back(pr);
             }
             // Keep its distance: close to the standoff band, back straight off if the
@@ -275,7 +291,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     if (pd > FLAME_RANGE || pd < 1e-3f) continue;
                     if ((px / pd) * fdx + (pz / pd) * fdz < FLAME_CONE_COS) continue;   // outside the spray arc
                     firing = true;
-                    float dmg = FLAME_DPS * dt;           // sustained (per-tick) damage
+                    float dmg = FLAME_DPS * dt * (e.elite ? ELITE_DAMAGE_MULT : 1.0f);   // sustained (per-tick) damage
                     // A raised shield burns the flame off (spends stamina), same as any hit.
                     if (pc.blocking && pc.block_rate > 0.0f) {
                         const float front = (-px / pd) * std::cos(pc.yaw) + (-pz / pd) * std::sin(pc.yaw);
@@ -338,8 +354,8 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     const float d2 = dx * dx + dz * dz;
                     if (d2 > MELEE_FORCEFIELD_RADIUS * MELEE_FORCEFIELD_RADIUS) continue;
                     const float d = std::sqrt(d2);
-                    float dmg = MELEE_FORCEFIELD_DAMAGE;
-                    const float kb = MELEE_FORCEFIELD_KNOCKBACK;   // shove always lands (block stops damage, not the blast)
+                    float dmg = MELEE_FORCEFIELD_DAMAGE * (e.elite ? ELITE_DAMAGE_MULT : 1.0f);
+                    const float kb = MELEE_FORCEFIELD_KNOCKBACK * (e.elite ? ELITE_KNOCKBACK_MULT : 1.0f);   // shove always lands (block stops damage, not the blast)
                     // Frontal shield negates the DAMAGE (spends block_rate stamina per point).
                     if (pc.blocking && pc.block_rate > 0.0f && d > 1e-4f) {
                         const float front = (-dx / d) * std::cos(pc.yaw) + (-dz / d) * std::sin(pc.yaw);
@@ -406,7 +422,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 deaths->push_back(list.items[i].position[1]);
                 deaths->push_back(list.items[i].position[2]);
             }
-            if (death_xp) death_xp->push_back(enemy_xp(list.items[i].kind));
+            if (death_xp) death_xp->push_back(enemy_xp(list.items[i].kind) * (list.items[i].elite ? 4.0f : 1.0f));
             list.items[i] = list.items.back();
             list.items.pop_back();
         } else ++i;
@@ -436,9 +452,11 @@ void update_projectiles(EntityList& list, const dc::world::Map& map,
                 const float dx = players[pi].pos[0] - p.pos[0], dz = players[pi].pos[2] - p.pos[2];
                 const float d2 = dx * dx + dz * dz;
                 const float feet = players[pi].pos[1] - dc::world::EYE_HEIGHT;
-                const bool in_band = p.pos[1] >= feet - PROJECTILE_HIT_DIST
-                                  && p.pos[1] <= players[pi].pos[1] + PROJECTILE_HIT_DIST;
-                if (d2 <= PROJECTILE_HIT_DIST * PROJECTILE_HIT_DIST && in_band) {
+                // Bigger (elite) shots have a proportionally bigger hit capsule.
+                const float hit = PROJECTILE_HIT_DIST * (p.radius / RANGED_SHOT_RADIUS);
+                const bool in_band = p.pos[1] >= feet - hit
+                                  && p.pos[1] <= players[pi].pos[1] + hit;
+                if (d2 <= hit * hit && in_band) {
                     const PlayerCombat& pc = players[pi];
                     const float d = std::sqrt(d2);
                     float dmg = p.damage, kb = p.knockback;

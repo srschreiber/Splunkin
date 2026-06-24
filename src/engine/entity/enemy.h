@@ -8,6 +8,17 @@ namespace dc::entity {
 
 // Base XP an enemy of `kind` is worth when killed (the caller scales by run difficulty).
 // Tougher kinds drop more so XP tracks roughly with how hard they are to take down.
+// Rare "elite" variants: a small fraction of spawns roll into a bigger, golden, much
+// tougher enemy that hits harder and (for shooters) fires bigger, deadlier projectiles.
+inline constexpr float ELITE_CHANCE          = 0.06f;  // ~6% of spawns
+inline constexpr float ELITE_SCALE           = 1.7f;   // render + presence size
+inline constexpr float ELITE_HEALTH_MULT     = 3.0f;
+inline constexpr float ELITE_DAMAGE_MULT     = 1.8f;
+inline constexpr float ELITE_KNOCKBACK_MULT  = 1.5f;
+inline constexpr float ELITE_WEIGHT_MULT     = 2.0f;   // harder to shove around
+inline constexpr float ELITE_PROJ_MULT       = 1.9f;   // bigger, harder-hitting bolts
+inline constexpr float ELITE_FLYER_BASE_HP   = 42.0f;  // elite flyers aren't one-shot fragile
+
 inline float enemy_xp(EnemyKind kind) {
     switch (kind) {
         case EnemyKind::Ranged:       return 12.0f;

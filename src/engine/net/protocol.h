@@ -19,7 +19,15 @@ enum class MsgType : uint8_t {
     ReleaseChest = 12,  // client -> host: closed the menu without buying [uint32 chest]  (reliable)
     BuyDrone = 13,      // client -> host: buy a ground drone vendor [uint32 vendor]      (reliable)
     DroneGranted = 14,  // host -> client: drone purchase approved (gain a gunner minion) (reliable)
+    XpGranted = 15,     // host -> client: you absorbed an XP orb [float amount] -> client levels up locally (reliable)
+    Appearance = 16,    // peer -> peer: a player's look [uint32 id][dc::game::Appearance] (reliable, relayed by host)
+    StartGame = 17,     // host -> clients: leave the lobby and start playing (reliable)
+    Taunt = 18,         // host -> clients: an enemy taunts [TauntState] -> floating text + TTS (reliable)
 };
+
+// One enemy taunt fired this moment: where it spawns (over the enemy's head) and which
+// canned insult (index into dc::game::taunt_text). Clients float the text + speak it.
+struct TauntState { float x = 0.0f, y = 0.0f, z = 0.0f; uint8_t idx = 0; };
 
 // Client -> host one-shot "cast" events. The host runs each special on its own clock
 // (motion + damage) and broadcasts the evolving state in the snapshot; the caster
@@ -30,6 +38,8 @@ struct BashCast {
 struct OrbitCast {
     float duration = 0.0f, radius = 0.0f, hit_radius = 0.0f, damage = 0.0f, knockback = 0.0f;
     int32_t count = 0;
+    float tick = 0.25f;        // damage re-hit interval (Orbit Tempo shortens it)
+    float spin = 1.0f;         // revolve/spin speed multiplier (Orbit Tempo speeds it up)
 };
 struct ThrownCast {
     float dx = 0.0f, dy = 0.0f, dz = 0.0f;   // launch direction (3D, unit)
@@ -95,9 +105,8 @@ struct PlayerState {
     float    hit_flash = 0.0f;
     uint8_t  burning = 0;                    // on fire (flamethrower) -> flame particles on every screen
     float    sword_scale = 1.0f;             // blue-upgrade blade size
-    // Specials, for rendering everyone's thrown/orbit swords on every screen.
-    uint8_t  thrown_active = 0;
-    float    thrown_x = 0.0f, thrown_y = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
+    // Orbit/bash specials are single-per-player; thrown swords (which can be several at
+    // once with Swordstorm) ride a separate owner-keyed list (ThrownState) instead.
     uint8_t  orbit_active = 0;
     int32_t  orbit_count = 0;
     float    orbit_angle = 0.0f, orbit_spin = 0.0f, orbit_radius = 0.0f;
@@ -113,16 +122,24 @@ struct EnemyState {
     float   healthbar_time = 0.0f;  // seconds left to show the bar (0 = hidden)
     uint8_t attacking = 0;
     uint8_t kind = 0;           // dc::entity::EnemyKind (0 = Melee, 1 = Ranged) -> render color
-    uint8_t status = 0;         // elemental status bitmask (1=burning, 2=slowed) -> fire/ice particles
+    uint8_t status = 0;         // status bitmask (1=burning, 2=slowed, 4=elite) -> particles/scale
 };
 
 // One dropped coin's position (render-only on clients).
 struct CoinState { float x = 0.0f, z = 0.0f; };
 
+// One dropped XP orb's position (render-only on clients; the host owns pickups + XP).
+struct XPOrbState { float x = 0.0f, z = 0.0f; };
+
+// One in-flight thrown sword (host -> everyone), keyed by its owner's player id so each
+// client can render every player's swords (a Swordstorm volley is several at once) while
+// skipping its own (which it predicts locally).
+struct ThrownState { float x = 0.0f, y = 0.0f, z = 0.0f, spin = 0.0f, size = 1.0f; uint32_t owner = 0; };
+
 // One in-flight projectile's position + glow color + travel dir (render-only on clients).
 // `beam` => render as a stretched glowing laser (eye); vx/vz give its on-screen orientation.
 struct ProjectileState { float x = 0.0f, y = 0.0f, z = 0.0f, r = 0.75f, g = 0.35f, b = 1.0f;
-                         float vx = 0.0f, vy = 0.0f, vz = 0.0f; uint8_t beam = 0; };
+                         float vx = 0.0f, vy = 0.0f, vz = 0.0f; float radius = 0.35f; uint8_t beam = 0; };
 
 // A floating damage number spawned this tick (host -> everyone): position, amount, crit.
 struct DamageNumState { float x = 0.0f, y = 0.0f, z = 0.0f, amount = 0.0f; uint8_t crit = 0; };

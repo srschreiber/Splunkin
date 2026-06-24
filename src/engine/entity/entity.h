@@ -65,6 +65,7 @@ struct Entity {
     uint32_t burn_owner  = 0;      // player id who lit it (scoreboard credit)
     float    slow_time   = 0.0f;   // seconds of ice slow remaining
     float    slow_factor = 1.0f;   // movement multiplier while slowed (1 = normal)
+    bool elite = false;            // rare elite: larger, tankier, hits harder, golden aura
     bool alive = true;
 };
 
@@ -77,6 +78,7 @@ struct Projectile {
     float damage    = 0.0f;
     float knockback = 0.0f;
     float life      = 0.0f;   // seconds remaining before it fizzles
+    float radius    = 0.35f;  // sphere size + hit radius (bigger for elite shots)
     bool  beam      = false;  // render as a stretched glowing laser (eye), not a sphere
 };
 
@@ -88,7 +90,7 @@ struct EntityList {
     uint32_t next_id = 1;
     uint32_t rng     = 0x1234567u;
 
-    Entity& spawn_enemy(float x, float z, EnemyKind kind = EnemyKind::Melee);
+    Entity& spawn_enemy(float x, float z, EnemyKind kind = EnemyKind::Melee, bool elite = false);
 };
 
 } // namespace dc::entity

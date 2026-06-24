@@ -18,6 +18,12 @@
 #include "engine/net/protocol.h"
 #include "game/upgrades.h"
 #include "game/seven_seg.h"
+#include "game/appearance.h"
+#include "game/taunts.h"
+#include <thread>
+#include <atomic>
+#include <string>
+#include <cstdlib>
 
 #include <SDL3/SDL.h>
 #include <cglm/cglm.h>
@@ -29,6 +35,29 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+// Number of TTS voices currently speaking (caps how many taunts talk over each other).
+static std::atomic<int> g_tts_active{0};
+
+// Speak `text` aloud via the platform's text-to-speech, off-thread so it never blocks the
+// frame. Capped + best-effort: if the OS command is missing it just stays silent.
+static void speak_async(const std::string& text) {
+    if (g_tts_active.load() >= 2) return;            // at most two voices at once
+    g_tts_active.fetch_add(1);
+    std::thread([text]() {
+        std::string cmd;
+#if defined(__APPLE__)
+        cmd = "say \"" + text + "\"";
+#elif defined(__linux__)
+        cmd = "espeak \"" + text + "\" >/dev/null 2>&1 || spd-say \"" + text + "\" >/dev/null 2>&1";
+#elif defined(_WIN32)
+        cmd = "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Speech;"
+              "(New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak('" + text + "')\"";
+#endif
+        if (!cmd.empty()) std::system(cmd.c_str());
+        g_tts_active.fetch_sub(1);
+    }).detach();
+}
 
 static std::string read_file(const char* path) {
     std::ifstream f(path);
@@ -377,6 +406,7 @@ int main(int argc, char** argv) {
         sp.ranged_fraction = 0.30f;   // ~30% ground shooters
         sp.flying_fraction = 0.15f;   // ~15% hovering shooters
         sp.flame_fraction  = 0.07f;   // ~7% rare flamethrower bruisers
+        sp.elite_fraction  = dc::entity::ELITE_CHANCE;   // ~6% roll into a rare golden elite
         spawners.push_back(sp);
     }
 
@@ -538,6 +568,8 @@ int main(int argc, char** argv) {
     std::vector<dc::net::Event> net_events;
 
     // Replication state. A "remote" is another player we render (not simulate locally).
+    // One thrown sword's render state on a remote player (several at once with Swordstorm).
+    struct ThrownVis { float x = 0.0f, y = 0.0f, z = 0.0f, spin = 0.0f, size = 1.0f; };
     struct Remote {
         uint32_t id; vec3 pos; float yaw, pitch, anim_time; bool moving;
         float damage_dealt = 0.0f;   // total damage to enemies (from snapshot; scoreboard)
@@ -549,8 +581,9 @@ int main(int argc, char** argv) {
         bool burning = false; // on fire (flamethrower) -> emit flame motes
         bool punching = false, blocking = false;
         float punch_time = 0.0f, block_time = 0.0f, hit_flash = 0.0f, sword_scale = 1.0f;
-        // Specials (render-only mirror of the owner's thrown/orbit state).
-        bool thrown_active = false; float thrown_x = 0.0f, thrown_y = 0.0f, thrown_z = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
+        // Specials (render-only mirror of the owner's thrown/orbit state). Thrown swords
+        // are a list (Swordstorm), filled from the owner-keyed snapshot ThrownState.
+        std::vector<ThrownVis> throwns;
         bool orbit_active = false; int orbit_count = 0; float orbit_angle = 0.0f, orbit_spin = 0.0f, orbit_radius = 0.0f;
         bool bash_active = false; float bash_radius = 0.0f;
     };
@@ -559,8 +592,9 @@ int main(int argc, char** argv) {
     // Host side: one simulated body per connected client (host runs their movement).
     struct HostClient {
         uint32_t id, peer; dc::entity::Player body; dc::net::InputCmd input; float anim_time = 0.0f;
-        std::vector<uint32_t> thrown_hits, orbit_hits;   // per-client special hit sets (host-side damage)
+        std::vector<uint32_t> orbit_hits;                // per-client orbit hit set (host-side damage)
         float orbit_tick_cd = 0.0f;                      // host-run orbit damage cadence
+        float orbit_tick = 0.25f, orbit_spin_mult = 1.0f;// Orbit Tempo, carried in the cast
         int currency = 0;                                // this client's own wallet (host-authoritative)
         double damage_dealt = 0.0;                       // running total dealt to enemies (scoreboard)
         float  minion_fire_cd = 0.0f;                    // host: this client's gunner volley timer
@@ -573,9 +607,15 @@ int main(int argc, char** argv) {
         bool  orbit_active = false; float orbit_time = 0.0f, orbit_angle = 0.0f, orbit_spin = 0.0f;
         float orbit_duration = 0.0f, orbit_radius = 0.0f, orbit_hit_radius = 0.0f, orbit_damage = 0.0f, orbit_knockback = 0.0f;
         int   orbit_count = 0;
-        bool  thrown_active = false, thrown_returning = false;
-        float thrown_pos[3] = {0,0,0}, thrown_dir[3] = {0,0,0}, thrown_traveled = 0.0f, thrown_spin = 0.0f, thrown_size = 1.0f;
-        float throw_speed = 0.0f, throw_distance = 0.0f, throw_radius = 0.0f, throw_damage = 0.0f, throw_knockback = 0.0f;
+        // In-flight thrown swords for this client (Swordstorm volleys -> several at once).
+        // Each carries its own motion + the damage params from its cast.
+        struct HcThrown {
+            bool  returning = false;
+            float pos[3] = {0,0,0}, dir[3] = {0,0,0}, traveled = 0.0f, spin = 0.0f, size = 1.0f;
+            float speed = 0.0f, distance = 0.0f, radius = 0.0f, damage = 0.0f, knockback = 0.0f;
+            std::vector<uint32_t> hit_ids;
+        };
+        std::vector<HcThrown> throwns;
     };
     std::vector<HostClient> host_clients;
     uint32_t next_player_id = 1;   // host = 0; clients get 1,2,...
@@ -822,7 +862,388 @@ int main(int argc, char** argv) {
         }
     };
 
-    bool running = true;
+    // Grant XP to the LOCAL player and roll any level-ups (queued so a big absorb can
+    // grant several picks). Used by both the host (its own pickups) and a client (from
+    // the host's XpGranted events). Defined here so the event handler can reach it.
+    auto add_xp = [&](float amount) {
+        player.xp += amount;
+        while (player.xp >= player.xp_to_next) {
+            player.xp -= player.xp_to_next;
+            player.level++;
+            player.xp_to_next = dc::entity::xp_for_level(player.level);
+            pending_levelups++;
+        }
+    };
+
+    // Enemy taunts: floating yellow insults (+ TTS) over attacking enemies. Host picks
+    // them (rate-limited + capped); a Taunt event replicates each to everyone.
+    struct FloatTaunt { vec3 pos; uint8_t idx; float age; };
+    std::vector<FloatTaunt> taunts;
+    float taunt_cd = 0.0f;
+    constexpr float TAUNT_LIFE = 2.8f, TAUNT_INTERVAL = 1.6f, TAUNT_RANGE = 9.0f;
+    constexpr int   MAX_TAUNTS = 3;     // at most this many on screen / talking at once
+    auto spawn_taunt = [&](float x, float y, float z, int idx, bool broadcast) {
+        FloatTaunt t; t.pos[0] = x; t.pos[1] = y; t.pos[2] = z; t.idx = static_cast<uint8_t>(idx); t.age = 0.0f;
+        taunts.push_back(t);
+        speak_async(dc::game::taunt_text(idx));
+        if (broadcast && net.role == dc::net::Role::Host) {
+            dc::net::TauntState ts; ts.x = x; ts.y = y; ts.z = z; ts.idx = static_cast<uint8_t>(idx);
+            unsigned char buf[1 + sizeof ts]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::Taunt);
+            std::memcpy(buf + 1, &ts, sizeof ts); net.broadcast(buf, sizeof buf, true);
+        }
+    };
+
+    bool running = true;   // shared by the lobby and the main game loop
+
+    // ---- Character appearance (skin, drawn face, silly bone scales) -------------------
+    // Loaded from disk as the default; edited in the lobby; saved on Start.
+    const char* APPEARANCE_PATH = "player_appearance.dat";
+    dc::game::Appearance my_look;
+    dc::game::load_appearance(my_look, APPEARANCE_PATH);   // ok if missing -> defaults
+    // Everyone's look by player id (id 0 = host). Populated from Appearance messages;
+    // my own id's entry mirrors my_look. Used to render each player's face/skin/bones.
+    std::vector<std::pair<uint32_t, dc::game::Appearance>> looks;
+    auto look_for = [&](uint32_t id) -> dc::game::Appearance& {
+        for (auto& kv : looks) if (kv.first == id) return kv.second;
+        looks.push_back({ id, dc::game::Appearance{} });
+        return looks.back().second;
+    };
+
+    dc::renderer::Mesh face_mesh;   // rebuilt per color when drawing pixel faces
+    // Append a player's pixel face (painted cells only) to per-color vertex lists, on a
+    // plate centered at `center`, facing `fwd`, spanned by `right`/`up`, `cell` wide.
+    auto append_face = [&](std::vector<float>* by_color, const vec3 center, const vec3 fwd,
+                           const vec3 right, const vec3 up, float cell, const dc::game::Appearance& look) {
+        for (int row = 0; row < dc::game::FACE_H; ++row)
+            for (int col = 0; col < dc::game::FACE_W; ++col) {
+                const int idx = look.face[row * dc::game::FACE_W + col];
+                if (idx <= 0 || idx >= dc::game::PALETTE_N) continue;
+                const float lx = (col - (dc::game::FACE_W - 1) * 0.5f) * cell;
+                const float ly = ((dc::game::FACE_H - 1) * 0.5f - row) * cell;
+                const float h = cell * 0.5f;
+                auto P = [&](float ox, float oy, vec3 out) {
+                    out[0] = center[0] + right[0]*(lx+ox) + up[0]*(ly+oy);
+                    out[1] = center[1] + right[1]*(lx+ox) + up[1]*(ly+oy);
+                    out[2] = center[2] + right[2]*(lx+ox) + up[2]*(ly+oy);
+                };
+                vec3 a,b,c,d; P(-h,-h,a); P(h,-h,b); P(h,h,c); P(-h,h,d);
+                std::vector<float>& v = by_color[idx];
+                auto V = [&](const vec3 p){ v.insert(v.end(), {p[0],p[1],p[2], fwd[0],fwd[1],fwd[2], 0.f,0.f,0.f}); };
+                V(a); V(b); V(c); V(a); V(c); V(d);
+            }
+    };
+    auto draw_faces = [&](std::vector<float>* by_color) {
+        for (int c = 1; c < dc::game::PALETTE_N; ++c) {
+            if (by_color[c].empty()) continue;
+            face_mesh.upload(by_color[c]);
+            float r,g,b; dc::game::palette_rgb(c, r, g, b);
+            vec3 col = { r, g, b };
+            renderer.draw_terrain(face_mesh, col, true);
+            by_color[c].clear();
+        }
+    };
+    // Temporarily scale a player's bones for silly proportions (restored after the draw).
+    struct BoneSave { int node; vec3 s; };
+    auto push_bones = [&](const dc::game::Appearance& look, std::vector<BoneSave>& saves) {
+        auto one = [&](int node, float m) {
+            if (node < 0 || node >= static_cast<int>(model_data.nodes.size())) return;
+            BoneSave bs; bs.node = node; glm_vec3_copy(model_data.nodes[node].s, bs.s); saves.push_back(bs);
+            model_data.nodes[node].s[0] *= m; model_data.nodes[node].s[1] *= m; model_data.nodes[node].s[2] *= m;
+        };
+        one(model_data.body_node, look.bone_torso);
+        one(model_data.head_node, look.bone_head);
+        one(model_data.arm_l_node, look.bone_arms); one(model_data.arm_r_node, look.bone_arms);
+        one(model_data.hand_l_node, look.bone_hands); one(model_data.hand_r_node, look.bone_hands);
+    };
+    auto pop_bones = [&](const std::vector<BoneSave>& saves) {
+        for (const auto& bs : saves) {
+            model_data.nodes[bs.node].s[0] = bs.s[0]; model_data.nodes[bs.node].s[1] = bs.s[1]; model_data.nodes[bs.node].s[2] = bs.s[2];
+        }
+    };
+    // Draw a player's pixel face on a plate in front of the head at world `head`, facing
+    // along `yaw` (the look direction). Used for the local avatar and every remote.
+    auto draw_face_at = [&](const vec3 head, float yaw, const dc::game::Appearance& look) {
+        vec3 fwd = { std::cos(yaw), 0.0f, std::sin(yaw) };
+        vec3 right = { fwd[2], 0.0f, -fwd[0] };
+        vec3 up = { 0.0f, 1.0f, 0.0f };
+        vec3 c = { head[0] + fwd[0] * 0.22f, head[1], head[2] + fwd[2] * 0.22f };
+        std::vector<float> fcol[dc::game::PALETTE_N];
+        append_face(fcol, c, fwd, right, up, 0.030f * look.bone_head, look);
+        draw_faces(fcol);
+    };
+
+    // ===================== Pre-game: lobby + character customizer =====================
+    // Gate the game behind a screen where you draw your face, pick a skin tone, set silly
+    // bone scales, and (host) wait for players + click START. Clients wait for the host.
+    // Networking (host/connect) is already live from the CLI; this just delays the sim.
+    {
+        bool started = false;
+        bool sent_look = false;                 // client: have we sent our look to the host yet
+        int  pen_color = 1, pen_radius = 1;     // current ink + brush size
+        int  skin_idx  = 0;
+        float preview_yaw = 0.0f;               // drag to spin the character
+        bool  drag_rot = false, paint_prev = false;
+        window.set_relative_mouse(false);       // free cursor for the UI
+        // Face canvas panel (NDC): a square on the right; skin/pen pickers below it.
+        const float CAN_X0 = 0.30f, CAN_X1 = 0.86f, CAN_Y0 = -0.20f, CAN_Y1 = 0.62f;
+        uint64_t lprev = SDL_GetTicksNS();
+        while (running && !started) {
+            running = window.pump_events(input);
+            const uint64_t now = SDL_GetTicksNS();
+            const float dt = (now - lprev) / 1e9f; lprev = now;
+
+            // --- Networking: accept clients (host), exchange looks, receive START. ---
+            net_events.clear();
+            net.poll(net_events);
+            for (auto& ev : net_events) {
+                if (ev.type == dc::net::Event::Connect && net.role == dc::net::Role::Host) {
+                    HostClient hc; hc.id = next_player_id++; hc.peer = ev.peer;
+                    hc.currency = START_GOLD;
+                    hc.body.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
+                    hc.body.position[1] = dc::world::EYE_HEIGHT;
+                    hc.body.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
+                    host_clients.push_back(hc);
+                    unsigned char buf[5]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::AssignId);
+                    std::memcpy(buf + 1, &hc.id, 4); net.broadcast(buf, sizeof buf, true);
+                    // Tell the newcomer everyone's look so far (host + already-joined clients).
+                    auto send_look = [&](uint32_t id, const dc::game::Appearance& a) {
+                        unsigned char b[1 + 4 + sizeof(dc::game::Appearance)];
+                        b[0] = static_cast<unsigned char>(dc::net::MsgType::Appearance);
+                        std::memcpy(b + 1, &id, 4); std::memcpy(b + 5, &a, sizeof a);
+                        net.send_to_peer(ev.peer, b, sizeof b, true);
+                    };
+                    send_look(0, my_look);
+                    for (auto& kv : looks) if (kv.first != 0) send_look(kv.first, kv.second);
+                } else if (ev.type == dc::net::Event::Receive && !ev.data.empty()) {
+                    const auto mt = static_cast<dc::net::MsgType>(ev.data[0]);
+                    if (mt == dc::net::MsgType::AssignId && ev.data.size() >= 5) {
+                        std::memcpy(&my_id, ev.data.data() + 1, 4);   // client learns its id
+                    } else if (mt == dc::net::MsgType::Appearance && ev.data.size() >= 5 + sizeof(dc::game::Appearance)) {
+                        uint32_t id; std::memcpy(&id, ev.data.data() + 1, 4);
+                        dc::game::Appearance a; std::memcpy(&a, ev.data.data() + 5, sizeof a);
+                        look_for(id) = a;
+                        if (net.role == dc::net::Role::Host) {   // relay a client's look to everyone else
+                            for (auto& hc : host_clients) if (hc.id != id) {
+                                unsigned char b[1 + 4 + sizeof a];
+                                b[0] = static_cast<unsigned char>(dc::net::MsgType::Appearance);
+                                std::memcpy(b + 1, &id, 4); std::memcpy(b + 5, &a, sizeof a);
+                                net.send_to_peer(hc.peer, b, sizeof b, true);
+                            }
+                        }
+                    } else if (mt == dc::net::MsgType::StartGame) {
+                        started = true;   // client: host kicked off the game
+                    }
+                }
+            }
+            // Client: push our look to the host once we have an id (and again on edits via a dirty flag would be nicer).
+            if (net.role == dc::net::Role::Client && my_id != 0 && !sent_look) {
+                unsigned char b[1 + 4 + sizeof(dc::game::Appearance)];
+                b[0] = static_cast<unsigned char>(dc::net::MsgType::Appearance);
+                std::memcpy(b + 1, &my_id, 4); std::memcpy(b + 5, &my_look, sizeof my_look);
+                net.send_to_host(b, sizeof b, true); sent_look = true;
+            }
+
+            // --- Mouse + UI ---
+            int ww, wh; window.window_size(ww, wh);
+            float mx, my; input.mouse_pos(mx, my);
+            const float nx = ww > 0 ? (mx / ww) * 2.0f - 1.0f : 0.0f;
+            const float ny = wh > 0 ? 1.0f - (my / wh) * 2.0f : 0.0f;
+            const bool lmb = input.mouse_down(SDL_BUTTON_LEFT);
+            const float aspect = (wh > 0) ? static_cast<float>(ww) / wh : 1.0f;
+            bool dirty = false;
+
+            const bool in_canvas = nx >= CAN_X0 && nx <= CAN_X1 && ny >= CAN_Y0 && ny <= CAN_Y1;
+            // Paint the face canvas (drag with the pen). Map cursor -> cell, splat the brush.
+            if (lmb && in_canvas) {
+                const float u = (nx - CAN_X0) / (CAN_X1 - CAN_X0);
+                const float v = (ny - CAN_Y1) / (CAN_Y0 - CAN_Y1);   // top->0
+                const int cc = static_cast<int>(u * dc::game::FACE_W);
+                const int cr = static_cast<int>(v * dc::game::FACE_H);
+                for (int dy = -(pen_radius - 1); dy <= pen_radius - 1; ++dy)
+                    for (int dx = -(pen_radius - 1); dx <= pen_radius - 1; ++dx) {
+                        const int px = cc + dx, py = cr + dy;
+                        if (px < 0 || px >= dc::game::FACE_W || py < 0 || py >= dc::game::FACE_H) continue;
+                        my_look.face[py * dc::game::FACE_W + px] = static_cast<uint8_t>(pen_color);
+                    }
+                dirty = true;
+            }
+            // Drag outside the canvas (on the preview) spins the character.
+            if (lmb && !in_canvas && (drag_rot || !paint_prev)) { drag_rot = true; preview_yaw += input.mouse_dx * 0.01f; }
+            if (!lmb) drag_rot = false;
+
+            // Clickable widgets (edge-triggered on press).
+            const bool click = lmb && !paint_prev;
+            auto hit = [&](float x0, float y0, float x1, float y1) { return nx >= x0 && nx <= x1 && ny >= y0 && ny <= y1; };
+            // Skin swatches (row), pen colors (row), pen radii, bone +/- , clear, START.
+            // Layout is built in the draw pass below; here we just test the same rects.
+            const float sw = 0.05f, sgap = 0.065f;
+            // Skin row at y ~ -0.40
+            for (int i = 0; i < dc::game::SKIN_N; ++i) {
+                const float x0 = -0.92f + i * sgap;
+                if (click && hit(x0, -0.45f, x0 + sw, -0.45f + sw * aspect)) { skin_idx = i; dc::game::skin_rgb(i, my_look.skin[0], my_look.skin[1], my_look.skin[2]); dirty = true; }
+            }
+            // Pen color row at y ~ -0.58
+            for (int i = 1; i < dc::game::PALETTE_N; ++i) {
+                const float x0 = -0.92f + (i - 1) * sgap;
+                if (click && hit(x0, -0.63f, x0 + sw, -0.63f + sw * aspect)) pen_color = i;
+            }
+            if (click && hit(-0.92f + (dc::game::PALETTE_N - 1) * sgap, -0.63f, -0.92f + (dc::game::PALETTE_N - 1) * sgap + sw, -0.63f + sw * aspect)) pen_color = 0;  // eraser
+            // Pen radius buttons (1..3) at y ~ -0.76
+            for (int r = 1; r <= 3; ++r) {
+                const float x0 = -0.92f + (r - 1) * sgap;
+                if (click && hit(x0, -0.80f, x0 + sw, -0.80f + sw * aspect)) pen_radius = r;
+            }
+            // Bone scale -/+ for head/arms/hands/torso (two columns of buttons), y from -0.05 down.
+            float* bones[4] = { &my_look.bone_head, &my_look.bone_arms, &my_look.bone_hands, &my_look.bone_torso };
+            for (int b = 0; b < 4; ++b) {
+                const float by = 0.30f - b * 0.10f;
+                if (click && hit(-0.55f, by, -0.51f, by + 0.06f)) { *bones[b] = std::max(0.4f, *bones[b] - 0.15f); dirty = true; }
+                if (click && hit(-0.30f, by, -0.26f, by + 0.06f)) { *bones[b] = std::min(2.5f, *bones[b] + 0.15f); dirty = true; }
+            }
+            // Clear face
+            if (click && hit(-0.92f, -0.92f, -0.74f, -0.86f)) { std::memset(my_look.face, 0, sizeof my_look.face); dirty = true; }
+            // START / WAITING
+            const bool can_start = (net.role != dc::net::Role::Client);
+            if (click && can_start && hit(0.55f, -0.92f, 0.90f, -0.80f)) {
+                dc::game::save_appearance(my_look, APPEARANCE_PATH);   // persist as default
+                if (net.role == dc::net::Role::Host) {
+                    unsigned char b[1]; b[0] = static_cast<unsigned char>(dc::net::MsgType::StartGame);
+                    net.broadcast(b, sizeof b, true);
+                }
+                started = true;
+            }
+            paint_prev = lmb;
+            // Keep my own look entry in sync for rendering + relays.
+            look_for(my_id) = my_look;
+            if (dirty && net.role == dc::net::Role::Client && my_id != 0) sent_look = false;  // resend edits
+
+            // --- Render: 3D character preview + 2D UI ---
+            int fbw, fbh; window.framebuffer_size(fbw, fbh);
+            renderer.begin_frame(*map, camera, player, dt, fbw, fbh);
+            renderer.set_ambient(2.6f);                                 // bright fill so the preview is lit
+            { float lp[3] = {0,0,0}, lc[3] = {0,0,0}, lr[1] = {1}; renderer.set_lights(0, lp, lc, lr); }
+            // Pose the model at rest, scaled by the silly bones, in front of the camera.
+            {
+                std::vector<BoneSave> saves; push_bones(my_look, saves);
+                std::vector<dc::renderer::AnimLayer> el;
+                dc::renderer::pose_model(model_data, el, 0.0f, part_world);
+                vec3 fwd; player.front(fwd); fwd[1] = 0.0f;
+                float fl = std::sqrt(fwd[0]*fwd[0] + fwd[2]*fwd[2]); if (fl > 1e-4f) { fwd[0] /= fl; fwd[2] /= fl; }
+                const float feet = player.position[1] - dc::world::EYE_HEIGHT;
+                vec3 ppos = { player.position[0] + fwd[0]*2.6f, feet, player.position[2] + fwd[2]*2.6f };
+                const float base_ang = std::atan2(fwd[2], fwd[0]);   // face the camera by default
+                const float ang = base_ang + preview_yaw;
+                mat4 place; glm_mat4_identity(place);
+                glm_translate(place, ppos);
+                glm_rotate_y(place, ang + glm_rad(-90.0f), place);   // MODEL_YAW_OFFSET
+                vec3 skin = { my_look.skin[0], my_look.skin[1], my_look.skin[2] };
+                renderer.draw_model(player_model, part_world, place, skin);
+                pop_bones(saves);
+                // Face plate on the front of the head, facing the camera (toward -fwd).
+                vec3 facing = { -fwd[0], 0.0f, -fwd[2] };   // points at the camera
+                // rotate facing by preview_yaw around Y so it tracks the spin
+                const float cs = std::cos(preview_yaw), sn = std::sin(preview_yaw);
+                vec3 fr = { facing[0]*cs - facing[2]*sn, 0.0f, facing[0]*sn + facing[2]*cs };
+                vec3 up = { 0.0f, 1.0f, 0.0f };
+                vec3 right = { fr[2], 0.0f, -fr[0] };
+                const float headY = feet + 1.45f * my_look.bone_torso;
+                vec3 hc = { ppos[0] + fr[0]*0.28f, headY, ppos[2] + fr[2]*0.28f };
+                std::vector<float> fcol[dc::game::PALETTE_N];
+                append_face(fcol, hc, fr, right, up, 0.030f * my_look.bone_head, my_look);
+                draw_faces(fcol);
+            }
+
+            // 2D UI overlay.
+            std::vector<float> hud;
+            auto rect = [&](float x0,float y0,float x1,float y1,float r,float g,float b,float a){
+                hud.insert(hud.end(), { x0,y0,0,r,g,b,a, x1,y0,0,r,g,b,a, x1,y1,0,r,g,b,a,
+                                        x0,y0,0,r,g,b,a, x1,y1,0,r,g,b,a, x0,y1,0,r,g,b,a }); };
+            rect(-0.98f, -0.98f, -0.20f, 0.66f, 0.06f, 0.07f, 0.10f, 0.55f);   // left panel backing
+            // Face canvas: dim board + painted cells.
+            rect(CAN_X0 - 0.012f, CAN_Y0 - 0.012f, CAN_X1 + 0.012f, CAN_Y1 + 0.012f, 0.9f, 0.9f, 0.95f, 0.9f);
+            rect(CAN_X0, CAN_Y0, CAN_X1, CAN_Y1, 0.16f, 0.16f, 0.2f, 1.0f);
+            {
+                const float cw = (CAN_X1 - CAN_X0) / dc::game::FACE_W, ch = (CAN_Y1 - CAN_Y0) / dc::game::FACE_H;
+                for (int row = 0; row < dc::game::FACE_H; ++row)
+                    for (int col = 0; col < dc::game::FACE_W; ++col) {
+                        const int idx = my_look.face[row * dc::game::FACE_W + col];
+                        if (idx <= 0) continue;
+                        float r,g,b; dc::game::palette_rgb(idx, r, g, b);
+                        const float x0 = CAN_X0 + col * cw, y1c = CAN_Y1 - row * ch;
+                        rect(x0, y1c - ch, x0 + cw, y1c, r, g, b, 1.0f);
+                    }
+            }
+            // Skin swatches.
+            for (int i = 0; i < dc::game::SKIN_N; ++i) {
+                float r,g,b; dc::game::skin_rgb(i, r, g, b);
+                const float x0 = -0.92f + i * sgap;
+                if (i == skin_idx) rect(x0 - 0.006f, -0.456f, x0 + sw + 0.006f, -0.45f + sw*aspect + 0.006f, 1,1,1,1);
+                rect(x0, -0.45f, x0 + sw, -0.45f + sw*aspect, r, g, b, 1.0f);
+            }
+            // Pen colors + eraser.
+            for (int i = 1; i < dc::game::PALETTE_N; ++i) {
+                float r,g,b; dc::game::palette_rgb(i, r, g, b);
+                const float x0 = -0.92f + (i - 1) * sgap;
+                if (i == pen_color) rect(x0 - 0.006f, -0.636f, x0 + sw + 0.006f, -0.63f + sw*aspect + 0.006f, 1,1,1,1);
+                rect(x0, -0.63f, x0 + sw, -0.63f + sw*aspect, r, g, b, 1.0f);
+            }
+            { const float x0 = -0.92f + (dc::game::PALETTE_N - 1) * sgap;   // eraser
+              if (pen_color == 0) rect(x0 - 0.006f, -0.636f, x0 + sw + 0.006f, -0.63f + sw*aspect + 0.006f, 1,1,1,1);
+              rect(x0, -0.63f, x0 + sw, -0.63f + sw*aspect, 0.3f, 0.3f, 0.34f, 1.0f); }
+            // Pen radius.
+            for (int r = 1; r <= 3; ++r) {
+                const float x0 = -0.92f + (r - 1) * sgap;
+                if (r == pen_radius) rect(x0 - 0.006f, -0.806f, x0 + sw + 0.006f, -0.80f + sw*aspect + 0.006f, 1,1,1,1);
+                rect(x0, -0.80f, x0 + sw, -0.80f + sw*aspect, 0.5f, 0.5f, 0.55f, 1.0f);
+                const float d = 0.006f * r;   // dot grows with radius
+                rect((x0 + x0 + sw)*0.5f - d, (-0.80f + (-0.80f + sw*aspect))*0.5f - d*aspect,
+                     (x0 + x0 + sw)*0.5f + d, (-0.80f + (-0.80f + sw*aspect))*0.5f + d*aspect, 0.1f,0.1f,0.1f,1.0f);
+            }
+            // Bone scale -/+ buttons.
+            for (int b = 0; b < 4; ++b) {
+                const float by = 0.30f - b * 0.10f;
+                rect(-0.55f, by, -0.51f, by + 0.06f, 0.7f, 0.3f, 0.3f, 1.0f);    // -
+                rect(-0.30f, by, -0.26f, by + 0.06f, 0.3f, 0.7f, 0.3f, 1.0f);    // +
+            }
+            // Clear + START buttons.
+            rect(-0.92f, -0.92f, -0.74f, -0.86f, 0.5f, 0.3f, 0.3f, 1.0f);
+            const bool can_start2 = (net.role != dc::net::Role::Client);
+            rect(0.55f, -0.92f, 0.90f, -0.80f, can_start2 ? 0.2f : 0.3f, can_start2 ? 0.7f : 0.3f, 0.3f, 1.0f);
+            renderer.draw_hud(hud);
+
+            // Text labels.
+            vec3 white = {0.95f,0.95f,1.0f}, gold = {1.0f,0.85f,0.3f};
+            renderer.draw_text("CUSTOMIZE", -0.92f, 0.6f, 26.0f, gold, 1.0f, fbw, fbh);
+            renderer.draw_text("Skin", -0.92f, -0.37f, 16.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("Pen", -0.92f, -0.55f, 16.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("Size", -0.92f, -0.72f, 16.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("Clear", -0.90f, -0.845f, 14.0f, white, 1.0f, fbw, fbh);
+            const char* bn[4] = { "Head", "Arms", "Hands", "Torso" };
+            float* bvals[4] = { &my_look.bone_head, &my_look.bone_arms, &my_look.bone_hands, &my_look.bone_torso };
+            for (int b = 0; b < 4; ++b) {
+                const float by = 0.30f - b * 0.10f;
+                renderer.draw_text("-", -0.537f, by + 0.004f, 20.0f, white, 1.0f, fbw, fbh);   // red box
+                renderer.draw_text("+", -0.288f, by + 0.004f, 20.0f, white, 1.0f, fbw, fbh);   // green box
+                renderer.draw_text(bn[b], -0.495f, by + 0.012f, 12.0f, white, 1.0f, fbw, fbh);
+                char vv[8]; std::snprintf(vv, sizeof vv, "%.1fx", *bvals[b]);
+                renderer.draw_text(vv, -0.41f, by + 0.012f, 12.0f, gold, 1.0f, fbw, fbh);
+            }
+            renderer.draw_text("Silly Bones  (tap - / +)", -0.55f, 0.42f, 15.0f, gold, 1.0f, fbw, fbh);
+            renderer.draw_text("Drag the character to spin it", -0.18f, 0.66f, 13.0f, white, 1.0f, fbw, fbh);
+            if (net.role == dc::net::Role::Client) {
+                renderer.draw_text("Waiting for host to start...", 0.45f, -0.86f, 16.0f, gold, 1.0f, fbw, fbh);
+            } else {
+                renderer.draw_text("START", 0.60f, -0.875f, 20.0f, white, 1.0f, fbw, fbh);
+                char ct[48]; std::snprintf(ct, sizeof ct, "Players: %d", 1 + static_cast<int>(host_clients.size()));
+                renderer.draw_text(ct, 0.55f, -0.75f, 15.0f, white, 1.0f, fbw, fbh);
+            }
+            window.swap();
+        }
+        if (!running) { net.shutdown(); return 0; }
+        window.set_relative_mouse(true);   // back to mouselook for the game
+        look_for(my_id) = my_look;         // keep peer looks gathered in the lobby; refresh mine
+    }
+
     uint64_t prev = SDL_GetTicksNS();
     while (running) {
         running = window.pump_events(input);
@@ -843,6 +1264,13 @@ int main(int argc, char** argv) {
                     buf[0] = static_cast<unsigned char>(dc::net::MsgType::AssignId);
                     std::memcpy(buf + 1, &hc.id, 4);
                     net.broadcast(buf, sizeof buf, true);   // (2-player: only one client to hear it)
+                    // Send the newcomer everyone's appearance (host + already-known peers).
+                    for (auto& kv : looks) {
+                        unsigned char b[1 + 4 + sizeof(dc::game::Appearance)];
+                        b[0] = static_cast<unsigned char>(dc::net::MsgType::Appearance);
+                        std::memcpy(b + 1, &kv.first, 4); std::memcpy(b + 5, &kv.second, sizeof kv.second);
+                        net.send_to_peer(ev.peer, b, sizeof b, true);
+                    }
                     std::printf("[net] client connected -> id %u\n", hc.id);
                 }
             } else if (ev.type == dc::net::Event::Disconnect) {
@@ -877,18 +1305,19 @@ int main(int argc, char** argv) {
                         hc.orbit_duration = oc.duration; hc.orbit_radius = oc.radius;
                         hc.orbit_hit_radius = oc.hit_radius; hc.orbit_damage = oc.damage;
                         hc.orbit_knockback = oc.knockback; hc.orbit_count = oc.count;
+                        hc.orbit_tick = oc.tick > 0.0f ? oc.tick : 0.25f; hc.orbit_spin_mult = oc.spin > 0.0f ? oc.spin : 1.0f;
                         break;
                     }
                 } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::ThrownCast
                            && ev.data.size() >= 1 + sizeof(dc::net::ThrownCast)) {
                     dc::net::ThrownCast tc; std::memcpy(&tc, ev.data.data() + 1, sizeof tc);
                     for (auto& hc : host_clients) if (hc.peer == ev.peer) {
-                        hc.thrown_active = true; hc.thrown_returning = false;
-                        hc.thrown_traveled = 0.0f; hc.thrown_spin = 0.0f; hc.thrown_hits.clear();
-                        hc.thrown_pos[0] = tc.ox; hc.thrown_pos[1] = tc.oy; hc.thrown_pos[2] = tc.oz;
-                        hc.thrown_dir[0] = tc.dx; hc.thrown_dir[1] = tc.dy; hc.thrown_dir[2] = tc.dz;
-                        hc.throw_speed = tc.speed; hc.throw_distance = tc.distance; hc.throw_radius = tc.radius;
-                        hc.throw_damage = tc.damage; hc.throw_knockback = tc.knockback; hc.thrown_size = tc.size;
+                        HostClient::HcThrown t;   // append a sword (a Swordstorm volley sends several casts)
+                        t.pos[0] = tc.ox; t.pos[1] = tc.oy; t.pos[2] = tc.oz;
+                        t.dir[0] = tc.dx; t.dir[1] = tc.dy; t.dir[2] = tc.dz;
+                        t.speed = tc.speed; t.distance = tc.distance; t.radius = tc.radius;
+                        t.damage = tc.damage; t.knockback = tc.knockback; t.size = tc.size;
+                        hc.throwns.push_back(std::move(t));
                         break;
                     }
                 } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::DashCast
@@ -960,6 +1389,25 @@ int main(int argc, char** argv) {
                             net.send_to_peer(ev.peer, gbuf, sizeof gbuf, true);
                         }
                     }
+                } else if (mt == dc::net::MsgType::Appearance && ev.data.size() >= 5 + sizeof(dc::game::Appearance)) {
+                    uint32_t id; std::memcpy(&id, ev.data.data() + 1, 4);
+                    dc::game::Appearance a; std::memcpy(&a, ev.data.data() + 5, sizeof a);
+                    look_for(id) = a;
+                    if (net.role == dc::net::Role::Host)   // relay a client's look to the others
+                        for (auto& hc : host_clients) if (hc.id != id) {
+                            unsigned char b[1 + 4 + sizeof a];
+                            b[0] = static_cast<unsigned char>(dc::net::MsgType::Appearance);
+                            std::memcpy(b + 1, &id, 4); std::memcpy(b + 5, &a, sizeof a);
+                            net.send_to_peer(hc.peer, b, sizeof b, true);
+                        }
+                } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::Taunt
+                           && ev.data.size() >= 1 + sizeof(dc::net::TauntState)) {
+                    dc::net::TauntState ts; std::memcpy(&ts, ev.data.data() + 1, sizeof ts);
+                    spawn_taunt(ts.x, ts.y, ts.z, ts.idx, false);   // float + speak locally (don't re-broadcast)
+                } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::XpGranted
+                           && ev.data.size() >= 1 + sizeof(float)) {
+                    float amount; std::memcpy(&amount, ev.data.data() + 1, sizeof amount);
+                    add_xp(amount);   // gain XP + level up locally (with our own upgrade choices)
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::DroneGranted) {
                     if (player.minion_count < 4) player.minion_count++;   // got the drone
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::ItemGranted
@@ -1007,9 +1455,7 @@ int main(int argc, char** argv) {
                             r.punch_time = s.punch_time; r.block_time = s.block_time;
                             r.hit_flash = s.hit_flash; r.sword_scale = s.sword_scale;
                             r.burning = s.burning != 0;
-                            r.thrown_active = s.thrown_active != 0;
-                            r.thrown_x = s.thrown_x; r.thrown_y = s.thrown_y; r.thrown_z = s.thrown_z;
-                            r.thrown_spin = s.thrown_spin; r.thrown_size = s.thrown_size;
+                            // thrown swords are filled from the owner-keyed ThrownState list below
                             r.bash_active = s.bash_active != 0; r.bash_radius = s.bash_radius;
                             r.orbit_active = s.orbit_active != 0; r.orbit_count = s.orbit_count;
                             r.orbit_angle = s.orbit_angle; r.orbit_spin = s.orbit_spin; r.orbit_radius = s.orbit_radius;
@@ -1032,6 +1478,7 @@ int main(int argc, char** argv) {
                         en.kind = static_cast<dc::entity::EnemyKind>(e.kind);
                         en.burn_time = (e.status & 1) ? 1.0f : 0.0f;   // sentinels so the render emits fire/ice
                         en.slow_time = (e.status & 2) ? 1.0f : 0.0f;
+                        en.elite     = (e.status & 4) != 0;            // golden elite (bigger + aura)
                         entities.items.push_back(en);
                     }
                     uint32_t nc = read_u32();
@@ -1039,6 +1486,27 @@ int main(int argc, char** argv) {
                     for (uint32_t k = 0; k < nc; ++k) {
                         dc::net::CoinState c; std::memcpy(&c, p, sizeof c); p += sizeof c;
                         Coin co; co.pos[0] = c.x; co.pos[1] = 0.0f; co.pos[2] = c.z; coins.push_back(co);
+                    }
+                    // XP orbs: render-only mirror (host owns pickups; we just draw them).
+                    uint32_t nxo = read_u32();
+                    xp_orbs.clear();
+                    for (uint32_t k = 0; k < nxo; ++k) {
+                        dc::net::XPOrbState xs; std::memcpy(&xs, p, sizeof xs); p += sizeof xs;
+                        XPOrb o; o.pos[0] = xs.x; o.pos[1] = 0.0f; o.pos[2] = xs.z;
+                        o.bob = (k * 1.2566f);   // vary the shimmer phase per orb
+                        xp_orbs.push_back(o);
+                    }
+                    // Thrown swords (owner-keyed): distribute to each remote; skip our own id
+                    // (we predict our own swords locally).
+                    for (auto& r : remotes) r.throwns.clear();
+                    uint32_t nth = read_u32();
+                    for (uint32_t k = 0; k < nth; ++k) {
+                        dc::net::ThrownState ts; std::memcpy(&ts, p, sizeof ts); p += sizeof ts;
+                        if (ts.owner == my_id) continue;
+                        for (auto& r : remotes) if (r.id == ts.owner) {
+                            r.throwns.push_back({ ts.x, ts.y, ts.z, ts.spin, ts.size });
+                            break;
+                        }
                     }
                     // Chest open-state (same map order as ours): mirror the host's opens.
                     uint32_t nh = read_u32();
@@ -1061,7 +1529,7 @@ int main(int argc, char** argv) {
                         dc::entity::Projectile pr;
                         pr.pos[0] = ps.x; pr.pos[1] = ps.y; pr.pos[2] = ps.z;
                         pr.color[0] = ps.r; pr.color[1] = ps.g; pr.color[2] = ps.b;
-                        pr.vel[0] = ps.vx; pr.vel[1] = ps.vy; pr.vel[2] = ps.vz; pr.beam = ps.beam != 0;
+                        pr.vel[0] = ps.vx; pr.vel[1] = ps.vy; pr.vel[2] = ps.vz; pr.radius = ps.radius; pr.beam = ps.beam != 0;
                         entities.projectiles.push_back(pr);
                     }
                     // Damage numbers spawned by the host this tick: float them locally.
@@ -1301,6 +1769,7 @@ int main(int argc, char** argv) {
                 oc.hit_radius = w.orbit_hit_radius * player.sword_scale;
                 oc.damage = w.orbit_damage * player.damage_mult; oc.knockback = player.stats.knockback;
                 oc.count = w.orbit_count;
+                oc.tick = 0.25f * player.orbit_tick_mult; oc.spin = player.orbit_spin_mult;
                 unsigned char buf[1 + sizeof oc];
                 buf[0] = static_cast<unsigned char>(dc::net::MsgType::OrbitCast);
                 std::memcpy(buf + 1, &oc, sizeof oc);
@@ -1710,34 +2179,40 @@ int main(int argc, char** argv) {
         // player's specials), and broadcasts the state. No trust in a per-frame stream.
         if (net.role == dc::net::Role::Host) {
             for (auto& hc : host_clients) {
-                // Thrown sword: fly out along the cast dir, then boomerang to the client's
-                // live body; damage (2D xz) once per leg via the per-client hit set.
-                if (hc.thrown_active) {
-                    hc.thrown_spin += 22.0f * dt;
-                    const float step = hc.throw_speed * dt;
-                    if (!hc.thrown_returning) {
-                        hc.thrown_pos[0] += hc.thrown_dir[0]*step; hc.thrown_pos[1] += hc.thrown_dir[1]*step; hc.thrown_pos[2] += hc.thrown_dir[2]*step;
-                        hc.thrown_traveled += step;
-                        if (hc.thrown_traveled >= hc.throw_distance) { hc.thrown_returning = true; hc.thrown_hits.clear(); }
+                // Thrown swords: fly out along each cast dir, then boomerang to the client's
+                // live body; damage (2D xz) once per leg via each sword's own hit set. A
+                // Swordstorm volley puts several in flight at once.
+                for (auto& t : hc.throwns) {
+                    t.spin += 22.0f * dt;
+                    const float step = t.speed * dt;
+                    bool caught = false;
+                    if (!t.returning) {
+                        t.pos[0] += t.dir[0]*step; t.pos[1] += t.dir[1]*step; t.pos[2] += t.dir[2]*step;
+                        t.traveled += step;
+                        if (t.traveled >= t.distance) { t.returning = true; t.hit_ids.clear(); }
                     } else {
-                        const float bx = hc.body.position[0]-hc.thrown_pos[0], by = hc.body.position[1]-hc.thrown_pos[1], bz = hc.body.position[2]-hc.thrown_pos[2];
+                        const float bx = hc.body.position[0]-t.pos[0], by = hc.body.position[1]-t.pos[1], bz = hc.body.position[2]-t.pos[2];
                         const float bd = std::sqrt(bx*bx + by*by + bz*bz);
-                        if (bd < 1.0f) hc.thrown_active = false;
-                        else { hc.thrown_pos[0]+=bx/bd*step; hc.thrown_pos[1]+=by/bd*step; hc.thrown_pos[2]+=bz/bd*step; }
+                        if (bd < 1.0f) caught = true;
+                        else { t.pos[0]+=bx/bd*step; t.pos[1]+=by/bd*step; t.pos[2]+=bz/bd*step; }
                     }
-                    if (hc.thrown_active) {
-                        vec3 tp = { hc.thrown_pos[0], 0.0f, hc.thrown_pos[2] };
-                        hc.damage_dealt += dc::entity::radius_attack(entities, tp, hc.throw_radius, hc.throw_damage, hc.throw_knockback, hc.thrown_hits, &frame_hits);
-                    }
+                    if (!caught) {
+                        vec3 tp = { t.pos[0], 0.0f, t.pos[2] };
+                        hc.damage_dealt += dc::entity::radius_attack(entities, tp, t.radius, t.damage, t.knockback, t.hit_ids, &frame_hits);
+                    } else t.speed = -1.0f;   // mark for removal
                 }
-                // Orbit: revolve + tick damage on the host's own 0.25s cadence.
+                for (std::size_t i = 0; i < hc.throwns.size();) {   // drop caught swords
+                    if (hc.throwns[i].speed < 0.0f) { hc.throwns[i] = hc.throwns.back(); hc.throwns.pop_back(); }
+                    else ++i;
+                }
+                // Orbit: revolve + tick damage on the host's cadence (Orbit Tempo carried in the cast).
                 if (hc.orbit_active) {
                     hc.orbit_time += dt;
-                    hc.orbit_angle += 3.0f * dt;
-                    hc.orbit_spin  += 22.0f * dt;
+                    hc.orbit_angle += 3.0f * hc.orbit_spin_mult * dt;
+                    hc.orbit_spin  += 22.0f * hc.orbit_spin_mult * dt;
                     hc.orbit_tick_cd -= dt;
                     if (hc.orbit_tick_cd <= 0.0f) {
-                        hc.orbit_tick_cd = 0.25f;
+                        hc.orbit_tick_cd = hc.orbit_tick;
                         hc.orbit_hits.clear();
                         for (int i = 0; i < hc.orbit_count; ++i) {
                             float a = hc.orbit_angle + (6.2831853f * i) / hc.orbit_count;
@@ -2041,9 +2516,8 @@ int main(int argc, char** argv) {
                 r.punch_time = hc.input.punch_time; r.block_time = hc.input.block_time;
                 r.hit_flash = hc.body.hit_flash; r.sword_scale = hc.input.sword_scale;
                 r.damage_dealt = static_cast<float>(hc.damage_dealt);
-                r.thrown_active = hc.thrown_active;
-                r.thrown_x = hc.thrown_pos[0]; r.thrown_y = hc.thrown_pos[1]; r.thrown_z = hc.thrown_pos[2];
-                r.thrown_spin = hc.thrown_spin; r.thrown_size = hc.thrown_size;
+                for (const auto& t : hc.throwns)
+                    r.throwns.push_back({ t.pos[0], t.pos[1], t.pos[2], t.spin, t.size });
                 r.orbit_active = hc.orbit_active; r.orbit_count = hc.orbit_count;
                 r.orbit_angle = hc.orbit_angle; r.orbit_spin = hc.orbit_spin;
                 r.orbit_radius = hc.orbit_radius;
@@ -2140,6 +2614,30 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Loot repulsion: coins + XP orbs gently shove each other apart (like magnets)
+        // so a drop pile spreads into a readable layout instead of stacking. Host/
+        // standalone only — clients get the spread-out positions via the snapshot.
+        if (net.role != dc::net::Role::Client) {
+            std::vector<float*> lx, lz;
+            lx.reserve(coins.size() + xp_orbs.size()); lz.reserve(coins.size() + xp_orbs.size());
+            for (auto& c : coins)   { lx.push_back(&c.pos[0]); lz.push_back(&c.pos[2]); }
+            for (auto& o : xp_orbs) { lx.push_back(&o.pos[0]); lz.push_back(&o.pos[2]); }
+            const std::size_t n = lx.size();
+            if (n > 1 && n <= 400) {           // O(n^2); cap so a huge pile can't stall a frame
+                const float SEP = 0.55f, PUSH = 2.5f;
+                for (std::size_t a = 0; a < n; ++a)
+                    for (std::size_t b = a + 1; b < n; ++b) {
+                        float dx = *lx[b] - *lx[a], dz = *lz[b] - *lz[a];
+                        float d2 = dx * dx + dz * dz;
+                        if (d2 > SEP * SEP) continue;
+                        if (d2 < 1e-6f) { *lx[a] -= 0.02f; *lx[b] += 0.02f; continue; }   // exact overlap: split
+                        float d = std::sqrt(d2), step = (SEP - d) * 0.5f * PUSH * dt / d;
+                        *lx[a] -= dx * step; *lz[a] -= dz * step;
+                        *lx[b] += dx * step; *lz[b] += dz * step;
+                    }
+            }
+        }
+
         // Coins: settle briefly (so they're always visible), then magnet toward the
         // NEAREST player and collect on contact into that player's own wallet
         // (per-player economy). Host-authoritative; clients render replicated coins
@@ -2179,34 +2677,42 @@ int main(int argc, char** argv) {
             }
         }
 
-        // XP orbs: settle briefly, then magnet to the LOCAL player and grant XP on
-        // contact. Filling the bar levels you up (queued so a big absorb can grant
-        // several picks at once). XP/levels are local per-player progression.
-        auto add_xp = [&](float amount) {
-            player.xp += amount;
-            while (player.xp >= player.xp_to_next) {
-                player.xp -= player.xp_to_next;
-                player.level++;
-                player.xp_to_next = dc::entity::xp_for_level(player.level);
-                pending_levelups++;
-            }
-        };
-        {
+        // XP orbs: host-authoritative like coins. Settle, then magnet to the nearest
+        // living player and grant XP on contact — to the host player directly, or to a
+        // client via a reliable XpGranted event so it levels up on its own screen with
+        // its own (client-side) upgrade choices. Clients just render the replicated orbs.
+        if (net.role != dc::net::Role::Client) {
+            struct XpCollector { float x, z; int client_idx; };   // client_idx < 0 => host/local player
+            std::vector<XpCollector> cols;
+            if (!dead) cols.push_back({ player.position[0], player.position[2], -1 });
+            for (std::size_t c = 0; c < host_clients.size(); ++c)
+                if (host_clients[c].body.health > 0.0f)
+                    cols.push_back({ host_clients[c].body.position[0], host_clients[c].body.position[2], static_cast<int>(c) });
             const float XP_MAGNET = 3.2f, XP_COLLECT = 0.7f, XP_SPEED = 9.0f, XP_SETTLE = 0.25f;
-            for (std::size_t i = 0; i < xp_orbs.size();) {
+            for (std::size_t i = 0; i < xp_orbs.size() && !cols.empty();) {
                 xp_orbs[i].age += dt;
-                if (xp_orbs[i].age < XP_SETTLE || dead) { ++i; continue; }
-                const float dx = player.position[0] - xp_orbs[i].pos[0];
-                const float dz = player.position[2] - xp_orbs[i].pos[2];
-                const float d = std::sqrt(dx * dx + dz * dz);
-                if (d < XP_COLLECT) {
-                    add_xp(xp_orbs[i].value);
+                if (xp_orbs[i].age < XP_SETTLE) { ++i; continue; }
+                int best = 0; float best_d = 1e30f, bdx = 0.0f, bdz = 0.0f;
+                for (std::size_t c = 0; c < cols.size(); ++c) {
+                    const float dx = cols[c].x - xp_orbs[i].pos[0], dz = cols[c].z - xp_orbs[i].pos[2];
+                    const float d = std::sqrt(dx * dx + dz * dz);
+                    if (d < best_d) { best_d = d; best = static_cast<int>(c); bdx = dx; bdz = dz; }
+                }
+                if (best_d < XP_COLLECT) {
+                    const float val = xp_orbs[i].value;
+                    if (cols[best].client_idx < 0) add_xp(val);   // host player levels up locally
+                    else {                                        // tell the client to gain XP + level up
+                        unsigned char buf[1 + sizeof(float)];
+                        buf[0] = static_cast<unsigned char>(dc::net::MsgType::XpGranted);
+                        std::memcpy(buf + 1, &val, sizeof(float));
+                        net.send_to_peer(host_clients[cols[best].client_idx].peer, buf, sizeof buf, true);
+                    }
                     xp_orbs[i] = xp_orbs.back(); xp_orbs.pop_back(); continue;
                 }
-                if (d < XP_MAGNET && d > 1e-4f) {
+                if (best_d < XP_MAGNET && best_d > 1e-4f) {
                     const float step = XP_SPEED * dt;
-                    xp_orbs[i].pos[0] += dx / d * step;
-                    xp_orbs[i].pos[2] += dz / d * step;
+                    xp_orbs[i].pos[0] += bdx / best_d * step;
+                    xp_orbs[i].pos[2] += bdz / best_d * step;
                 }
                 ++i;
             }
@@ -2234,11 +2740,7 @@ int main(int argc, char** argv) {
               s.punch_time = punch_time; s.block_time = block_time;
               s.hit_flash = player.hit_flash; s.sword_scale = player.sword_scale;
               s.burning = player.burn_time > 0.0f ? 1 : 0;
-              if (!throwns.empty() && player.weapon) {   // remotes see the lead sword of a volley
-                  const auto& th = throwns.front();
-                  s.thrown_active = 1; s.thrown_x = th.pos[0]; s.thrown_y = th.pos[1]; s.thrown_z = th.pos[2];
-                  s.thrown_spin = th.spin; s.thrown_size = player.weapon->throw_size;
-              }
+              // (thrown swords ride the owner-keyed ThrownState list below, not PlayerState)
               if (orbit.active && player.weapon) {
                   s.orbit_active = 1; s.orbit_count = player.weapon->orbit_count;
                   s.orbit_angle = orbit.angle; s.orbit_spin = orbit.spin; s.orbit_radius = player.weapon->orbit_radius;
@@ -2263,8 +2765,6 @@ int main(int argc, char** argv) {
                 s.punch_time = hc.input.punch_time; s.block_time = hc.input.block_time;
                 s.hit_flash = hc.body.hit_flash; s.sword_scale = hc.input.sword_scale;
                 s.burning = hc.body.burn_time > 0.0f ? 1 : 0;
-                s.thrown_active = hc.thrown_active ? 1 : 0; s.thrown_x = hc.thrown_pos[0]; s.thrown_y = hc.thrown_pos[1];
-                s.thrown_z = hc.thrown_pos[2]; s.thrown_spin = hc.thrown_spin; s.thrown_size = hc.thrown_size;
                 s.orbit_active = hc.orbit_active ? 1 : 0; s.orbit_count = hc.orbit_count;
                 s.orbit_angle = hc.orbit_angle; s.orbit_spin = hc.orbit_spin; s.orbit_radius = hc.orbit_radius;
                 s.bash_active = hc.bash_active ? 1 : 0; s.bash_radius = hc.bash_radius;
@@ -2280,11 +2780,26 @@ int main(int argc, char** argv) {
                 e.health01 = en.stats.max_health > 0.0f ? en.health / en.stats.max_health : 0.0f;
                 e.healthbar_time = en.healthbar_time;
                 e.attacking = en.attacking ? 1 : 0; e.kind = static_cast<uint8_t>(en.kind);
-                e.status = (en.burn_time > 0.0f ? 1 : 0) | (en.slow_time > 0.0f ? 2 : 0);
+                e.status = (en.burn_time > 0.0f ? 1 : 0) | (en.slow_time > 0.0f ? 2 : 0) | (en.elite ? 4 : 0);
                 put(&e, sizeof e);
             }
             uint32_t nc = static_cast<uint32_t>(coins.size()); put(&nc, 4);
             for (auto& c : coins) { dc::net::CoinState cs{}; cs.x = c.pos[0]; cs.z = c.pos[2]; put(&cs, sizeof cs); }
+            // XP orbs (render-only on clients; the host owns pickups + XP awards).
+            uint32_t nxo = static_cast<uint32_t>(xp_orbs.size()); put(&nxo, 4);
+            for (auto& o : xp_orbs) { dc::net::XPOrbState xs{}; xs.x = o.pos[0]; xs.z = o.pos[2]; put(&xs, sizeof xs); }
+            // In-flight thrown swords (owner-keyed): the host player's (owner 0) plus every
+            // client's, so each peer renders all of everyone's swords (minus its own, which
+            // it predicts locally).
+            {
+                std::vector<dc::net::ThrownState> ts;
+                if (player.weapon) for (const auto& th : throwns)
+                    ts.push_back({ th.pos[0], th.pos[1], th.pos[2], th.spin, player.weapon->throw_size, 0u });
+                for (auto& hc : host_clients) for (const auto& th : hc.throwns)
+                    ts.push_back({ th.pos[0], th.pos[1], th.pos[2], th.spin, th.size, hc.id });
+                uint32_t nth = static_cast<uint32_t>(ts.size()); put(&nth, 4);
+                for (auto& t : ts) put(&t, sizeof t);
+            }
             // Chest open-state (stable map order, so an index identifies the same chest
             // on every peer). One byte each — cheap, and lets clients render opens.
             uint32_t nh = static_cast<uint32_t>(chests.size()); put(&nh, 4);
@@ -2301,7 +2816,7 @@ int main(int argc, char** argv) {
             for (auto& pr : entities.projectiles) {
                 dc::net::ProjectileState ps{}; ps.x = pr.pos[0]; ps.y = pr.pos[1]; ps.z = pr.pos[2];
                 ps.r = pr.color[0]; ps.g = pr.color[1]; ps.b = pr.color[2];
-                ps.vx = pr.vel[0]; ps.vy = pr.vel[1]; ps.vz = pr.vel[2]; ps.beam = pr.beam ? 1 : 0;
+                ps.vx = pr.vel[0]; ps.vy = pr.vel[1]; ps.vz = pr.vel[2]; ps.radius = pr.radius; ps.beam = pr.beam ? 1 : 0;
                 put(&ps, sizeof ps);
             }
             // Damage numbers spawned this tick (so every client floats the same numbers).
@@ -2334,7 +2849,7 @@ int main(int argc, char** argv) {
 
         // Difficulty ramps with survival time: faster spawns + a higher cap.
         // (run_time resets on death, so this scales back down too.)
-        const float difficulty = 1.0f + run_time / 25.0f;   // +1x base every 25s
+        const float difficulty = 1.0f + run_time / 70.0f;   // +1x base every 70s (gentle ramp)
         const float night_mult = is_night() ? 3.0f : 1.0f;  // the horde swells after dark
         if (net.role != dc::net::Role::Client)               // host owns enemy spawning
             for (auto& sp : spawners) {
@@ -2342,6 +2857,48 @@ int main(int argc, char** argv) {
                 sp.max_alive = static_cast<int>(8 * difficulty * night_mult); // 8 = configured base cap
                 sp.update(dt, entities, *map);
             }
+
+        // Taunts: age out the live ones, and (host) occasionally pick a nearby attacking
+        // enemy to hurl an insult — rate-limited and capped so a big horde doesn't shout
+        // all at once. Each new taunt replicates to everyone (floating text + TTS).
+        for (std::size_t i = 0; i < taunts.size();) {
+            taunts[i].age += dt;
+            if (taunts[i].age >= TAUNT_LIFE) { taunts[i] = taunts.back(); taunts.pop_back(); }
+            else ++i;
+        }
+        if (net.role != dc::net::Role::Client) {
+            if (taunt_cd > 0.0f) taunt_cd -= dt;
+            if (taunt_cd <= 0.0f && static_cast<int>(taunts.size()) < MAX_TAUNTS) {
+                // Gather player positions (local + clients) to test "nearby".
+                float pxz[16][2]; int np = 0;
+                if (!dead) { pxz[np][0] = player.position[0]; pxz[np][1] = player.position[2]; ++np; }
+                for (auto& hc : host_clients) if (hc.body.health > 0.0f && np < 16) { pxz[np][0] = hc.body.position[0]; pxz[np][1] = hc.body.position[2]; ++np; }
+                // Find attacking enemies within range of any player; pick one at random.
+                int best = -1; int seen = 0;
+                for (std::size_t e = 0; e < entities.items.size(); ++e) {
+                    const auto& en = entities.items[e];
+                    if (en.type != dc::entity::EntityType::Enemy || !en.attacking) continue;
+                    bool near = false;
+                    for (int p = 0; p < np; ++p) {
+                        const float dx = en.position[0] - pxz[p][0], dz = en.position[2] - pxz[p][1];
+                        if (dx*dx + dz*dz <= TAUNT_RANGE * TAUNT_RANGE) { near = true; break; }
+                    }
+                    if (!near) continue;
+                    // Reservoir sample one candidate without building a list.
+                    ++seen; spark_rng = spark_rng * 1664525u + 1013904223u;
+                    if (static_cast<int>(spark_rng % static_cast<uint32_t>(seen)) == 0) best = static_cast<int>(e);
+                }
+                if (best >= 0) {
+                    const auto& en = entities.items[best];
+                    const float hy = terrain.height(en.position[0], en.position[2])
+                                   + (en.kind == dc::entity::EnemyKind::Flying ? dc::entity::FLY_HOVER + 1.4f : 2.4f);
+                    spark_rng = spark_rng * 1664525u + 1013904223u;
+                    const int idx = static_cast<int>(spark_rng % static_cast<uint32_t>(dc::game::taunt_count()));
+                    spawn_taunt(en.position[0], hy, en.position[2], idx, true);
+                    taunt_cd = TAUNT_INTERVAL;
+                }
+            }
+        }
 
         // Local player's hand-bone world position this frame (set at the sword render
         // below), so elemental sparks emit right off the blade.
@@ -2362,10 +2919,12 @@ int main(int argc, char** argv) {
         // Third person (default): pitch the BODY so your avatar hinges to aim, like remotes.
         // First person (V): head-look only (body undrawn; gear aims via the viewmodel tilt).
         const bool tp = !first_person;
+        std::vector<BoneSave> my_bone_saves; push_bones(my_look, my_bone_saves);   // silly proportions (baked into the pose)
         dc::renderer::pose_model(model_data, layers, tp ? 0.0f : player.pitch, part_world,
                                  { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
                                  { &head_world, &l_hand_world, &r_hand_world },
                                  tp ? player.pitch : 0.0f);
+        pop_bones(my_bone_saves);
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
@@ -2418,13 +2977,18 @@ int main(int argc, char** argv) {
         glm_mat4_copy(tp ? placement : vm_place, gear_place);
 
         if (tp) {   // third-person: draw the body + helmet
-            vec3 body_color = { 0.80f, 0.45f, 0.35f };
+            vec3 body_color = { my_look.skin[0], my_look.skin[1], my_look.skin[2] };   // chosen skin tone
             if (dead) { vec3 pale = { 0.55f, 0.65f, 0.95f }; glm_vec3_copy(pale, body_color); }
             else if (player.hit_flash > 0.0f) {
                 vec3 red = { 1.0f, 0.1f, 0.1f };
                 glm_vec3_lerp(body_color, red, player.hit_flash / dc::entity::FLASH_TIME, body_color);
             }
             renderer.draw_model(player_model, part_world, placement, body_color, dead ? GHOST_ALPHA : 1.0f);
+            if (!dead) {   // your drawn face on the front of the head
+                mat4 hp; glm_mat4_mul(placement, head_world.m, hp);
+                vec3 hcen = { hp[3][0], hp[3][1], hp[3][2] };
+                draw_face_at(hcen, player.yaw, my_look);
+            }
             if (!dead) {
                 mat4 helmet_place; glm_mat4_mul(placement, head_world.m, helmet_place);
                 vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
@@ -2561,11 +3125,14 @@ int main(int argc, char** argv) {
                     glm_translate(eplace, epos);
                     glm_rotate_y(eplace, -en.yaw + EYE_YAW_OFFSET, eplace);   // look toward the target
                     glm_rotate_z(eplace, eye_pitch, eplace);                  // pitch about the eye's right axis (Z) -> no roll
+                    if (en.elite) { vec3 es = {dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE}; glm_scale(eplace, es); }
                     vec3 col = { 1.0f, 1.0f, 1.0f };
+                    if (en.elite) { vec3 gold = {1.0f, 0.82f, 0.25f}; glm_vec3_copy(gold, col); }
                     if (en.hit_flash > 0.0f) { vec3 red = {1.0f,0.2f,0.2f}; glm_vec3_lerp(col, red, en.hit_flash/dc::entity::FLASH_TIME, col); }
                     renderer.draw_model(eye_model, enemy_part_world, eplace, col);
                 } else {
-                    append_cube(gx, cy, gz, 0.7f, 1.0f, 0.7f);
+                    const float cs = en.elite ? dc::entity::ELITE_SCALE : 1.0f;
+                    append_cube(gx, cy, gz, 0.7f * cs, 1.0f * cs, 0.7f * cs);
                 }
                 continue;
             }
@@ -2578,8 +3145,10 @@ int main(int argc, char** argv) {
             vec3 epos = { en.position[0], terrain.height(en.position[0], en.position[2]) + MODEL_FOOT_LIFT, en.position[2] };
             glm_translate(eplace, epos);
             glm_rotate_y(eplace, -en.yaw + MODEL_YAW_OFFSET, eplace);
+            if (en.elite) { vec3 es = {dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE}; glm_scale(eplace, es); }
             vec3 col; glm_vec3_copy(en.kind == dc::entity::EnemyKind::Ranged ? ranged_color
                                   : en.kind == dc::entity::EnemyKind::Flamethrower ? flame_color : enemy_color, col);
+            if (en.elite) { vec3 gold = { 1.0f, 0.78f, 0.25f }; glm_vec3_lerp(col, gold, 0.6f, col); }  // golden sheen
             if (en.hit_flash > 0.0f) {                 // flash red when struck
                 vec3 red = { 1.0f, 0.1f, 0.1f };
                 glm_vec3_lerp(col, red, en.hit_flash / dc::entity::FLASH_TIME, col);
@@ -2601,11 +3170,14 @@ int main(int argc, char** argv) {
             if (rp.punching) rl.push_back({ &model_data.punch, rp.punch_time, model_data.arm_l_node });
             if (rp.blocking) rl.push_back({ &model_data.block, rp.block_time, model_data.arm_r_node, false });
             dc::renderer::Mat4 r_head, r_lhand, r_rhand;
+            const dc::game::Appearance& rlook = look_for(rp.id);   // this player's custom look
             // Pitch the body (not the head) so the arms + held gear aim with the look;
             // the head tilts too since it's a child of the body bone.
+            std::vector<BoneSave> r_bone_saves; push_bones(rlook, r_bone_saves);   // their silly proportions
             dc::renderer::pose_model(model_data, rl, 0.0f, remote_part_world,
                                      { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
                                      { &r_head, &r_lhand, &r_rhand }, rp.pitch);
+            pop_bones(r_bone_saves);
             float rfeet = (rp.pos[1] - dc::world::EYE_HEIGHT) + MODEL_FOOT_LIFT;
             mat4 rplace;
             glm_mat4_identity(rplace);
@@ -2613,7 +3185,7 @@ int main(int argc, char** argv) {
             glm_translate(rplace, rpos);
             glm_rotate_y(rplace, -rp.yaw + MODEL_YAW_OFFSET, rplace);
 
-            vec3 remote_color = { 0.4f, 0.5f, 0.95f };
+            vec3 remote_color = { rlook.skin[0], rlook.skin[1], rlook.skin[2] };   // their chosen skin
             if (rp.ghost) {
                 vec3 pale = { 0.55f, 0.65f, 0.95f };   // dead teammate: faint wisp
                 glm_vec3_copy(pale, remote_color);
@@ -2624,6 +3196,9 @@ int main(int argc, char** argv) {
             renderer.draw_model(player_model, remote_part_world, rplace, remote_color, rp.ghost ? GHOST_ALPHA : 1.0f);
 
             if (!rp.ghost) {   // a ghost teammate shows only its faint body, no gear/effects
+            { mat4 hp; glm_mat4_mul(rplace, r_head.m, hp);   // their drawn face
+              vec3 hcen = { hp[3][0], hp[3][1], hp[3][2] };
+              draw_face_at(hcen, rp.yaw, rlook); }
             // Helmet on the head socket.
             mat4 r_helmet; glm_mat4_mul(rplace, r_head.m, r_helmet);
             vec3 helmet_white = { 1.0f, 1.0f, 1.0f };
@@ -2643,17 +3218,17 @@ int main(int argc, char** argv) {
 
             // Remote specials: match the local render. rig_scale (the rig's hand-bone
             // scale, ~0.22) comes from the posed hand matrix, same as the local avatar.
-            if (rp.thrown_active || rp.orbit_active) {
+            if (!rp.throwns.empty() || rp.orbit_active) {
                 float rig_scale = std::sqrt(r_lhand.m[0][0] * r_lhand.m[0][0]
                                           + r_lhand.m[0][1] * r_lhand.m[0][1]
                                           + r_lhand.m[0][2] * r_lhand.m[0][2]);
                 vec3 spc = { 0.85f, 0.85f, 0.95f };
-                if (rp.thrown_active) {
-                    float s = rig_scale * rp.sword_scale * rp.thrown_size;
+                for (const auto& th : rp.throwns) {
+                    float s = rig_scale * rp.sword_scale * th.size;
                     mat4 tp; glm_mat4_identity(tp);
-                    vec3 tpos = { rp.thrown_x, rp.thrown_y, rp.thrown_z };
+                    vec3 tpos = { th.x, th.y, th.z };
                     glm_translate(tp, tpos);
-                    glm_rotate_y(tp, rp.thrown_spin, tp);
+                    glm_rotate_y(tp, th.spin, tp);
                     vec3 sc = { s, s, s }; glm_scale(tp, sc);
                     renderer.draw_model(sword_model, sword_offset, tp, spc);
                 }
@@ -2874,6 +3449,37 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Elite aura: golden motes swirling around each rare elite enemy so they read as
+        // dangerous at a glance (on every screen — elite is replicated).
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            auto quad = [&](float cx, float cy, float cz, float sz, float r, float g, float b, float a) {
+                vec3 ctr = { cx, cy, cz };
+                auto P = [&](float ax, float ay) {
+                    particle_verts.insert(particle_verts.end(), {
+                        ctr[0] + (R[0] * ax + U[0] * ay) * sz,
+                        ctr[1] + (R[1] * ax + U[1] * ay) * sz,
+                        ctr[2] + (R[2] * ax + U[2] * ay) * sz, r, g, b, a });
+                };
+                P(-1,-1); P(1,-1); P(1,1);
+                P(-1,-1); P(1,1); P(-1,1);
+            };
+            for (const auto& en : entities.items) {
+                if (en.type != dc::entity::EntityType::Enemy || !en.elite) continue;
+                const float gy = (en.kind == dc::entity::EnemyKind::Flying)
+                               ? terrain.height(en.position[0], en.position[2]) + dc::entity::FLY_HOVER
+                               : terrain.height(en.position[0], en.position[2]);
+                const float cx = en.position[0], cz = en.position[2], cy = gy + 1.0f;
+                const int N = 8;
+                for (int i = 0; i < N; ++i) {
+                    const float a = t_now * 1.5f + i * (6.2831853f / N);
+                    const float rr = 0.8f + 0.15f * std::sin(t_now * 2.0f + i);
+                    const float yy = cy + 0.8f * std::sin(t_now * 1.3f + i * 1.7f);
+                    quad(cx + std::cos(a) * rr, yy, cz + std::sin(a) * rr, 0.075f, 1.0f, 0.82f, 0.3f, 0.95f);
+                }
+            }
+        }
+
         // Enemy projectiles: ALL render as 3D glowing cylinders aligned to their travel
         // direction (round rods from any angle, not flat quads), trailing a few embers.
         // Eye "lasers" are long + thin; other shots (e.g. the purple enemy's) are shorter,
@@ -2891,8 +3497,9 @@ int main(int argc, char** argv) {
                 float w1l = std::sqrt(w1x*w1x + w1y*w1y + w1z*w1z);
                 if (w1l > 1e-4f) { w1x /= w1l; w1y /= w1l; w1z /= w1l; }
                 float w2x = ly*w1z - lz*w1y, w2y = lz*w1x - lx*w1z, w2z = lx*w1y - ly*w1x;
-                const float HALF = pr.beam ? 0.9f : 0.45f;             // laser = long rod, bolt = short
-                const float core = pr.beam ? 0.10f : 0.15f, glow = pr.beam ? 0.26f : 0.34f;
+                const float psz = pr.radius / dc::entity::RANGED_SHOT_RADIUS;   // elite shots are fatter
+                const float HALF = (pr.beam ? 0.9f : 0.45f) * (pr.beam ? 1.0f : psz);   // bolt grows; laser stays long
+                const float core = (pr.beam ? 0.10f : 0.15f) * psz, glow = (pr.beam ? 0.26f : 0.34f) * psz;
                 auto cyl = [&](float rad, float r, float g, float b, float a) {
                     const int SIDES = 8;
                     auto vert = [&](float ang, float end) {
@@ -3714,6 +4321,45 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // Compass (top center): a horizontal strip showing the bearing to N/E/S/W, the
+            // base, chests, and other players so you can't get lost. Each marker maps its
+            // world bearing (relative to where you're facing) to an x within a ~±106° arc;
+            // markers behind that arc are culled. Cardinal letters are drawn in the text pass.
+            float compass_x[4] = {0,0,0,0}; bool compass_vis[4] = {false,false,false,false};
+            const float COMPASS_LY = 0.965f;   // y for the cardinal letters (text pass)
+            {
+                const float VIS = 1.85f;             // visible arc half-width (radians)
+                const float CXc = 0.0f, CW = 0.55f;  // strip center x + half-width (NDC)
+                const float CYb = 0.905f, CYt = 0.99f, my = 0.93f;
+                const float fwx = std::cos(player.yaw), fwz = std::sin(player.yaw);
+                auto bearing_x = [&](float dx, float dz, float& sx) {
+                    float len = std::sqrt(dx * dx + dz * dz);
+                    if (len < 1e-4f) return false;
+                    dx /= len; dz /= len;
+                    const float dot = fwx * dx + fwz * dz, cross = fwx * dz - fwz * dx;
+                    const float rel = std::atan2(cross, dot);
+                    if (std::fabs(rel) > VIS) return false;
+                    sx = CXc + (rel / VIS) * CW;
+                    return true;
+                };
+                hud_rect(CXc - CW - 0.012f, CYb, CXc + CW + 0.012f, CYt, 0.05f, 0.06f, 0.09f, 0.45f);   // backdrop
+                hud_rect(CXc - 0.004f, CYb, CXc + 0.004f, CYt, 0.9f, 0.9f, 0.95f, 0.85f);               // heading tick
+                float sx;
+                if (bearing_x(core_pos[0] - player.position[0], core_pos[2] - player.position[2], sx))
+                    icon_shape(sx, my, 0.024f, IconShape::Burst, 0.25f, 0.8f, 1.0f, 1.0f);              // base
+                for (const auto& ch : chests) {
+                    if (ch.remaining() == 0) continue;                                                  // depleted -> skip
+                    const float wx = (ch.col + 0.5f) * dc::world::TILE, wz = (ch.row + 0.5f) * dc::world::TILE;
+                    if (bearing_x(wx - player.position[0], wz - player.position[2], sx))
+                        icon_shape(sx, my, 0.02f, IconShape::Diamond, 1.0f, 0.82f, 0.2f, 1.0f);         // chest
+                }
+                for (const auto& rp : remotes)
+                    if (bearing_x(rp.pos[0] - player.position[0], rp.pos[2] - player.position[2], sx))
+                        icon_shape(sx, my, 0.02f, IconShape::Circle, 0.3f, 0.95f, 0.45f, 1.0f);         // other player
+                const float cdir[4][2] = { {0,-1}, {1,0}, {0,1}, {-1,0} };   // N, E, S, W
+                for (int i = 0; i < 4; ++i) compass_vis[i] = bearing_x(cdir[i][0], cdir[i][1], compass_x[i]);
+            }
+
             // Item inventory (top-left, under the coins): one chip per upgrade held, with
             // its placeholder shape + color. Stack counts are drawn as text after draw_hud;
             // hovering a chip (cursor free) shows its description.
@@ -3731,6 +4377,30 @@ int main(int argc, char** argv) {
                     }
                     ix += inv_step;
                 }
+            }
+
+            // Middle-mouse throw (Swordstorm) indicator, just left of the spell slots: a
+            // storm icon + a little mouse with its MIDDLE button lit (so players know the
+            // bind), with the throw cooldown sweeping over it. Always shown with a weapon.
+            if (player.weapon) {
+                const float bh = 0.12f, bw = bh / aspect, by = -0.95f, by1 = by + bh;
+                const float bx0 = 0.55f - 0.05f - bw, bx1 = bx0 + bw;
+                // Small mouse glyph with the middle button highlighted.
+                auto draw_mouse = [&](float cx, float cy, float s) {
+                    const float w = s * 0.66f / aspect, h = s;
+                    hud_rect(cx - w, cy - h, cx + w, cy + h, 0.85f, 0.85f, 0.9f, 0.95f);          // body
+                    const float ix = w * 0.6f, iy = h * 0.72f;
+                    hud_rect(cx - ix, cy - iy, cx + ix, cy + iy, 0.12f, 0.12f, 0.15f, 1.0f);       // inset
+                    const float mw = w * 0.2f;
+                    hud_rect(cx - mw, cy + h * 0.06f, cx + mw, cy + iy, 1.0f, 0.85f, 0.25f, 1.0f); // middle button (lit)
+                };
+                hud_rect(bx0 - 0.007f, by - 0.007f, bx1 + 0.007f, by1 + 0.007f, 0.95f, 0.8f, 0.35f, 0.9f);  // gold border = manual
+                hud_rect(bx0, by, bx1, by1, 0.10f, 0.10f, 0.12f, 0.85f);                                    // backing
+                icon_shape((bx0 + bx1) * 0.5f, (by + by1) * 0.5f - 0.012f, bh * 0.30f, IconShape::Streak, 0.95f, 0.9f, 0.7f, 1.0f);  // storm
+                draw_mouse(bx0 + bw * 0.5f, by1 - bh * 0.26f, bh * 0.16f);                           // MMB hint (top)
+                const float cd = player.weapon->throw_cooldown * player.cooldown_mult;              // cooldown sweep
+                const float frac = cd > 0.0f ? throw_cd / cd : 0.0f;
+                if (frac > 0.0f) { const float fh = bh * (frac > 1.0f ? 1.0f : frac); hud_rect(bx0, by, bx1, by + fh, 1.0f, 1.0f, 1.0f, 0.40f); }
             }
 
             // Spell slots (bottom-right): one box per slot. An unlocked autocast fills a
@@ -3877,8 +4547,8 @@ int main(int argc, char** argv) {
             renderer.draw_hud(hud);
 
             // --- Text overlays (separate glyph pass, drawn on top of the HUD rects) ---
-            // Day/time clock (top-center): e.g. "Day 2   7:14 PM". Tinted warm by day, cool
-            // blue at night so the phase reads at a glance.
+            // Day/time clock (top-center, just under the compass strip): e.g. "Day 2  7:14 PM".
+            // Tinted warm by day, cool blue at night so the phase reads at a glance.
             {
                 char clk[32]; clock_str(clk, sizeof clk);
                 const float cpx = 22.0f;
@@ -3886,7 +4556,7 @@ int main(int argc, char** argv) {
                 vec3 col;
                 if (is_night()) { col[0] = 0.55f; col[1] = 0.7f; col[2] = 1.0f; }
                 else            { col[0] = 1.0f;  col[1] = 0.92f; col[2] = 0.6f; }
-                renderer.draw_text(clk, -w * 0.5f, 0.95f, cpx, col, 1.0f, fbw, fbh);
+                renderer.draw_text(clk, -w * 0.5f, 0.86f, cpx, col, 1.0f, fbw, fbh);
             }
             // Item stack counts: bottom-right of each inventory chip.
             {
@@ -3987,6 +4657,31 @@ int main(int argc, char** argv) {
                     const UpgradeDef& d = upgrade_def(levelup_cards[s]);
                     renderer.draw_text(d.name, cxc - renderer.text_width(d.name, 15.0f, fbw) * 0.5f, -0.02f, 15.0f, white, 1.0f, fbw, fbh);
                 }
+            }
+
+            // Compass cardinal letters (N/E/S/W), above the strip; North highlighted.
+            {
+                const char* lbl[4] = { "N", "E", "S", "W" };
+                vec3 nclr = {1.0f, 0.55f, 0.45f}, oclr = {0.9f, 0.92f, 1.0f};
+                for (int i = 0; i < 4; ++i) {
+                    if (!compass_vis[i]) continue;
+                    float* cc = (i == 0) ? nclr : oclr;
+                    renderer.draw_text(lbl[i], compass_x[i] - renderer.text_width(lbl[i], 16.0f, fbw) * 0.5f,
+                                       COMPASS_LY, 16.0f, cc, 1.0f, fbw, fbh);
+                }
+            }
+
+            // Enemy taunts: project each over its enemy's head, rising + fading in angry yellow.
+            for (const auto& t : taunts) {
+                vec4 wp = { t.pos[0], t.pos[1] + t.age * 0.6f, t.pos[2], 1.0f }, clip;
+                glm_mat4_mulv(renderer.viewproj, wp, clip);
+                if (clip[3] <= 0.05f) continue;                       // behind the camera
+                const float ndcx = clip[0] / clip[3], ndcy = clip[1] / clip[3];
+                if (ndcx < -1.1f || ndcx > 1.1f || ndcy < -1.1f || ndcy > 1.1f) continue;
+                const char* txt = dc::game::taunt_text(t.idx);
+                const float w = renderer.text_width(txt, 17.0f, fbw);
+                vec3 yellow = { 1.0f, 0.92f, 0.15f };
+                renderer.draw_text(txt, ndcx - w * 0.5f, ndcy, 17.0f, yellow, 1.0f - t.age / TAUNT_LIFE, fbw, fbh);
             }
 
             // Debug overlay text (toggle with V): on-screen readout via the glyph renderer.

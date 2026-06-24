@@ -28,7 +28,8 @@ void Spawner::update(float dt, EntityList& list, const dc::world::Map& map) {
                     : (roll < flying_fraction + ranged_fraction) ? EnemyKind::Ranged
                     : (roll < flying_fraction + ranged_fraction + flame_fraction) ? EnemyKind::Flamethrower
                     : EnemyKind::Melee;
-                list.spawn_enemy(x, z, kind);
+                const bool elite = rand01(rng) < elite_fraction;   // rare golden bruiser (any kind)
+                list.spawn_enemy(x, z, kind, elite);
                 break;
             }
         }
