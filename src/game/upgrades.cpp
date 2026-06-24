@@ -2,24 +2,24 @@
 
 const UpgradeDef& upgrade_def(Upgrade u) {
     static const UpgradeDef defs[UPGRADE_COUNT] = {
-        { "Conditioning", "Stamina costs -15% per stack.",                    IconShape::Square,   0.20f, 0.85f, 0.30f },  // green
-        { "Heavy Hitter", "+4 knockback per stack.",                          IconShape::Triangle, 0.90f, 0.80f, 0.15f },  // yellow
-        { "Whetstone",    "+25% melee damage per stack.",                     IconShape::Diamond,  0.85f, 0.20f, 0.20f },  // red
-        { "Long Reach",   "Longer, wider swing and a bigger blade per stack.", IconShape::Circle,  0.25f, 0.50f, 1.00f },  // blue
-        { "Adrenaline",   "All ability cooldowns -15% per stack.",            IconShape::Cross,    0.20f, 0.85f, 0.90f },  // cyan
+        { "Conditioning", "Stamina costs -15% per stack.",                    IconShape::Boot,     0.20f, 0.85f, 0.30f },  // green
+        { "Heavy Hitter", "+4 knockback per stack.",                          IconShape::Hammer,   0.90f, 0.80f, 0.15f },  // yellow
+        { "Whetstone",    "+25% melee damage per stack.",                     IconShape::Sword,    0.85f, 0.20f, 0.20f },  // red
+        { "Long Reach",   "Longer, wider swing and a bigger blade per stack.", IconShape::Crescent,0.25f, 0.50f, 1.00f },  // blue
+        { "Adrenaline",   "All ability cooldowns -15% per stack.",            IconShape::Clock,    0.20f, 0.85f, 0.90f },  // cyan
         { "Lunge",        "Dodge dashes farther per stack.",                  IconShape::Arrow,    1.00f, 0.55f, 0.15f },  // orange
-        { "Afterimage",   "+0.12s dodge invincibility per stack.",            IconShape::Hourglass,0.70f, 0.50f, 0.95f },  // violet
+        { "Afterimage",   "+0.12s dodge invincibility per stack.",            IconShape::Shield,   0.70f, 0.50f, 0.95f },  // violet
         { "Keen Edge",    "+8% melee crit chance per stack.",                 IconShape::Star,     1.00f, 0.85f, 0.20f },  // gold
-        { "Deathblow",    "+0.5x melee crit damage per stack.",               IconShape::Pentagon, 0.95f, 0.20f, 0.60f },  // magenta
-        { "Regeneration", "+1 health/sec per stack.",                         IconShape::Hexagon,  0.95f, 0.45f, 0.55f },  // rose
+        { "Deathblow",    "+0.5x melee crit damage per stack.",               IconShape::Fang,     0.95f, 0.20f, 0.60f },  // magenta
+        { "Regeneration", "+1 health/sec per stack.",                         IconShape::Heart,    0.95f, 0.45f, 0.55f },  // rose
         { "Ember Brand",  "Strikes set enemies ablaze; +burn damage per stack.", IconShape::Flame,    1.00f, 0.45f, 0.10f },  // fire
         { "Frost Brand",  "Strikes slow enemies; stronger slow per stack.",    IconShape::IceShard, 0.40f, 0.80f, 1.00f },  // ice
         { "Stone Brand",  "Strikes knock enemies back harder per stack.",      IconShape::Brick,    0.60f, 0.42f, 0.22f },  // earth
-        { "Gun Drone",    "A gunner minion that shoots enemies (up to 4).",    IconShape::Pip,      0.60f, 0.72f, 0.88f },  // steel
+        { "Gun Drone",    "A gunner minion that shoots enemies (up to 4).",    IconShape::Drone,    0.60f, 0.72f, 0.88f },  // steel
         { "Munitions",    "+4 minion damage per stack.",                       IconShape::Ammo,     0.85f, 0.70f, 0.30f },  // brass
         { "Trailblazer",  "Leave a burning trail as you run; +damage & longer burn per stack.", IconShape::Streak, 1.00f, 0.40f, 0.10f },  // ember
         { "Supersonic",   "Dodging breaks the sound barrier: knocks back + hurts nearby enemies (+dmg per stack).", IconShape::Boom, 0.85f, 0.90f, 1.00f },  // shockwave white
-        { "Drone Sensors","+6 minion targeting range per stack.",             IconShape::Pip,      0.35f, 0.90f, 0.55f },  // green (drone)
+        { "Drone Sensors","+6 minion targeting range per stack.",             IconShape::Drone,    0.35f, 0.90f, 0.55f },  // green (drone)
         // --- level-up only (gated) ---
         { "Orbit Blades", "Unlock the Orbit autocast (uses a spell slot).",    IconShape::Ring,     0.30f, 0.85f, 0.95f },  // cyan autocast
         { "Force Nova",   "Unlock the Force Nova autocast (uses a spell slot).",IconShape::Burst,    0.85f, 0.90f, 1.00f },  // shockwave white

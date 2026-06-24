@@ -52,6 +52,8 @@ struct Appearance {
     float   bone_arms  = 1.0f;
     float   bone_hands = 1.0f;
     float   bone_torso = 1.0f;
+    char    custom1[48] = {0};                   // player-written insults enemies occasionally use
+    char    custom2[48] = {0};
 };
 
 inline constexpr uint32_t APPEARANCE_MAGIC = 0xC0DEFACEu;
@@ -65,6 +67,8 @@ inline bool save_appearance(const Appearance& a, const char* path) {
     std::fwrite(a.face, sizeof a.face, 1, f);
     const float bs[4] = { a.bone_head, a.bone_arms, a.bone_hands, a.bone_torso };
     std::fwrite(bs, sizeof bs, 1, f);
+    std::fwrite(a.custom1, sizeof a.custom1, 1, f);
+    std::fwrite(a.custom2, sizeof a.custom2, 1, f);
     std::fclose(f);
     return true;
 }
@@ -79,6 +83,9 @@ inline bool load_appearance(Appearance& a, const char* path) {
     float bs[4] = {1.0f, 1.0f, 1.0f, 1.0f};
     if (ok) std::fread(bs, sizeof bs, 1, f);   // bone scales are optional/newer; default to 1
     a.bone_head = bs[0]; a.bone_arms = bs[1]; a.bone_hands = bs[2]; a.bone_torso = bs[3];
+    std::fread(a.custom1, sizeof a.custom1, 1, f);   // custom insults are optional/newer
+    std::fread(a.custom2, sizeof a.custom2, 1, f);
+    a.custom1[sizeof a.custom1 - 1] = 0; a.custom2[sizeof a.custom2 - 1] = 0;   // ensure null-terminated
     std::fclose(f);
     return ok;
 }

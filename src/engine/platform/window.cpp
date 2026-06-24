@@ -71,6 +71,11 @@ void Window::set_relative_mouse(bool on) {
     SDL_SetWindowRelativeMouseMode(sdl_window, on);
 }
 
+void Window::set_text_input(bool on) {
+    if (on) SDL_StartTextInput(sdl_window);
+    else    SDL_StopTextInput(sdl_window);
+}
+
 void Window::swap() { SDL_GL_SwapWindow(sdl_window); }
 
 void Window::shutdown() {

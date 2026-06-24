@@ -177,6 +177,23 @@ int main(int argc, char** argv) {
     dc::renderer::ModelData eye_data;
     const bool eye_loaded = dc::renderer::read_model("assets/models/eye_enemy.glb", eye_data);
     if (!eye_loaded) std::fprintf(stderr, "note: assets/models/eye_enemy.glb not found; flyers use the cube\n");
+    // Skeleton enemy model (optional; built by blender/make_skeleton.py). If absent, no
+    // skeletons spawn (so they never fall back to looking like a plain melee enemy).
+    dc::renderer::ModelData bat_data;
+    const bool bat_loaded = dc::renderer::read_model("assets/models/bat.glb", bat_data);
+    if (!bat_loaded) std::fprintf(stderr, "note: assets/models/bat.glb not found; run blender/make_bat.py to enable bats\n");
+    dc::renderer::ModelData gnome_data;   // re-skins the flamethrower enemy
+    const bool gnome_loaded = dc::renderer::read_model("assets/models/gnome.glb", gnome_data);
+    dc::renderer::ModelData mage_data;    // re-skins the ranged enemy
+    const bool mage_loaded = dc::renderer::read_model("assets/models/mage.glb", mage_data);
+    dc::renderer::ModelData turret_data;  // the defensive turret base/housing (barrel stays procedural)
+    const bool turret_loaded = dc::renderer::read_model("assets/models/turret.glb", turret_data);
+    dc::renderer::ModelData skeleton_data;
+    const bool skeleton_loaded = dc::renderer::read_model("assets/models/skeleton.glb", skeleton_data);
+    if (!skeleton_loaded) std::fprintf(stderr, "note: assets/models/skeleton.glb not found; run blender/make_skeleton.py to enable skeletons\n");
+    else std::fprintf(stderr, "[skeleton] loaded: %zu nodes, %zu mesh parts; bones body=%d head=%d armL=%d; walk=%d punch=%d\n",
+                      skeleton_data.nodes.size(), skeleton_data.parts.size(), skeleton_data.body_node, skeleton_data.head_node,
+                      skeleton_data.arm_l_node, skeleton_data.walk.valid() ? 1 : 0, skeleton_data.punch.valid() ? 1 : 0);
 
     dc::platform::Window window;
     if (!window.init("dungeoncrawl")) return 1;
@@ -223,6 +240,16 @@ int main(int argc, char** argv) {
 
     dc::renderer::Model eye_model;
     if (eye_loaded) eye_model.upload(eye_data);
+    dc::renderer::Model skeleton_model;
+    if (skeleton_loaded) skeleton_model.upload(skeleton_data);   // upload after the GL context exists
+    dc::renderer::Model bat_model;
+    if (bat_loaded) bat_model.upload(bat_data);
+    dc::renderer::Model gnome_model;
+    if (gnome_loaded) gnome_model.upload(gnome_data);
+    dc::renderer::Model mage_model;
+    if (mage_loaded) mage_model.upload(mage_data);
+    dc::renderer::Model turret_model;
+    if (turret_loaded) turret_model.upload(turret_data);
 
     dc::renderer::Model torch_model;
     torch_model.upload(torch_data);
@@ -407,6 +434,8 @@ int main(int argc, char** argv) {
         sp.ranged_fraction = 0.30f;   // ~30% ground shooters
         sp.flying_fraction = 0.15f;   // ~15% hovering shooters
         sp.flame_fraction  = 0.07f;   // ~7% rare flamethrower bruisers
+        sp.skeleton_fraction = skeleton_loaded ? 0.5f : 0.0f;   // ~half of spawns are skeletons (if the model exists)
+        sp.bat_fraction = bat_loaded ? 0.18f : 0.0f;            // some flyers are bats (if the model exists)
         sp.elite_fraction  = dc::entity::ELITE_CHANCE;   // ~6% roll into a rare golden elite
         spawners.push_back(sp);
     }
@@ -878,21 +907,20 @@ int main(int argc, char** argv) {
 
     // Enemy taunts: floating yellow insults (+ TTS) over attacking enemies. Host picks
     // them (rate-limited + capped); a Taunt event replicates each to everyone.
-    struct FloatTaunt { vec3 pos; uint8_t idx; uint8_t reactive; float age; };
+    struct FloatTaunt { vec3 pos; float age; std::string text; };
     std::vector<FloatTaunt> taunts;
     float taunt_cd = 0.0f;
     float react_cd[16] = {0};   // per-player cooldown so reactive taunts don't spam on every tick
     constexpr float TAUNT_LIFE = 2.8f, TAUNT_INTERVAL = 1.6f, TAUNT_RANGE = 9.0f;
     constexpr int   MAX_TAUNTS = 3;     // at most this many on screen / talking at once
-    auto taunt_line = [](int idx, bool reactive) { return reactive ? dc::game::reactive_text(idx) : dc::game::taunt_text(idx); };
-    auto spawn_taunt = [&](float x, float y, float z, int idx, bool reactive, bool broadcast) {
-        FloatTaunt t; t.pos[0] = x; t.pos[1] = y; t.pos[2] = z;
-        t.idx = static_cast<uint8_t>(idx); t.reactive = reactive ? 1 : 0; t.age = 0.0f;
+    auto spawn_taunt = [&](float x, float y, float z, const std::string& text, bool broadcast) {
+        if (text.empty()) return;
+        FloatTaunt t; t.pos[0] = x; t.pos[1] = y; t.pos[2] = z; t.age = 0.0f; t.text = text;
         taunts.push_back(t);
-        speak_async(taunt_line(idx, reactive));
+        speak_async(text);
         if (broadcast && net.role == dc::net::Role::Host) {
-            dc::net::TauntState ts; ts.x = x; ts.y = y; ts.z = z;
-            ts.idx = static_cast<uint8_t>(idx); ts.reactive = reactive ? 1 : 0;
+            dc::net::TauntState ts{}; ts.x = x; ts.y = y; ts.z = z;
+            std::strncpy(ts.text, text.c_str(), sizeof ts.text - 1);
             unsigned char buf[1 + sizeof ts]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::Taunt);
             std::memcpy(buf + 1, &ts, sizeof ts); net.broadcast(buf, sizeof buf, true);
         }
@@ -912,6 +940,23 @@ int main(int argc, char** argv) {
         for (auto& kv : looks) if (kv.first == id) return kv.second;
         looks.push_back({ id, dc::game::Appearance{} });
         return looks.back().second;
+    };
+    // Resolve an insult to speak. ~35% of the time it pulls one of a player's typed custom
+    // lines (owner_id = that player, or 0xFFFFFFFF to sample everyone's); otherwise a canned
+    // reactive/ambient line. Host-side; the resolved string is what gets replicated.
+    auto pick_line = [&](bool reactive, uint32_t owner_id) -> std::string {
+        std::vector<std::string> customs;
+        auto add = [&](const dc::game::Appearance& a) { if (a.custom1[0]) customs.push_back(a.custom1); if (a.custom2[0]) customs.push_back(a.custom2); };
+        if (owner_id == 0xFFFFFFFFu) { for (auto& kv : looks) add(kv.second); }
+        else add(look_for(owner_id));
+        spark_rng = spark_rng * 1664525u + 1013904223u;
+        if (!customs.empty() && (spark_rng % 100u) < 35u) {
+            spark_rng = spark_rng * 1664525u + 1013904223u;
+            return customs[spark_rng % customs.size()];
+        }
+        spark_rng = spark_rng * 1664525u + 1013904223u;
+        return reactive ? dc::game::reactive_text(spark_rng % dc::game::reactive_count())
+                        : dc::game::taunt_text(spark_rng % dc::game::taunt_count());
     };
 
     dc::renderer::Mesh face_mesh;   // rebuilt per color when drawing pixel faces
@@ -947,23 +992,18 @@ int main(int argc, char** argv) {
             by_color[c].clear();
         }
     };
-    // Temporarily scale a player's bones for silly proportions (restored after the draw).
-    struct BoneSave { int node; vec3 s; };
-    auto push_bones = [&](const dc::game::Appearance& look, std::vector<BoneSave>& saves) {
-        auto one = [&](int node, float m) {
-            if (node < 0 || node >= static_cast<int>(model_data.nodes.size())) return;
-            BoneSave bs; bs.node = node; glm_vec3_copy(model_data.nodes[node].s, bs.s); saves.push_back(bs);
-            model_data.nodes[node].s[0] *= m; model_data.nodes[node].s[1] *= m; model_data.nodes[node].s[2] *= m;
-        };
-        one(model_data.body_node, look.bone_torso);
-        one(model_data.head_node, look.bone_head);
-        one(model_data.arm_l_node, look.bone_arms); one(model_data.arm_r_node, look.bone_arms);
-        one(model_data.hand_l_node, look.bone_hands); one(model_data.hand_r_node, look.bone_hands);
-    };
-    auto pop_bones = [&](const std::vector<BoneSave>& saves) {
-        for (const auto& bs : saves) {
-            model_data.nodes[bs.node].s[0] = bs.s[0]; model_data.nodes[bs.node].s[1] = bs.s[1]; model_data.nodes[bs.node].s[2] = bs.s[2];
-        }
+    // Per-node silly-bone scale vector for a look. Passed to pose_model, which applies it
+    // AFTER animation sampling (so it survives the walk/punch clips) — and because the
+    // hand bones are scaled in the same pose, the sword/shield/helmet attach correctly
+    // (they hang off the scaled hand/head world matrices and scale with them).
+    auto bone_scale_for = [&](const dc::game::Appearance& look) {
+        std::vector<float> bs(model_data.nodes.size(), 1.0f);
+        auto set = [&](int node, float m) { if (node >= 0 && node < static_cast<int>(bs.size())) bs[node] = m; };
+        set(model_data.body_node, look.bone_torso);
+        set(model_data.head_node, look.bone_head);
+        set(model_data.arm_l_node, look.bone_arms); set(model_data.arm_r_node, look.bone_arms);
+        set(model_data.hand_l_node, look.bone_hands); set(model_data.hand_r_node, look.bone_hands);
+        return bs;
     };
     // Draw a player's pixel face on a plate in front of the head at world `head`, facing
     // along `yaw` (the look direction). Used for the local avatar and every remote.
@@ -988,7 +1028,9 @@ int main(int argc, char** argv) {
         int  skin_idx  = 0;
         float preview_yaw = 0.0f;               // drag to spin the character
         bool  drag_rot = false, paint_prev = false;
+        int   active_box = -1;                  // which custom-insult box is focused (-1 = none)
         window.set_relative_mouse(false);       // free cursor for the UI
+        window.set_text_input(true);            // enable typing for the custom-insult boxes
         // Face canvas panel (NDC): a square on the right; skin/pen pickers below it.
         const float CAN_X0 = 0.30f, CAN_X1 = 0.86f, CAN_Y0 = -0.20f, CAN_Y1 = 0.62f;
         uint64_t lprev = SDL_GetTicksNS();
@@ -1107,6 +1149,30 @@ int main(int argc, char** argv) {
             }
             // Clear face
             if (click && hit(-0.92f, -0.92f, -0.74f, -0.86f)) { std::memset(my_look.face, 0, sizeof my_look.face); dirty = true; }
+
+            // Custom insult boxes (two): click to focus + type; a Play button speaks it.
+            char* boxes[2] = { my_look.custom1, my_look.custom2 };
+            const float BOX_X0 = -0.15f, BOX_X1 = 0.40f, PLAY_X0 = 0.43f, PLAY_X1 = 0.53f;
+            const float box_y[2] = { -0.45f, -0.57f };
+            for (int bi = 0; bi < 2; ++bi) {
+                if (click && hit(BOX_X0, box_y[bi], BOX_X1, box_y[bi] + 0.085f)) active_box = bi;
+                if (click && hit(PLAY_X0, box_y[bi], PLAY_X1, box_y[bi] + 0.085f) && boxes[bi][0]) speak_async(boxes[bi]);
+            }
+            // Clicking anywhere else (and not on a box) drops focus.
+            if (click && !(hit(BOX_X0, box_y[1], PLAY_X1, box_y[0] + 0.085f))) active_box = -1;
+            // Apply typed text / backspace to the focused box (shell-safe characters only).
+            if (active_box >= 0) {
+                char* box = boxes[active_box];
+                int len = static_cast<int>(std::strlen(box));
+                for (int k = 0; k < input.backspaces && len > 0; ++k) box[--len] = 0;
+                for (char ch : input.text_input) {
+                    if (len >= 46) break;
+                    const bool safe = (ch >= 32 && ch < 127) && ch != '"' && ch != '\'' && ch != '`' && ch != '$' && ch != '\\';
+                    if (safe) { box[len++] = ch; box[len] = 0; }
+                }
+                if (input.backspaces || !input.text_input.empty()) dirty = true;
+            }
+
             // START / WAITING
             const bool can_start = (net.role != dc::net::Role::Client);
             if (click && can_start && hit(0.55f, -0.92f, 0.90f, -0.80f)) {
@@ -1129,10 +1195,10 @@ int main(int argc, char** argv) {
             { float lp[3] = {0,0,0}, lc[3] = {0,0,0}, lr[1] = {1}; renderer.set_lights(0, lp, lc, lr); }
             // Pose the model at rest, scaled by the silly bones, in front of the camera.
             {
-                std::vector<BoneSave> saves; push_bones(my_look, saves);
+                std::vector<float> bscale = bone_scale_for(my_look);
                 std::vector<dc::renderer::AnimLayer> el;
                 dc::renderer::Mat4 prev_head;
-                dc::renderer::pose_model(model_data, el, 0.0f, part_world, { model_data.head_node }, { &prev_head });
+                dc::renderer::pose_model(model_data, el, 0.0f, part_world, { model_data.head_node }, { &prev_head }, 0.0f, &bscale);
                 vec3 fwd; player.front(fwd); fwd[1] = 0.0f;
                 float fl = std::sqrt(fwd[0]*fwd[0] + fwd[2]*fwd[2]); if (fl > 1e-4f) { fwd[0] /= fl; fwd[2] /= fl; }
                 const float feet = player.position[1] - dc::world::EYE_HEIGHT;
@@ -1147,7 +1213,6 @@ int main(int argc, char** argv) {
                 // Exact head-bone world position (so the face sits ON the head, not floating).
                 mat4 hpm; glm_mat4_mul(place, prev_head.m, hpm);
                 vec3 headpos = { hpm[3][0], hpm[3][1], hpm[3][2] };
-                pop_bones(saves);
                 // Face plate on the head front, facing the camera (so you see it as you draw),
                 // tracking the spin. Small + close so it reads as the face, not a billboard.
                 vec3 facing = { -fwd[0], 0.0f, -fwd[2] };
@@ -1217,6 +1282,16 @@ int main(int argc, char** argv) {
             rect(-0.92f, -0.92f, -0.74f, -0.86f, 0.5f, 0.3f, 0.3f, 1.0f);
             const bool can_start2 = (net.role != dc::net::Role::Client);
             rect(0.55f, -0.92f, 0.90f, -0.80f, can_start2 ? 0.2f : 0.3f, can_start2 ? 0.7f : 0.3f, 0.3f, 1.0f);
+            // Custom insult boxes + Play buttons.
+            {
+                const float bx0 = -0.15f, bx1 = 0.40f, px0 = 0.43f, px1 = 0.53f, byy[2] = { -0.45f, -0.57f };
+                for (int bi = 0; bi < 2; ++bi) {
+                    const bool act = (active_box == bi);
+                    rect(bx0 - 0.006f, byy[bi] - 0.006f, bx1 + 0.006f, byy[bi] + 0.091f, act ? 0.95f : 0.6f, act ? 0.85f : 0.6f, act ? 0.3f : 0.65f, 1.0f);  // border (gold when focused)
+                    rect(bx0, byy[bi], bx1, byy[bi] + 0.085f, 0.12f, 0.12f, 0.15f, 1.0f);   // field
+                    rect(px0, byy[bi], px1, byy[bi] + 0.085f, 0.2f, 0.55f, 0.85f, 1.0f);    // play button
+                }
+            }
             renderer.draw_hud(hud);
 
             // Text labels.
@@ -1238,6 +1313,20 @@ int main(int argc, char** argv) {
             }
             renderer.draw_text("Silly Bones  (tap - / +)", -0.55f, 0.42f, 15.0f, gold, 1.0f, fbw, fbh);
             renderer.draw_text("Drag the character to spin it", -0.18f, 0.66f, 13.0f, white, 1.0f, fbw, fbh);
+            // Custom insult fields.
+            renderer.draw_text("Custom insults (enemies say these)", -0.15f, -0.345f, 13.0f, gold, 1.0f, fbw, fbh);
+            {
+                char* boxes[2] = { my_look.custom1, my_look.custom2 };
+                const float byy[2] = { -0.45f, -0.57f };
+                vec3 grey = { 0.5f, 0.5f, 0.55f };
+                for (int bi = 0; bi < 2; ++bi) {
+                    char shown[64]; std::snprintf(shown, sizeof shown, "%s%s", boxes[bi], (active_box == bi) ? "_" : "");
+                    const char* disp = boxes[bi][0] ? shown : (active_box == bi ? "_" : "type here...");
+                    const bool lit = boxes[bi][0] || active_box == bi;
+                    renderer.draw_text(disp, -0.135f, byy[bi] + 0.022f, 14.0f, lit ? white : grey, 1.0f, fbw, fbh);
+                    renderer.draw_text("Play", 0.435f, byy[bi] + 0.022f, 12.0f, white, 1.0f, fbw, fbh);
+                }
+            }
             if (net.role == dc::net::Role::Client) {
                 renderer.draw_text("Waiting for host to start...", 0.45f, -0.86f, 16.0f, gold, 1.0f, fbw, fbh);
             } else {
@@ -1248,6 +1337,7 @@ int main(int argc, char** argv) {
             window.swap();
         }
         if (!running) { net.shutdown(); return 0; }
+        window.set_text_input(false);      // done typing custom insults
         window.set_relative_mouse(true);   // back to mouselook for the game
         look_for(my_id) = my_look;         // keep peer looks gathered in the lobby; refresh mine
     }
@@ -1411,7 +1501,8 @@ int main(int argc, char** argv) {
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::Taunt
                            && ev.data.size() >= 1 + sizeof(dc::net::TauntState)) {
                     dc::net::TauntState ts; std::memcpy(&ts, ev.data.data() + 1, sizeof ts);
-                    spawn_taunt(ts.x, ts.y, ts.z, ts.idx, ts.reactive != 0, false);   // float + speak locally
+                    ts.text[sizeof ts.text - 1] = 0;
+                    spawn_taunt(ts.x, ts.y, ts.z, std::string(ts.text), false);   // float + speak locally
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::XpGranted
                            && ev.data.size() >= 1 + sizeof(float)) {
                     float amount; std::memcpy(&amount, ev.data.data() + 1, sizeof amount);
@@ -2423,9 +2514,9 @@ int main(int argc, char** argv) {
                 const auto& en = entities.items[best];
                 const float hy = terrain.height(en.position[0], en.position[2])
                                + (en.kind == dc::entity::EnemyKind::Flying ? dc::entity::FLY_HOVER + 1.4f : 2.4f);
-                spark_rng = spark_rng * 1664525u + 1013904223u;
-                const int idx = static_cast<int>(spark_rng % static_cast<uint32_t>(dc::game::reactive_count()));
-                spawn_taunt(en.position[0], hy, en.position[2], idx, true, true);
+                // The hit player's own custom insults may get thrown back at them.
+                const uint32_t pid = (pi == 0) ? my_id : host_clients[pi - 1].id;
+                spawn_taunt(en.position[0], hy, en.position[2], pick_line(true, pid), true);
                 react_cd[pi] = 2.2f;
             };
             // out[0] -> local player.
@@ -2930,8 +3021,7 @@ int main(int argc, char** argv) {
                     const float hy = terrain.height(en.position[0], en.position[2])
                                    + (en.kind == dc::entity::EnemyKind::Flying ? dc::entity::FLY_HOVER + 1.4f : 2.4f);
                     spark_rng = spark_rng * 1664525u + 1013904223u;
-                    const int idx = static_cast<int>(spark_rng % static_cast<uint32_t>(dc::game::taunt_count()));
-                    spawn_taunt(en.position[0], hy, en.position[2], idx, false, true);
+                    spawn_taunt(en.position[0], hy, en.position[2], pick_line(false, 0xFFFFFFFFu), true);
                     taunt_cd = TAUNT_INTERVAL;
                 }
             }
@@ -2956,12 +3046,11 @@ int main(int argc, char** argv) {
         // Third person (default): pitch the BODY so your avatar hinges to aim, like remotes.
         // First person (V): head-look only (body undrawn; gear aims via the viewmodel tilt).
         const bool tp = !first_person;
-        std::vector<BoneSave> my_bone_saves; push_bones(my_look, my_bone_saves);   // silly proportions (baked into the pose)
+        std::vector<float> my_bscale = bone_scale_for(my_look);   // silly proportions (gear follows the scaled hands)
         dc::renderer::pose_model(model_data, layers, tp ? 0.0f : player.pitch, part_world,
                                  { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
                                  { &head_world, &l_hand_world, &r_hand_world },
-                                 tp ? player.pitch : 0.0f);
-        pop_bones(my_bone_saves);
+                                 tp ? player.pitch : 0.0f, &my_bscale);
 
         // Avatar placement: stand at the player's XZ, facing the look direction.
         // The model's origin sits at its waist (local feet at y~=-1.0), so lift it so
@@ -3134,6 +3223,23 @@ int main(int argc, char** argv) {
         };
         for (const auto& en : entities.items) {
             if (en.type != dc::entity::EntityType::Enemy) continue;
+            if (en.kind == dc::entity::EnemyKind::Bat && bat_loaded) {   // hovering bat, wings flapping
+                const float gx = en.position[0], gz = en.position[2];
+                const float cy = terrain.height(gx, gz) + dc::entity::FLY_HOVER + 0.12f * std::sin(t_now * 3.0f + gx);
+                std::vector<dc::renderer::AnimLayer> bl;
+                bl.push_back({ &bat_data.walk, t_now * 1.6f, -1 });   // flap continuously
+                dc::renderer::pose_model(bat_data, bl, 0.0f, enemy_part_world);
+                mat4 eplace; glm_mat4_identity(eplace);
+                vec3 epos = { gx, cy, gz };
+                glm_translate(eplace, epos);
+                glm_rotate_y(eplace, -en.yaw + MODEL_YAW_OFFSET, eplace);   // face the target (same convention as the skeleton)
+                if (en.elite) { vec3 es = {dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE}; glm_scale(eplace, es); }
+                vec3 col = { 1.0f, 1.0f, 1.0f };   // white tint -> the model's purple/black materials show
+                if (en.elite) { vec3 gold = {1.0f, 0.82f, 0.25f}; glm_vec3_copy(gold, col); }
+                if (en.hit_flash > 0.0f) { vec3 red = {1.0f,0.2f,0.2f}; glm_vec3_lerp(col, red, en.hit_flash/dc::entity::FLASH_TIME, col); }
+                renderer.draw_model(bat_model, enemy_part_world, eplace, col);
+                continue;
+            }
             if (en.kind == dc::entity::EnemyKind::Flying) {   // hovering eye (cube fallback)
                 const float gx = en.position[0], gz = en.position[2];
                 const float cy = terrain.height(gx, gz) + dc::entity::FLY_HOVER;
@@ -3173,24 +3279,35 @@ int main(int argc, char** argv) {
                 }
                 continue;
             }
+            // Skeletons use their own model + clips; everything else uses the shared rig.
+            // Pick the model per kind: skeleton (melee), gnome (flamethrower), mage (ranged);
+            // each falls back to the shared player rig + tint if its .glb is missing.
+            const bool is_skel  = (en.kind == dc::entity::EnemyKind::Skeleton) && skeleton_loaded;
+            const bool is_gnome = (en.kind == dc::entity::EnemyKind::Flamethrower) && gnome_loaded;
+            const bool is_mage  = (en.kind == dc::entity::EnemyKind::Ranged) && mage_loaded;
+            const bool custom   = is_skel || is_gnome || is_mage;
+            const dc::renderer::ModelData& md = is_skel ? skeleton_data : is_gnome ? gnome_data : is_mage ? mage_data : model_data;
+            dc::renderer::Model& mdl = is_skel ? skeleton_model : is_gnome ? gnome_model : is_mage ? mage_model : player_model;
             std::vector<dc::renderer::AnimLayer> el;
-            if (en.attacking)        el.push_back({ &model_data.punch, en.attack_time, model_data.arm_l_node });
-            else if (en.anim_time > 0.0f) el.push_back({ &model_data.walk, en.anim_time, -1 });
-            dc::renderer::pose_model(model_data, el, 0.0f, enemy_part_world);
+            if (en.attacking)        el.push_back({ &md.punch, en.attack_time, md.arm_l_node });
+            else if (en.anim_time > 0.0f) el.push_back({ &md.walk, en.anim_time, -1 });
+            dc::renderer::pose_model(md, el, 0.0f, enemy_part_world);
             mat4 eplace;
             glm_mat4_identity(eplace);
             vec3 epos = { en.position[0], terrain.height(en.position[0], en.position[2]) + MODEL_FOOT_LIFT, en.position[2] };
             glm_translate(eplace, epos);
             glm_rotate_y(eplace, -en.yaw + MODEL_YAW_OFFSET, eplace);
             if (en.elite) { vec3 es = {dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE}; glm_scale(eplace, es); }
-            vec3 col; glm_vec3_copy(en.kind == dc::entity::EnemyKind::Ranged ? ranged_color
-                                  : en.kind == dc::entity::EnemyKind::Flamethrower ? flame_color : enemy_color, col);
+            vec3 col;
+            if (custom) { vec3 white = { 1.0f, 1.0f, 1.0f }; glm_vec3_copy(white, col); }   // white tint -> the model's own material colors show
+            else glm_vec3_copy(en.kind == dc::entity::EnemyKind::Ranged ? ranged_color
+                             : en.kind == dc::entity::EnemyKind::Flamethrower ? flame_color : enemy_color, col);
             if (en.elite) { vec3 gold = { 1.0f, 0.78f, 0.25f }; glm_vec3_lerp(col, gold, 0.6f, col); }  // golden sheen
             if (en.hit_flash > 0.0f) {                 // flash red when struck
                 vec3 red = { 1.0f, 0.1f, 0.1f };
                 glm_vec3_lerp(col, red, en.hit_flash / dc::entity::FLASH_TIME, col);
             }
-            renderer.draw_model(player_model, enemy_part_world, eplace, col);
+            renderer.draw_model(mdl, enemy_part_world, eplace, col);
         }
         if (!flyer_verts.empty()) {                       // upload + draw this frame's flyer cubes
             flyer_mesh.upload(flyer_verts);
@@ -3210,11 +3327,10 @@ int main(int argc, char** argv) {
             const dc::game::Appearance& rlook = look_for(rp.id);   // this player's custom look
             // Pitch the body (not the head) so the arms + held gear aim with the look;
             // the head tilts too since it's a child of the body bone.
-            std::vector<BoneSave> r_bone_saves; push_bones(rlook, r_bone_saves);   // their silly proportions
+            std::vector<float> r_bscale = bone_scale_for(rlook);   // their silly proportions (networked via Appearance)
             dc::renderer::pose_model(model_data, rl, 0.0f, remote_part_world,
                                      { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
-                                     { &r_head, &r_lhand, &r_rhand }, rp.pitch);
-            pop_bones(r_bone_saves);
+                                     { &r_head, &r_lhand, &r_rhand }, rp.pitch, &r_bscale);
             float rfeet = (rp.pos[1] - dc::world::EYE_HEIGHT) + MODEL_FOOT_LIFT;
             mat4 rplace;
             glm_mat4_identity(rplace);
@@ -3351,14 +3467,29 @@ int main(int argc, char** argv) {
             };
             const bool night = is_night();
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            // Static turret housing model is posed once (no animation); each turret draws it
+            // yawed toward its target. The barrel + tracer stay procedural so they aim in 3D.
+            std::vector<dc::renderer::Mat4> turret_pw;
+            if (turret_loaded) dc::renderer::pose_model(turret_data, {}, 0.0f, turret_pw);
             for (int i = 0; i < TURRET_COUNT; ++i) {
                 const TPos& tp = turret_pos[i];
-                vec3 base = { tp.x, tp.y, tp.z }, top = { tp.x, tp.y + 1.3f, tp.z };
-                add_cyl(base, top, 0.5f, 10);                 // body
-                vec3 pivot = { tp.x, tp.y + 1.2f, tp.z };
+                vec3 pivot = { tp.x, tp.y + 1.1f, tp.z };
                 // Aim: at night toward the nearest enemy (tilts in 3D); by day straight down.
                 vec3 dir = { 0.0f, -1.0f, 0.0f };
                 const dc::entity::Entity* tgt = night ? turret_target(tp.x, tp.z) : nullptr;
+                // Body: the armored model (yawed to face the target) if available, else a cylinder.
+                if (turret_loaded) {
+                    const float tyaw = tgt ? std::atan2(tgt->position[2] - tp.z, tgt->position[0] - tp.x) : 0.0f;
+                    mat4 tpl; glm_mat4_identity(tpl);
+                    vec3 tpos = { tp.x, tp.y, tp.z }; glm_translate(tpl, tpos);
+                    glm_rotate_y(tpl, -tyaw + MODEL_YAW_OFFSET, tpl);
+                    vec3 tmc = { 0.62f, 0.63f, 0.70f };                       // dim + cool by day
+                    if (night) { tmc[0] = 1.0f; tmc[1] = 1.0f; tmc[2] = 1.0f; }   // full color at night (active)
+                    renderer.draw_model(turret_model, turret_pw, tpl, tmc);
+                } else {
+                    vec3 base = { tp.x, tp.y, tp.z }, top = { tp.x, tp.y + 1.3f, tp.z };
+                    add_cyl(base, top, 0.5f, 10);
+                }
                 if (tgt) {
                     dir[0] = tgt->position[0] - pivot[0];
                     dir[1] = (terrain.height(tgt->position[0], tgt->position[2]) + 0.8f) - pivot[1];
@@ -4266,6 +4397,71 @@ int main(int argc, char** argv) {
                         hud_rect(cx + sx - tx, cy - s, cx + sx, cy + s, r, g, b, a);   // right
                         break;
                     }
+                    case IconShape::Sword: {   // blade + crossguard + grip + pommel (melee damage)
+                        hud_rect(cx - sx*0.13f, cy - s*0.45f, cx + sx*0.13f, cy + s*0.78f, r, g, b, a);  // blade
+                        hud_tri(cx, cy + s, cx - sx*0.13f, cy + s*0.78f, cx + sx*0.13f, cy + s*0.78f, r, g, b, a);  // tip
+                        hud_rect(cx - sx*0.62f, cy - s*0.45f, cx + sx*0.62f, cy - s*0.30f, r, g, b, a);  // crossguard
+                        hud_rect(cx - sx*0.12f, cy - s*0.78f, cx + sx*0.12f, cy - s*0.45f, r, g, b, a);  // grip
+                        hud_rect(cx - sx*0.20f, cy - s, cx + sx*0.20f, cy - s*0.78f, r, g, b, a);        // pommel
+                        break;
+                    }
+                    case IconShape::Heart: {   // two lobes + a V point (regen)
+                        hud_rect(cx - sx*0.95f, cy + s*0.05f, cx - sx*0.05f, cy + s, r, g, b, a);  // left lobe
+                        hud_rect(cx + sx*0.05f, cy + s*0.05f, cx + sx*0.95f, cy + s, r, g, b, a);  // right lobe
+                        hud_tri(cx - sx*0.95f, cy + s*0.10f, cx + sx*0.95f, cy + s*0.10f, cx, cy - s, r, g, b, a);  // point
+                        break;
+                    }
+                    case IconShape::Clock: {   // ring + two hands (cooldown)
+                        const int N = 18; const float ir = 0.66f;
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 6.2831853f*k/N, a1 = 6.2831853f*(k+1)/N;
+                            const float c0=std::cos(a0),s0=std::sin(a0),c1=std::cos(a1),s1=std::sin(a1);
+                            hud_tri(cx+sx*c0,cy+s*s0, cx+sx*c1,cy+s*s1, cx+sx*ir*c1,cy+s*ir*s1, r, g, b, a);
+                            hud_tri(cx+sx*c0,cy+s*s0, cx+sx*ir*c1,cy+s*ir*s1, cx+sx*ir*c0,cy+s*ir*s0, r, g, b, a);
+                        }
+                        hud_rect(cx - sx*0.07f, cy, cx + sx*0.07f, cy + s*0.55f, r, g, b, a);  // minute hand
+                        hud_rect(cx, cy - s*0.07f, cx + sx*0.42f, cy + s*0.07f, r, g, b, a);   // hour hand
+                        break;
+                    }
+                    case IconShape::Hammer: {  // head + handle (knockback)
+                        hud_rect(cx - sx*0.70f, cy + s*0.45f, cx + sx*0.70f, cy + s, r, g, b, a);   // head
+                        hud_rect(cx - sx*0.14f, cy - s, cx + sx*0.14f, cy + s*0.45f, r, g, b, a);   // handle
+                        break;
+                    }
+                    case IconShape::Boot: {    // L-shape (stamina / footwork)
+                        hud_rect(cx - sx*0.35f, cy - s*0.20f, cx + sx*0.15f, cy + s, r, g, b, a);   // leg
+                        hud_rect(cx - sx*0.35f, cy - s, cx + sx*0.85f, cy - s*0.20f, r, g, b, a);   // foot
+                        break;
+                    }
+                    case IconShape::Shield: {  // box body + point bottom (i-frames)
+                        hud_rect(cx - sx, cy - s*0.15f, cx + sx, cy + s, r, g, b, a);
+                        hud_tri(cx - sx, cy - s*0.15f, cx + sx, cy - s*0.15f, cx, cy - s, r, g, b, a);
+                        break;
+                    }
+                    case IconShape::Crescent: {  // top arc (wider swing)
+                        const int N = 12; const float ir = 0.60f, lo = 0.35f, hi = 2.79f;  // ~20..160 deg
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = lo+(hi-lo)*k/N, a1 = lo+(hi-lo)*(k+1)/N;
+                            const float c0=std::cos(a0),s0=std::sin(a0),c1=std::cos(a1),s1=std::sin(a1);
+                            hud_tri(cx+sx*c0,cy+s*s0, cx+sx*c1,cy+s*s1, cx+sx*ir*c1,cy+s*ir*s1, r, g, b, a);
+                            hud_tri(cx+sx*c0,cy+s*s0, cx+sx*ir*c1,cy+s*ir*s1, cx+sx*ir*c0,cy+s*ir*s0, r, g, b, a);
+                        }
+                        break;
+                    }
+                    case IconShape::Drone: {   // body + rotor bar + legs (gunner)
+                        hud_rect(cx - sx*0.28f, cy - s*0.30f, cx + sx*0.28f, cy + s*0.28f, r, g, b, a);  // body
+                        hud_rect(cx - sx, cy + s*0.50f, cx + sx, cy + s*0.66f, r, g, b, a);              // rotor bar
+                        hud_rect(cx - sx, cy + s*0.66f, cx - sx*0.60f, cy + s*0.92f, r, g, b, a);        // left rotor
+                        hud_rect(cx + sx*0.60f, cy + s*0.66f, cx + sx, cy + s*0.92f, r, g, b, a);        // right rotor
+                        hud_tri(cx - sx*0.28f, cy - s*0.30f, cx - sx*0.55f, cy - s, cx, cy - s*0.30f, r, g, b, a);  // leg L
+                        hud_tri(cx + sx*0.28f, cy - s*0.30f, cx + sx*0.55f, cy - s, cx, cy - s*0.30f, r, g, b, a);  // leg R
+                        break;
+                    }
+                    case IconShape::Fang: {    // two downward fangs (crit damage)
+                        hud_tri(cx - sx, cy + s, cx - sx*0.10f, cy + s, cx - sx*0.55f, cy - s, r, g, b, a);
+                        hud_tri(cx + sx*0.10f, cy + s, cx + sx, cy + s, cx + sx*0.55f, cy - s, r, g, b, a);
+                        break;
+                    }
                 }
             };
             // Cursor in NDC, but only while a menu is open (otherwise the mouse drives the
@@ -4717,7 +4913,7 @@ int main(int argc, char** argv) {
                 if (clip[3] <= 0.05f) continue;                       // behind the camera
                 const float ndcx = clip[0] / clip[3], ndcy = clip[1] / clip[3];
                 if (ndcx < -1.1f || ndcx > 1.1f || ndcy < -1.1f || ndcy > 1.1f) continue;
-                const char* txt = t.reactive ? dc::game::reactive_text(t.idx) : dc::game::taunt_text(t.idx);
+                const char* txt = t.text.c_str();
                 const float w = renderer.text_width(txt, 17.0f, fbw);
                 vec3 yellow = { 1.0f, 0.92f, 0.15f };
                 renderer.draw_text(txt, ndcx - w * 0.5f, ndcy, 17.0f, yellow, 1.0f - t.age / TAUNT_LIFE, fbw, fbh);

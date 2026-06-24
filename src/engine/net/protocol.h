@@ -27,7 +27,7 @@ enum class MsgType : uint8_t {
 
 // One enemy taunt fired this moment: where it spawns (over the enemy's head) and which
 // canned insult (index into dc::game::taunt_text). Clients float the text + speak it.
-struct TauntState { float x = 0.0f, y = 0.0f, z = 0.0f; uint8_t idx = 0; uint8_t reactive = 0; };
+struct TauntState { float x = 0.0f, y = 0.0f, z = 0.0f; char text[64] = {0}; };
 
 // Client -> host one-shot "cast" events. The host runs each special on its own clock
 // (motion + damage) and broadcasts the evolving state in the snapshot; the caster

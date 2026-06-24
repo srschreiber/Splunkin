@@ -24,6 +24,8 @@ inline float enemy_xp(EnemyKind kind) {
         case EnemyKind::Ranged:       return 12.0f;
         case EnemyKind::Flying:       return 15.0f;
         case EnemyKind::Flamethrower: return 25.0f;
+        case EnemyKind::Skeleton:     return 13.0f;   // melee-style, a touch more XP
+        case EnemyKind::Bat:          return 14.0f;   // flying nuisance
         case EnemyKind::Melee:
         default:                      return 10.0f;
     }

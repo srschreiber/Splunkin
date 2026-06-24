@@ -78,7 +78,7 @@ struct Q  { versor q; };
 void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
                 float head_pitch, std::vector<Mat4>& out_part_world,
                 std::vector<int> attach_nodes, std::vector<Mat4*> out_attach,
-                float body_pitch) {
+                float body_pitch, const std::vector<float>* bone_scale) {
     const int n = static_cast<int>(model.nodes.size());
 
     // Working TRS per node = base (rest), then each layer overrides.
@@ -142,6 +142,14 @@ void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
         glm_quat_mul(pitch_q, nr[model.body_node].q, result);
         glm_quat_copy(result, nr[model.body_node].q);
     }
+
+    // Silly-bone scaling: a per-node uniform multiplier applied AFTER animation sampling
+    // (so it survives clips that animate scale). Scaling a bone scales its subtree too.
+    if (bone_scale && static_cast<int>(bone_scale->size()) == n)
+        for (int i = 0; i < n; ++i) {
+            const float m = (*bone_scale)[i];
+            ns[i].v[0] *= m; ns[i].v[1] *= m; ns[i].v[2] *= m;
+        }
 
     std::vector<Mat4> local(n), world(n);
     std::vector<char> done(n, 0);

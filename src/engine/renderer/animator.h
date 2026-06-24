@@ -36,7 +36,8 @@ struct AnimLayer {
 void pose_model(const ModelData& model, const std::vector<AnimLayer>& layers,
                 float head_pitch, std::vector<Mat4>& out_part_world,
                 std::vector<int> attach_nodes = {}, std::vector<Mat4*> out_attach = {},
-                float body_pitch = 0.0f);
+                float body_pitch = 0.0f,
+                const std::vector<float>* bone_scale = nullptr);   // per-node uniform scale, applied AFTER animation
 
 // Per-part local offset of a model's mesh nodes, relative to their parent bone
 // (the node's own T*R*S). For equipment hung off a socket bone, draw part i at:

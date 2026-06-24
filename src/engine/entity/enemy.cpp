@@ -16,6 +16,9 @@ Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind, bool elite) {
     if (kind == EnemyKind::Flying) {
         e.position[1] = FLY_HOVER;     // hovers (relative height); reachable only by jumping
         e.health = 1.0f;               // fragile: one jump-hit or thrown sword drops it
+    } else if (kind == EnemyKind::Bat) {
+        e.position[1] = FLY_HOVER;     // bats hover + flap; a touch tankier than the eye
+        e.stats.max_health = 18.0f; e.health = 18.0f;
     } else if (kind == EnemyKind::Flamethrower) {
         e.stats.max_health = FLAME_MAX_HEALTH;   // tanky bruiser
         e.health = e.stats.max_health;
@@ -218,8 +221,8 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         // target leaving does. ti indexes both players[] and flows[]. ---
         // Ranged enemies give up a target that flees past their leash; melee chase
         // forever (huge cap). -1 = nobody valid in range -> idle.
-        const bool ranged = (e.kind == EnemyKind::Ranged || e.kind == EnemyKind::Flying);
-        const bool flying = (e.kind == EnemyKind::Flying);
+        const bool ranged = (e.kind == EnemyKind::Ranged || e.kind == EnemyKind::Flying || e.kind == EnemyKind::Bat);
+        const bool flying = (e.kind == EnemyKind::Flying || e.kind == EnemyKind::Bat);   // bats hover + flap like the eye
         const float leash = !ranged ? 1e30f : (flying ? FLY_LEASH : RANGED_LEASH);
         const int ti = pick_target(e, players, leash);
         if (ti < 0) { e.anim_time = 0.0f; e.attacking = false; continue; }
@@ -250,6 +253,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 pr.damage = dmg; pr.knockback = RANGED_KNOCKBACK; pr.life = RANGED_SHOT_LIFE;
                 pr.radius = RANGED_SHOT_RADIUS; pr.owner_id = e.id;   // so its hits can taunt
                 if (flying) { pr.color[0] = 1.0f; pr.color[1] = 0.12f; pr.color[2] = 0.08f; pr.beam = true; }   // red glowing laser
+                if (e.kind == EnemyKind::Bat) { pr.color[0] = 0.7f; pr.color[1] = 0.25f; pr.color[2] = 0.95f; }   // purple screech bolt
                 if (e.elite) {                          // bigger, harder-hitting elite shot
                     pr.damage *= ELITE_DAMAGE_MULT; pr.knockback *= ELITE_KNOCKBACK_MULT;
                     pr.radius *= ELITE_PROJ_MULT;

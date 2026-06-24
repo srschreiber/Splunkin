@@ -23,7 +23,9 @@ inline constexpr int CHEST_UPGRADE_COUNT = 18;   // chests roll only the core [0
 // Placeholder icon shapes (real icon art comes later). One per upgrade so the stacked
 // items in the top-left HUD are visually distinct. Rendered by main's icon_shape/bb_shape.
 enum class IconShape { Square, Triangle, Diamond, Circle, Cross, Arrow, Hourglass, Star, Pentagon, Hexagon,
-                       Flame, IceShard, Brick, Pip, Ammo, Streak, Boom, Ring, Burst, Slot };
+                       Flame, IceShard, Brick, Pip, Ammo, Streak, Boom, Ring, Burst, Slot,
+                       // meaningful glyphs (drawn in main's icon_shape)
+                       Sword, Heart, Clock, Hammer, Boot, Shield, Crescent, Drone, Fang };
 
 struct UpgradeDef {
     const char* name;        // short title (shown on the card + tooltip header)

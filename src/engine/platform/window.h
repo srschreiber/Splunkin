@@ -30,6 +30,8 @@ struct Window {
     void window_size(int& w, int& h) const;
     // Toggle relative mouse (FPS look on; free cursor for menus off).
     void set_relative_mouse(bool on);
+    // Toggle on-screen text entry (delivers SDL_EVENT_TEXT_INPUT while on).
+    void set_text_input(bool on);
 
     void swap();
     void shutdown();
