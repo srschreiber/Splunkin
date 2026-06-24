@@ -41,7 +41,7 @@ inline constexpr float ENEMY_SEPARATION_SPEED = 2.2f;  // push strength (units/s
 // Ranged enemy: keeps its distance and shoots spheres. It advances to RANGED_STANDOFF,
 // backs up (still firing) if a target gets closer than standoff - margin, and drops a
 // target that leaves RANGED_LEASH (out of range = unavailable -> retarget).
-inline constexpr float RANGED_STANDOFF      = 9.0f;    // preferred distance (bigger range)
+inline constexpr float RANGED_STANDOFF      = 7.0f;    // preferred distance — kept short so it's always inside turret range
 inline constexpr float RANGED_BACKUP_MARGIN = 1.5f;    // hysteresis band around the standoff
 inline constexpr float RANGED_BACKUP_SPEED  = 1.4f;    // retreat speed (slower than its advance, ENEMY_SPEED)
 inline constexpr float RANGED_LEASH         = 1.0e9f;  // never give up — aggro is effectively infinite
@@ -50,13 +50,24 @@ inline constexpr float RANGED_DAMAGE        = 9.0f;
 inline constexpr float RANGED_KNOCKBACK     = 3.0f;
 inline constexpr float RANGED_SHOT_SPEED    = 16.0f;   // projectile travel speed (units/s) — faster
 inline constexpr float RANGED_SHOT_RADIUS   = 0.35f;   // sphere size + hit radius
-inline constexpr float RANGED_SHOT_LIFE     = 4.0f;    // seconds before a shot fizzles (longer to reach far targets)
+inline constexpr float RANGED_SHOT_LIFE     = 1.6f;    // short -> can't snipe from far outside turret range
 inline constexpr float PROJECTILE_HIT_DIST  = 0.6f;    // shot within this of a player connects
+
+// Flamethrower enemy ("Pyro"): a rare, tanky red bruiser that closes to a medium range
+// and breathes a sustained cone of fire — big sustained damage that also SETS THE PLAYER
+// ON FIRE (a lingering burn DoT). Its flame also lights the area like a torch.
+inline constexpr float FLAME_MAX_HEALTH   = 120.0f;  // tankier than a normal enemy
+inline constexpr float FLAME_RANGE        = 7.0f;    // cone reach (decent range)
+inline constexpr float FLAME_CONE_COS     = 0.82f;   // ~35 deg half-angle spray
+inline constexpr float FLAME_DPS          = 42.0f;   // sustained damage while you're in the cone
+inline constexpr float FLAME_BURN_DPS     = 9.0f;    // lingering burn after you leave the flame
+inline constexpr float FLAME_BURN_TIME    = 3.0f;    // seconds the player keeps burning
+inline constexpr float FLAME_LIGHT_RADIUS = 8.0f;    // torch-like glow while firing
 
 // Flying enemy: a ranged variant that hovers above the ground; fires fast hard lasers.
 // Reachable in melee only by jumping up to it (see the vertical strike reach below).
 inline constexpr float FLY_HOVER         = 2.5f;    // hover height above its ground (relative)
-inline constexpr float FLY_STANDOFF      = 8.0f;    // bigger standoff range
+inline constexpr float FLY_STANDOFF      = 7.0f;    // short standoff — stays inside turret range
 inline constexpr float FLY_LEASH         = 1.0e9f;  // infinite aggro
 inline constexpr float FLY_FIRE_INTERVAL = 2.2f;    // rate of fire halved
 inline constexpr float FLY_DAMAGE        = 16.0f;   // lasers hit hard
@@ -107,6 +118,7 @@ struct PlayerCombat {
 };
 
 inline constexpr float BURN_INTERVAL = 0.5f;   // burn deals damage (+ a number) this often
+inline constexpr float HEALTHBAR_TIME = 5.0f;  // an enemy shows its health bar this long after being hit
 
 // A floating damage number to show over an enemy: where it was hit, how much, and
 // whether it was a crit (rendered in a different color). Emitted at the damage site
@@ -126,6 +138,8 @@ struct EnemyHitPlayer {
     bool  blocked = false;               // the shield absorbed some damage this tick
     float stamina_cost = 0.0f;           // stamina the shield spent blocking (caller deducts)
     float dealt   = 0.0f;                // damage THIS player dealt to enemies this tick (melee; for the scoreboard)
+    float ignite_dps  = 0.0f;            // flamethrower: set the player on fire at this dps...
+    float ignite_time = 0.0f;            // ...for this many seconds (0 = no ignite this tick)
 };
 
 // Advance enemies one tick against ALL players (co-op). Each player's strike is

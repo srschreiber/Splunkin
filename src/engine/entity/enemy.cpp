@@ -15,6 +15,9 @@ Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind) {
     if (kind == EnemyKind::Flying) {
         e.position[1] = FLY_HOVER;     // hovers (relative height); reachable only by jumping
         e.health = 1.0f;               // fragile: one jump-hit or thrown sword drops it
+    } else if (kind == EnemyKind::Flamethrower) {
+        e.stats.max_health = FLAME_MAX_HEALTH;   // tanky bruiser
+        e.health = e.stats.max_health;
     }
     e.alive = true;
     items.push_back(e);
@@ -124,6 +127,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         if (e.retarget_cd > 0.0f) e.retarget_cd -= dt;
         if (e.slow_time > 0.0f)   e.slow_time -= dt;
         if (e.punch_anim > 0.0f)  e.punch_anim -= dt;
+        if (e.healthbar_time > 0.0f) e.healthbar_time -= dt;
 
         // Fire burn: deal burn_dps in BURN_INTERVAL chunks while it lasts (a number per
         // tick), credited to whoever lit it. A burn tick can kill (checked below).
@@ -135,6 +139,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 const float bd = e.burn_dps * BURN_INTERVAL;
                 const float dealt = (bd < e.health) ? bd : (e.health > 0.0f ? e.health : 0.0f);
                 e.health -= bd;
+                e.healthbar_time = HEALTHBAR_TIME;
                 if (hits) hits->push_back({ {e.position[0], e.position[1], e.position[2]}, bd, false });
                 for (std::size_t pi = 0; pi < players.size(); ++pi)
                     if (players[pi].id == e.burn_owner) { out[pi].dealt += dealt; break; }
@@ -165,6 +170,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     if (hits) hits->push_back({ {e.position[0], e.position[1], e.position[2]}, dmg, crit });
                     e.health -= dmg;
                     e.hit_flash = FLASH_TIME;
+                    e.healthbar_time = HEALTHBAR_TIME;
                     const float kb = knock_amount(pc.strike_knockback + pc.earth_knock, e.stats.weight);
                     e.knock_vel[0] += (tx / d) * kb;   // knockback stays horizontal
                     e.knock_vel[2] += (tz / d) * kb;
@@ -248,6 +254,55 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
             } else {
                 e.anim_time = 0.0f;   // in the sweet spot: stand and shoot
             }
+            continue;
+        }
+
+        // --- Flamethrower: close to medium range and breathe a sustained fire cone.
+        // Continuous damage to anyone in the cone, plus it lights them on fire (a burn DoT
+        // that keeps ticking after they escape). `attacking` flags "currently spraying" for
+        // the flame particles + light on every peer. ---
+        if (e.kind == EnemyKind::Flamethrower) {
+            if (dist > 1e-4f) e.yaw = std::atan2(tdz, tdx);   // track the target
+            e.attack_yaw = e.yaw;
+            const float fdx = std::cos(e.yaw), fdz = std::sin(e.yaw);   // facing (spray direction)
+            bool firing = false;
+            if (dist <= FLAME_RANGE) {
+                for (std::size_t pi = 0; pi < players.size(); ++pi) {
+                    const PlayerCombat& pc = players[pi];
+                    if (!pc.alive || pc.invincible) continue;
+                    const float px = pc.pos[0] - e.position[0], pz = pc.pos[2] - e.position[2];
+                    const float pd = std::sqrt(px * px + pz * pz);
+                    if (pd > FLAME_RANGE || pd < 1e-3f) continue;
+                    if ((px / pd) * fdx + (pz / pd) * fdz < FLAME_CONE_COS) continue;   // outside the spray arc
+                    firing = true;
+                    float dmg = FLAME_DPS * dt;           // sustained (per-tick) damage
+                    // A raised shield burns the flame off (spends stamina), same as any hit.
+                    if (pc.blocking && pc.block_rate > 0.0f) {
+                        const float front = (-px / pd) * std::cos(pc.yaw) + (-pz / pd) * std::sin(pc.yaw);
+                        if (front >= pc.block_cos) {
+                            const float cost_full = pc.block_rate * dmg;
+                            const float spent = bsta[pi] < cost_full ? bsta[pi] : cost_full;
+                            bsta[pi] -= spent;
+                            const float negated = spent / pc.block_rate;
+                            out[pi].stamina_cost += spent;
+                            if (negated > 0.0f) out[pi].blocked = true;
+                            dmg = dmg > negated ? dmg - negated : 0.0f;
+                        }
+                    }
+                    out[pi].damage += dmg;
+                    if (dmg > 0.0f) {                     // only ignites if the flame got through
+                        out[pi].hit = true;
+                        out[pi].ignite_dps  = FLAME_BURN_DPS;
+                        out[pi].ignite_time = FLAME_BURN_TIME;
+                    }
+                }
+            }
+            e.attacking = firing;
+            if (e.attacking) e.attack_time += dt; else e.attack_time = 0.0f;
+            // Hold around flame range: advance if too far, otherwise stand and spray.
+            if (dist > FLAME_RANGE * 0.8f)
+                flow_advance(e, map, flow, list.rng, tgt.pos[0], tgt.pos[2], dt, move_mult * MELEE_SPEED_MULT, tile_heights, ENEMY_MAX_CLIMB);
+            else e.anim_time = 0.0f;
             continue;
         }
 
@@ -438,6 +493,7 @@ float radius_attack(EntityList& list, const vec3 center, float radius,
         if (hits) hits->push_back({ {e.position[0], e.position[1], e.position[2]}, damage, false });
         e.health -= damage;
         e.hit_flash = FLASH_TIME;
+        e.healthbar_time = HEALTHBAR_TIME;
         const float d = std::sqrt(d2);
         const float kb = knock_amount(knockback, e.stats.weight);
         if (d > 1e-4f) { e.knock_vel[0] += (dx / d) * kb; e.knock_vel[2] += (dz / d) * kb; }

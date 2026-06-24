@@ -15,6 +15,7 @@ struct Spawner {
     int      max_alive = 8;                   // stop emitting past this many entities total
     float    ranged_fraction = 0.0f;          // chance each spawn is a ranged enemy (vs melee)
     float    flying_fraction = 0.0f;          // chance each spawn is a flying enemy (checked first)
+    float    flame_fraction  = 0.0f;          // chance each spawn is a (rare) flamethrower enemy
     float    accum     = 0.0f;                // fractional spawns owed
     uint32_t rng       = 0x2545f491u;
 

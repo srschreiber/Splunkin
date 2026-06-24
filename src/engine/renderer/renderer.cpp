@@ -37,6 +37,8 @@ bool Renderer::init() {
     world_viewproj_loc     = glGetUniformLocation(world_program, "u_viewproj");
     world_use_solid_loc    = glGetUniformLocation(world_program, "u_use_solid");
     world_solid_loc        = glGetUniformLocation(world_program, "u_solid");
+    world_ambient_loc      = glGetUniformLocation(world_program, "u_ambient");
+    world_light_count_loc  = glGetUniformLocation(world_program, "u_light_count");
     world_light_pos_loc    = glGetUniformLocation(world_program, "u_light_pos");
     world_light_color_loc  = glGetUniformLocation(world_program, "u_light_color");
     world_light_radius_loc = glGetUniformLocation(world_program, "u_light_radius");
@@ -48,6 +50,8 @@ bool Renderer::init() {
     model_color_loc        = glGetUniformLocation(model_program, "u_color");
     model_alpha_loc        = glGetUniformLocation(model_program, "u_alpha");
     model_emissive_loc     = glGetUniformLocation(model_program, "u_emissive");
+    model_ambient_loc      = glGetUniformLocation(model_program, "u_ambient");
+    model_light_count_loc  = glGetUniformLocation(model_program, "u_light_count");
     model_light_pos_loc    = glGetUniformLocation(model_program, "u_light_pos");
     model_light_color_loc  = glGetUniformLocation(model_program, "u_light_color");
     model_light_radius_loc = glGetUniformLocation(model_program, "u_light_radius");
@@ -143,7 +147,7 @@ bool Renderer::init() {
 void Renderer::begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player,
                            float dt, int fb_w, int fb_h) {
     glViewport(0, 0, fb_w, fb_h);
-    glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
+    glClearColor(0.015f, 0.015f, 0.028f, 1.0f);   // dark — let the dynamic lights carry the scene
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const float aspect = (fb_h > 0) ? static_cast<float>(fb_w) / fb_h : 1.0f;
@@ -158,15 +162,28 @@ void Renderer::begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Play
     cam_up[0]    = view[0][1]; cam_up[1]    = view[1][1]; cam_up[2]    = view[2][1];
 }
 
-void Renderer::set_light(const vec3 pos, const vec3 color, float radius) {
+void Renderer::set_ambient(float ambient) {
+    glUseProgram(world_program); glUniform1f(world_ambient_loc, ambient);
+    glUseProgram(model_program); glUniform1f(model_ambient_loc, ambient);
+}
+
+void Renderer::set_lights(int count, const float* pos, const float* color, const float* radius) {
+    if (count > MAX_LIGHTS) count = MAX_LIGHTS;
+    if (count < 0) count = 0;
     glUseProgram(world_program);
-    glUniform3fv(world_light_pos_loc, 1, pos);
-    glUniform3fv(world_light_color_loc, 1, color);
-    glUniform1f(world_light_radius_loc, radius);
+    glUniform1i(world_light_count_loc, count);
+    if (count > 0) {
+        glUniform3fv(world_light_pos_loc, count, pos);
+        glUniform3fv(world_light_color_loc, count, color);
+        glUniform1fv(world_light_radius_loc, count, radius);
+    }
     glUseProgram(model_program);
-    glUniform3fv(model_light_pos_loc, 1, pos);
-    glUniform3fv(model_light_color_loc, 1, color);
-    glUniform1f(model_light_radius_loc, radius);
+    glUniform1i(model_light_count_loc, count);
+    if (count > 0) {
+        glUniform3fv(model_light_pos_loc, count, pos);
+        glUniform3fv(model_light_color_loc, count, color);
+        glUniform1fv(model_light_radius_loc, count, radius);
+    }
 }
 
 void Renderer::draw_map(const Mesh& mesh) {
@@ -178,10 +195,10 @@ void Renderer::draw_map(const Mesh& mesh) {
     mesh.draw();
 }
 
-void Renderer::draw_terrain(const Mesh& mesh, const vec3 color) {
+void Renderer::draw_terrain(const Mesh& mesh, const vec3 color, bool plain) {
     glUseProgram(world_program);
     glUniformMatrix4fv(world_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
-    glUniform1i(world_use_solid_loc, 1);   // solid color (ignores the texture)
+    glUniform1i(world_use_solid_loc, plain ? 2 : 1);   // 1 = terrain albedo, 2 = flat solid color
     glUniform3fv(world_solid_loc, 1, color);
     mesh.draw();
 }

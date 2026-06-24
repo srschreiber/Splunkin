@@ -4,11 +4,14 @@ in vec2 v_uv;
 in vec3 v_worldpos;
 flat in float v_layer;
 uniform sampler2DArray u_tex;
-uniform vec3 u_light_pos;     // nearest torch flame position
-uniform vec3 u_light_color;   // torch color * flicker intensity (0 = no torch)
-uniform float u_light_radius; // falloff distance
+#define MAX_LIGHTS 12
+uniform int  u_light_count;             // active dynamic lights
+uniform vec3 u_light_pos[MAX_LIGHTS];   // world positions (torches, flamethrowers, projectiles)
+uniform vec3 u_light_color[MAX_LIGHTS]; // color * intensity
+uniform float u_light_radius[MAX_LIGHTS];
 uniform int  u_use_solid;     // 1 = solid-color terrain floor, 0 = textured walls
 uniform vec3 u_solid;         // terrain base color when u_use_solid
+uniform float u_ambient;      // day/night ambient scale (bright by day, dim at night)
 out vec4 frag_color;
 
 // --- cheap value noise for color mottling (gives the flat-shaded ground some depth) ---
@@ -70,18 +73,26 @@ void main() {
     float diffuse = max(dot(n, ldir), 0.0);
     vec3 cool = vec3(0.45, 0.52, 0.72);   // shadowed-side tint (also the ambient floor)
     vec3 warm = vec3(1.10, 1.04, 0.90);   // lit-side tint
-    vec3 shade = mix(cool * 0.7, warm, diffuse);
+    // Dim ambient so the dynamic point lights (torches, pillars, projectiles) really pop.
+    // u_ambient scales it up by day and down at night.
+    vec3 shade = mix(cool * 0.28, warm * 0.42, diffuse) * u_ambient;
 
-    // Point light from the nearest torch, with smooth radial falloff.
-    vec3 toL = u_light_pos - v_worldpos;
-    float dist = length(toL);
-    float atten = clamp(1.0 - dist / u_light_radius, 0.0, 1.0);
-    atten *= atten;
-    float ndl = max(dot(n, normalize(toL)), 0.0);
-    vec3 point = u_light_color * ndl * atten;
+    // Sum every dynamic point light (torches, flamethrowers, glowing projectiles), each
+    // with smooth radial falloff.
+    vec3 point = vec3(0.0);
+    for (int i = 0; i < u_light_count; ++i) {
+        vec3 toL = u_light_pos[i] - v_worldpos;
+        float dist = length(toL);
+        float atten = clamp(1.0 - dist / u_light_radius[i], 0.0, 1.0);
+        atten *= atten;
+        float ndl = max(dot(n, normalize(toL)), 0.0);
+        point += u_light_color[i] * ndl * atten;
+    }
 
     vec3 base;
-    if (u_use_solid != 0)
+    if (u_use_solid == 2)
+        base = u_solid;                                            // flat solid color (props: flyers, pillars)
+    else if (u_use_solid != 0)
         base = terrain_albedo(n) * (0.96 + 0.02 * v_worldpos.y);   // blended dirt/grass + slight elevation tint
     else
         base = texture(u_tex, vec3(v_uv, v_layer)).rgb;

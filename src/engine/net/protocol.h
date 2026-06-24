@@ -93,6 +93,7 @@ struct PlayerState {
     uint8_t  punching = 0, blocking = 0;
     float    punch_time = 0.0f, block_time = 0.0f;
     float    hit_flash = 0.0f;
+    uint8_t  burning = 0;                    // on fire (flamethrower) -> flame particles on every screen
     float    sword_scale = 1.0f;             // blue-upgrade blade size
     // Specials, for rendering everyone's thrown/orbit swords on every screen.
     uint8_t  thrown_active = 0;
@@ -108,6 +109,8 @@ struct PlayerState {
 struct EnemyState {
     float   x = 0.0f, z = 0.0f, yaw = 0.0f;
     float   anim_time = 0.0f, attack_time = 0.0f, hit_flash = 0.0f, punch_anim = 0.0f;
+    float   health01 = 1.0f;        // current health fraction (for the over-head bar)
+    float   healthbar_time = 0.0f;  // seconds left to show the bar (0 = hidden)
     uint8_t attacking = 0;
     uint8_t kind = 0;           // dc::entity::EnemyKind (0 = Melee, 1 = Ranged) -> render color
     uint8_t status = 0;         // elemental status bitmask (1=burning, 2=slowed) -> fire/ice particles

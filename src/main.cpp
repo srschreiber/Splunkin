@@ -294,6 +294,47 @@ int main(int argc, char** argv) {
         glm_mat4_mulv3(t.placement, flame_anchor, 1.0f, t.flame_pos);   // model-local -> world
         torches.push_back(std::move(t));
     }
+
+    // Stone pillars: free-standing columns scattered on open floor, each with a torch on
+    // top — so the (otherwise dim) arena gets pools of light away from the walls. The
+    // pillar mesh is static (built once); each pillar adds a torch entry (light + flame).
+    dc::renderer::Mesh pillar_mesh;
+    const vec3 pillar_color = { 0.42f, 0.40f, 0.38f };   // cool stone grey
+    {
+        std::vector<float> pv;
+        auto face = [&](float ax,float ay,float az, float bx,float by,float bz,
+                        float cx,float cy,float cz, float dx,float dy,float dz, float nx,float ny,float nz) {
+            auto V=[&](float x,float y,float z){ pv.insert(pv.end(), {x,y,z,nx,ny,nz,0.f,0.f,0.f}); };
+            V(ax,ay,az);V(bx,by,bz);V(cx,cy,cz); V(ax,ay,az);V(cx,cy,cz);V(dx,dy,dz);
+        };
+        auto column = [&](float cx,float cz,float y0,float y1,float hw) {   // box from y0..y1
+            const float x0=cx-hw,x1=cx+hw,z0=cz-hw,z1=cz+hw;
+            face(x0,y0,z1,x1,y0,z1,x1,y1,z1,x0,y1,z1, 0,0,1);  face(x1,y0,z0,x0,y0,z0,x0,y1,z0,x1,y1,z0, 0,0,-1);
+            face(x1,y0,z1,x1,y0,z0,x1,y1,z0,x1,y1,z1, 1,0,0);  face(x0,y0,z0,x0,y0,z1,x0,y1,z1,x0,y1,z0, -1,0,0);
+            face(x0,y1,z1,x1,y1,z1,x1,y1,z0,x0,y1,z0, 0,1,0);
+        };
+        uint32_t s = 0x5707E11u + static_cast<uint32_t>(map->width * 2246822519u);
+        auto nf = [&](float lo, float hi) { s = s * 1664525u + 1013904223u; return lo + (hi - lo) * ((s >> 8) * (1.0f / 16777216.0f)); };
+        const float worldW = map->width * dc::world::TILE, worldH = map->height * dc::world::TILE;
+        const float PILLAR_HW = 0.7f, PILLAR_H = 3.4f;
+        const float spawnX = (map->spawn_col + 0.5f) * dc::world::TILE;
+        const float spawnZ = (map->spawn_row + 0.5f) * dc::world::TILE;
+        for (int i = 0; i < 16; ++i) {
+            const float px = nf(6.0f, worldW - 6.0f), pz = nf(6.0f, worldH - 6.0f);
+            // Keep pillars clear of the spawn point.
+            if (std::fabs(px - spawnX) < 8.0f && std::fabs(pz - spawnZ) < 8.0f) continue;
+            const float base = terrain.height(px, pz);
+            const float top  = base + PILLAR_H;
+            column(px, pz, base - 0.5f, top, PILLAR_HW);   // sink the base a bit so it sits flush
+            // Torch on top: place the model at the column top, derive its flame point.
+            Torch t;
+            glm_mat4_identity(t.placement);
+            vec3 tp = { px, top, pz }; glm_translate(t.placement, tp);
+            glm_mat4_mulv3(t.placement, flame_anchor, 1.0f, t.flame_pos);
+            torches.push_back(std::move(t));
+        }
+        pillar_mesh.upload(pv);
+    }
     std::vector<float> particle_verts;   // rebuilt each frame for draw_particles
 
     // Dynamic entities (enemies for now). Spawn one per 'X' tile in the map.
@@ -314,6 +355,7 @@ int main(int argc, char** argv) {
         sp.rate = 0.4f; sp.max_alive = 6;                   // fewer, but stronger (see ENEMY_MAX_HEALTH)
         sp.ranged_fraction = 0.30f;   // ~30% ground shooters
         sp.flying_fraction = 0.15f;   // ~15% hovering shooters
+        sp.flame_fraction  = 0.07f;   // ~7% rare flamethrower bruisers
         spawners.push_back(sp);
     }
 
@@ -362,6 +404,93 @@ int main(int argc, char** argv) {
     float run_time = 0.0f;                    // seconds survived this run (top-of-screen timer)
     float death_flash = 0.0f;                // red "you died" overlay timer
 
+    // Day/night cycle. By day you roam, gather, and the base is safe; at night the horde
+    // swells, enemies march on the base, and the solar turrets wake up to defend it.
+    // Host-authoritative `tod` (seconds into the cycle) is replicated so all peers agree.
+    const float DAY_LEN = 75.0f, NIGHT_LEN = 55.0f, CYCLE_LEN = DAY_LEN + NIGHT_LEN;
+    float tod = 0.0f;                         // seconds into the current day/night cycle
+    int   day_num = 1;                        // which day we're on (HUD)
+    auto is_night = [&]() { return tod >= DAY_LEN; };
+    // Map the cycle to a 24h clock: tod=0 (dawn) -> 6:00 AM, wrapping over the full cycle.
+    auto clock_str = [&](char* out, std::size_t n) {
+        float hf = 6.0f + (tod / CYCLE_LEN) * 24.0f;        // hours since midnight
+        if (hf >= 24.0f) hf -= 24.0f;
+        int hh = static_cast<int>(hf), mm = static_cast<int>((hf - hh) * 60.0f);
+        const char* ap = hh < 12 ? "AM" : "PM";
+        int h12 = hh % 12; if (h12 == 0) h12 = 12;
+        std::snprintf(out, n, "Day %d   %d:%02d %s", day_num, h12, mm, ap);
+    };
+    // Smooth 0..1 daylight (1 = noon, ~0 = deep night) with dawn/dusk ramps, for ambient.
+    auto daylight01 = [&]() {
+        if (tod < DAY_LEN) {                  // day: ramp up at dawn, down at dusk
+            const float u = tod / DAY_LEN;    // 0..1 across the day
+            return std::min(1.0f, std::min(u, 1.0f - u) * 6.0f);
+        }
+        const float u = (tod - DAY_LEN) / NIGHT_LEN;          // 0..1 across the night
+        return 0.08f + 0.10f * std::min(u, 1.0f - u) * 2.0f;  // stays dark, faint twilight at the edges
+    };
+
+    // The base/core you defend: a glowing column at the map center. At night the horde
+    // marches on it (targeted like a player); by day it's safe. If it falls, the run ends.
+    const float CORE_MAX_HEALTH = 2000.0f;
+    float core_health = CORE_MAX_HEALTH;
+    vec3 core_pos = { map->width * 0.5f * dc::world::TILE, 0.0f, map->height * 0.5f * dc::world::TILE };
+    core_pos[1] = terrain.height(core_pos[0], core_pos[2]);
+    const uint32_t CORE_ID = 0xC0FFEE01u;   // pseudo-player id for enemy targeting
+    // Core column mesh (static): a tall cylinder, drawn bright so it reads as a glowing pylon.
+    const float CORE_H = 5.5f, CORE_RAD = 1.1f;
+    dc::renderer::Mesh core_mesh;
+    {
+        std::vector<float> cv;
+        const int SIDES = 16;
+        const float y0 = core_pos[1] - 0.5f, y1 = core_pos[1] + CORE_H;
+        auto V = [&](float x, float y, float z, float nx, float ny, float nz) { cv.insert(cv.end(), {x,y,z,nx,ny,nz,0,0,0}); };
+        for (int k = 0; k < SIDES; ++k) {
+            const float a0 = 6.2831853f*k/SIDES, a1 = 6.2831853f*(k+1)/SIDES;
+            const float c0 = std::cos(a0), s0 = std::sin(a0), c1 = std::cos(a1), s1 = std::sin(a1);
+            const float x0 = core_pos[0]+c0*CORE_RAD, z0 = core_pos[2]+s0*CORE_RAD;
+            const float x1 = core_pos[0]+c1*CORE_RAD, z1 = core_pos[2]+s1*CORE_RAD;
+            V(x0,y0,z0,c0,0,s0); V(x1,y0,z1,c1,0,s1); V(x1,y1,z1,c1,0,s1);   // side quad
+            V(x0,y0,z0,c0,0,s0); V(x1,y1,z1,c1,0,s1); V(x0,y1,z0,c0,0,s0);
+            V(core_pos[0],y1,core_pos[2],0,1,0); V(x0,y1,z0,0,1,0); V(x1,y1,z1,0,1,0);  // top cap fan
+        }
+        core_mesh.upload(cv);
+    }
+    // Energy shield dome over the base: absorbs enemy damage before the core does, flashes
+    // red when hit, and has its own (upgradable) health. Charged blue at night; by day it
+    // drops (grey) and recharges on solar power.
+    const float SHIELD_RADIUS = 11.0f;
+    const float SHIELD_RECHARGE = 90.0f;   // hp/sec regained while charging (daytime)
+    float shield_max = 800.0f;             // upgradable capacity
+    float shield_health = shield_max;
+    float shield_flash = 0.0f;             // red pulse timer on absorb
+    float shield_prev = shield_max;        // to detect drops (client-side flash)
+    // Solar turret ring around the core (inside the shield). Charge/idle by day (gun down),
+    // active at night: aim at the nearest enemy and fire. Host does the damage; aim + tracers
+    // are computed per-peer from the (replicated) enemies, like the gunner minions.
+    const int   TURRET_COUNT = 7;
+    const float TURRET_RING = 8.0f, TURRET_RANGE = 18.0f, TURRET_DAMAGE = 16.0f, TURRET_FIRE_INTERVAL = 0.55f;
+    struct TPos { float x, y, z; };
+    std::vector<TPos>  turret_pos(TURRET_COUNT);
+    std::vector<float> turret_cd(TURRET_COUNT, 0.0f);   // host per-turret fire timers
+    for (int i = 0; i < TURRET_COUNT; ++i) {
+        const float a = 6.2831853f * i / TURRET_COUNT;
+        const float x = core_pos[0] + std::cos(a) * TURRET_RING, z = core_pos[2] + std::sin(a) * TURRET_RING;
+        turret_pos[i] = { x, terrain.height(x, z), z };
+    }
+    // Nearest live enemy to a turret within range (xz). Shared by host damage + render aim.
+    auto turret_target = [&](float tx, float tz) -> const dc::entity::Entity* {
+        const dc::entity::Entity* best = nullptr; float bd2 = TURRET_RANGE * TURRET_RANGE;
+        for (const auto& e : entities.items) {
+            if (e.type != dc::entity::EntityType::Enemy || !e.alive) continue;
+            const float dx = e.position[0] - tx, dz = e.position[2] - tz;
+            const float d2 = dx*dx + dz*dz;
+            if (d2 < bd2) { bd2 = d2; best = &e; }
+        }
+        return best;
+    };
+    dc::renderer::Mesh turret_mesh;   // rebuilt each frame (body + aimed gun)
+
     dc::renderer::Camera camera;
 
     dc::entity::Player player;
@@ -392,6 +521,7 @@ int main(int argc, char** argv) {
         float  minion_range = 18.0f; // drone targeting range (for laser visuals)
         float  trail_life = 0.0f;    // trailblazer segment lifetime (>0 = leaving a fire trail)
         bool ghost = false;   // dead player: render faint + translucent, no gear
+        bool burning = false; // on fire (flamethrower) -> emit flame motes
         bool punching = false, blocking = false;
         float punch_time = 0.0f, block_time = 0.0f, hit_flash = 0.0f, sword_scale = 1.0f;
         // Specials (render-only mirror of the owner's thrown/orbit state).
@@ -496,6 +626,8 @@ int main(int argc, char** argv) {
     // Reset the run (solo death = game over -> start over). Player back to spawn at
     // full health/stamina, currency + upgrades cleared, enemies/coins reset.
     auto reset_run = [&]() {
+        core_health = CORE_MAX_HEALTH; shield_health = shield_max; shield_flash = 0.0f;   // base + shield restored
+        tod = 0.0f; day_num = 1;   // back to dawn of day 1
         player.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
         player.position[1] = dc::world::EYE_HEIGHT;
         player.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
@@ -505,12 +637,13 @@ int main(int argc, char** argv) {
         player.knock_vel[0] = player.knock_vel[2] = 0.0f;
         player.dash_vel[0] = player.dash_vel[2] = 0.0f; player.iframes = 0.0f; player.dash_cd = 0.0f;
         player.hit_flash = 0.0f;
+        player.burn_time = 0.0f; player.burn_dps = 0.0f;
         thrown.active = false;
         orbit.active = false;
         bash.active = false;
         if (menu_chest >= 0) { menu_chest = -1; window.set_relative_mouse(true); }
         // Clear all chest upgrades.
-        player.stamina_mult = 1.0f;
+        player.stamina_mult = 0.5f;   // base half-cost (matches Player default)
         player.damage_mult = 1.0f;
         player.swing_reach_bonus = 0.0f;
         player.swing_cone_bonus = 0.0f;
@@ -538,7 +671,7 @@ int main(int argc, char** argv) {
             hc.body.health = hc.body.stats.max_health;
             hc.body.knock_vel[0] = hc.body.knock_vel[2] = 0.0f;
             hc.body.dash_vel[0] = hc.body.dash_vel[2] = 0.0f; hc.body.iframes = 0.0f;
-            hc.body.hit_flash = 0.0f;
+            hc.body.hit_flash = 0.0f; hc.body.burn_time = 0.0f; hc.body.burn_dps = 0.0f;
             hc.body.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
             hc.body.position[1] = dc::world::EYE_HEIGHT;
             hc.body.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
@@ -594,6 +727,7 @@ int main(int argc, char** argv) {
     struct Blast { float x, z, dmg; uint32_t owner; };
     std::vector<Blast> supersonic_blasts;
     float ss_anim = 0.0f; vec3 ss_pos = {0.0f, 0.0f, 0.0f};
+    float block_flash = 0.0f;   // >0 right after the block bubble absorbs a hit (tints it red)
 
     // Updraft launch + out-of-bounds safety net.
     const float UPDRAFT_RADIUS = 1.3f, UPDRAFT_LAUNCH = 28.0f;   // launches you high (reach plateaus)
@@ -796,8 +930,10 @@ int main(int argc, char** argv) {
                             currency = s.currency;   // our own wallet (host-authoritative)
                             my_damage = s.damage_dealt;   // our own total (host-authoritative)
                             player.stamina -= s.block_spent;   // stamina the host spent resolving our blocks
+                            if (s.block_spent > 0.0f) block_flash = 0.3f;   // bubble absorbed a hit -> flash red
                             if (player.stamina < 0.0f) player.stamina = 0.0f;
                             if (s.hit_flash > player.hit_flash) player.hit_flash = s.hit_flash;  // host says we got hit
+                            player.burn_time = s.burning ? 0.3f : 0.0f;   // host owns the DoT; this just gates our fire visual
                         } else {
                             Remote r{}; r.id = s.id;
                             r.pos[0] = s.x; r.pos[1] = s.y; r.pos[2] = s.z;
@@ -811,6 +947,7 @@ int main(int argc, char** argv) {
                             r.punching = s.punching != 0; r.blocking = s.blocking != 0;
                             r.punch_time = s.punch_time; r.block_time = s.block_time;
                             r.hit_flash = s.hit_flash; r.sword_scale = s.sword_scale;
+                            r.burning = s.burning != 0;
                             r.thrown_active = s.thrown_active != 0;
                             r.thrown_x = s.thrown_x; r.thrown_y = s.thrown_y; r.thrown_z = s.thrown_z;
                             r.thrown_spin = s.thrown_spin; r.thrown_size = s.thrown_size;
@@ -831,6 +968,8 @@ int main(int argc, char** argv) {
                         en.anim_time = e.anim_time; en.attacking = e.attacking != 0;
                         en.attack_time = e.attack_time; en.hit_flash = e.hit_flash;
                         en.punch_anim = e.punch_anim;
+                        en.health = e.health01; en.stats.max_health = 1.0f;   // frac for the over-head bar
+                        en.healthbar_time = e.healthbar_time;
                         en.kind = static_cast<dc::entity::EnemyKind>(e.kind);
                         en.burn_time = (e.status & 1) ? 1.0f : 0.0f;   // sentinels so the render emits fire/ice
                         en.slow_time = (e.status & 2) ? 1.0f : 0.0f;
@@ -878,6 +1017,12 @@ int main(int argc, char** argv) {
                         float dxyz[3]; std::memcpy(dxyz, p, sizeof dxyz); p += sizeof dxyz;
                         burst_sand(dxyz[0], dxyz[1], dxyz[2]);
                     }
+                    std::memcpy(&tod, p, 4); p += 4;          // shared day/night clock
+                    { uint32_t dn; std::memcpy(&dn, p, 4); p += 4; day_num = static_cast<int>(dn); }
+                    std::memcpy(&core_health, p, 4); p += 4;  // base health for the bar
+                    std::memcpy(&shield_health, p, 4); p += 4;
+                    if (shield_health < shield_prev - 0.5f) shield_flash = 0.3f;   // dropped -> flash red
+                    shield_prev = shield_health;
                 }
             }
         }
@@ -887,6 +1032,8 @@ int main(int argc, char** argv) {
         prev = now;
         if (dt > 0.05f) dt = 0.05f;
         run_time += dt;   // survival timer
+        // Advance the day/night clock (host/standalone owns it; clients get it via snapshot).
+        if (net.role != dc::net::Role::Client) { tod += dt; if (tod >= CYCLE_LEN) { tod -= CYCLE_LEN; ++day_num; } }
 
         // ESC toggles the pause menu, which frees the cursor (so you can alt-tab to
         // the other window during net testing). Re-captures on resume.
@@ -1287,28 +1434,61 @@ int main(int argc, char** argv) {
                 if (ch.locked_by != NO_LOCK) { ch.lock_time -= dt; if (ch.lock_time <= 0.0f) ch.locked_by = NO_LOCK; }
         }
 
-        // Update torch particles (each flame flickers on its own phase) and pick
-        // the torch nearest the player as this frame's single point light.
+        // Build this frame's dynamic point lights: torch flames, firing flamethrowers, and
+        // glowing projectiles. The shaders sum the nearest MAX_LIGHTS to the player, so a
+        // shot streaking past briefly lights up the walls/floor/enemies around it.
         const float t_now = static_cast<float>(now) / 1.0e9f;
-        const float LIGHT_RADIUS = 7.0f;
-        const vec3  LIGHT_BASE = { 1.4f, 0.8f, 0.4f };   // warm; scaled by flicker
-        vec3  light_pos = { 0.0f, -1000.0f, 0.0f };
-        vec3  light_color = { 0.0f, 0.0f, 0.0f };        // no torch -> dark
-        float best_d2 = 1e30f;
+        const float LIGHT_RADIUS = 14.0f;                  // torches/pillars throw light a long way
+        const vec3  LIGHT_BASE = { 2.2f, 1.35f, 0.7f };    // warm + bright; scaled by flicker
+        struct LightCand { float d2, px, py, pz, r, g, b, rad; };
+        std::vector<LightCand> lcands;
+        auto cand = [&](float px, float py, float pz, float r, float g, float b, float rad) {
+            const float dx = px - player.position[0], dz = pz - player.position[2];
+            lcands.push_back({ dx*dx + dz*dz, px, py, pz, r, g, b, rad });
+        };
         for (std::size_t i = 0; i < torches.size(); ++i) {
             float fl = dc::fx::flicker(t_now + static_cast<float>(i) * 1.7f);
-            torches[i].ps.update(dt, torches[i].flame_pos, fl);
-            float dx = torches[i].flame_pos[0] - player.position[0];
-            float dz = torches[i].flame_pos[2] - player.position[2];
-            float d2 = dx * dx + dz * dz;
-            if (d2 < best_d2) {
-                best_d2 = d2;
-                glm_vec3_copy(torches[i].flame_pos, light_pos);
-                light_color[0] = LIGHT_BASE[0] * fl;
-                light_color[1] = LIGHT_BASE[1] * fl;
-                light_color[2] = LIGHT_BASE[2] * fl;
-            }
+            torches[i].ps.update(dt, torches[i].flame_pos, fl);   // (still flicker every torch's particles)
+            cand(torches[i].flame_pos[0], torches[i].flame_pos[1], torches[i].flame_pos[2],
+                 LIGHT_BASE[0]*fl, LIGHT_BASE[1]*fl, LIGHT_BASE[2]*fl, LIGHT_RADIUS);
         }
+        for (const auto& en : entities.items) {   // firing flamethrowers glow orange
+            if (en.type != dc::entity::EntityType::Enemy || en.kind != dc::entity::EnemyKind::Flamethrower || !en.attacking) continue;
+            const float fl = 1.2f + 0.3f * dc::fx::flicker(t_now * 1.3f);
+            cand(en.position[0], terrain.height(en.position[0], en.position[2]) + 1.2f, en.position[2],
+                 1.5f*fl, 0.6f*fl, 0.2f*fl, dc::entity::FLAME_LIGHT_RADIUS);
+        }
+        for (const auto& pr : entities.projectiles)   // every glowing shot is a small moving light
+            cand(pr.pos[0], pr.pos[1], pr.pos[2], pr.color[0]*1.4f, pr.color[1]*1.4f, pr.color[2]*1.4f,
+                 pr.beam ? 5.5f : 4.5f);
+        // A soft glow around each living player so the dark world stays readable near you.
+        const float GLOW_R = 6.5f; const vec3 GLOW_C = { 0.55f, 0.58f, 0.72f };
+        if (!dead) cand(player.position[0], player.position[1] - dc::world::EYE_HEIGHT + 1.0f, player.position[2],
+                        GLOW_C[0], GLOW_C[1], GLOW_C[2], GLOW_R);
+        for (const auto& rp : remotes)
+            if (!rp.ghost) cand(rp.pos[0], rp.pos[1] - dc::world::EYE_HEIGHT + 1.0f, rp.pos[2],
+                                GLOW_C[0], GLOW_C[1], GLOW_C[2], GLOW_R);
+        // The core pylon glows (brighter while it still has health), lighting its surroundings.
+        if (core_health > 0.0f) {
+            const float pulse = 1.0f + 0.15f * dc::fx::flicker(t_now * 0.7f);
+            cand(core_pos[0], core_pos[1] + CORE_H * 0.6f, core_pos[2],
+                 0.4f*pulse, 1.3f*pulse, 1.5f*pulse, 12.0f);
+        }
+        // Keep the nearest MAX_LIGHTS to the player and upload them.
+        const int MAXL = dc::renderer::Renderer::MAX_LIGHTS;
+        if (static_cast<int>(lcands.size()) > MAXL)
+            std::nth_element(lcands.begin(), lcands.begin() + MAXL, lcands.end(),
+                             [](const LightCand& a, const LightCand& b) { return a.d2 < b.d2; });
+        const int lcount = std::min<int>(static_cast<int>(lcands.size()), MAXL);
+        float lpos[dc::renderer::Renderer::MAX_LIGHTS * 3];
+        float lcol[dc::renderer::Renderer::MAX_LIGHTS * 3];
+        float lrad[dc::renderer::Renderer::MAX_LIGHTS];
+        for (int i = 0; i < lcount; ++i) {
+            lpos[i*3] = lcands[i].px; lpos[i*3+1] = lcands[i].py; lpos[i*3+2] = lcands[i].pz;
+            lcol[i*3] = lcands[i].r;  lcol[i*3+1] = lcands[i].g;  lcol[i*3+2] = lcands[i].b;
+            lrad[i] = lcands[i].rad;
+        }
+        renderer.set_lights(lcount, lpos, lcol, lrad);
 
         // Debug: G spawns a melee enemy, H a ranged one, a couple tiles ahead.
         bool g_now = input.key_down(SDL_SCANCODE_G);
@@ -1588,6 +1768,21 @@ int main(int argc, char** argv) {
             players.push_back(cc);
         }
 
+        // The core joins the target list at NIGHT only: enemies path to + attack it exactly
+        // like a player (closest-first, retarget-on-hit), but it never strikes back. By day
+        // it's omitted, so the base is safe. Host owns the sim, so only add it there.
+        int core_index = -1;
+        if (net.role != dc::net::Role::Client && is_night() && core_health > 0.0f) {
+            dc::entity::PlayerCombat cc{};
+            cc.id = CORE_ID; cc.alive = true; cc.invincible = false;
+            cc.pos[0] = core_pos[0]; cc.pos[1] = core_pos[1] + 1.5f; cc.pos[2] = core_pos[2];
+            cc.weight = 1e9f;          // immovable
+            cc.block_rate = 0.0f;      // can't block
+            cc.strike = false;         // never attacks
+            core_index = static_cast<int>(players.size());
+            players.push_back(cc);
+        }
+
         // One flow field per player (parallel to `players`), so an enemy can path to
         // its committed target — not just whoever's nearest. A handful of small BFS;
         // cheap at these player counts.
@@ -1613,7 +1808,9 @@ int main(int argc, char** argv) {
             player.knock_vel[0] += hit.knock[0];        // integrated (with collision) in player.update next frame
             player.knock_vel[2] += hit.knock[2];
             if (hit.hit) player.hit_flash = dc::entity::FLASH_TIME;   // damage got through -> flash red
+            if (hit.ignite_time > 0.0f) { player.burn_time = hit.ignite_time; player.burn_dps = hit.ignite_dps; }  // set ablaze
             player.stamina -= hit.stamina_cost;                      // blocking spent this much stamina
+            if (hit.blocked) block_flash = 0.3f;                     // bubble absorbed a hit -> flash red
             if (player.stamina < 0.0f) player.stamina = 0.0f;
             host_damage += hit.dealt;                                // melee damage we dealt this tick
             // out[i+1] -> connected clients' bodies (health + knockback only; their
@@ -1626,7 +1823,49 @@ int main(int argc, char** argv) {
                 b.knock_vel[0] += h.knock[0];
                 b.knock_vel[2] += h.knock[2];
                 if (h.hit) b.hit_flash = dc::entity::FLASH_TIME;   // unblocked -> flash red
+                if (h.ignite_time > 0.0f) { b.burn_time = h.ignite_time; b.burn_dps = h.ignite_dps; }
                 host_clients[i].damage_dealt += h.dealt;           // melee damage this client dealt
+            }
+
+            // Burn DoT (flamethrower): tick fire damage on every burning player while it
+            // lasts. Host-authoritative; the resulting health goes out in the snapshot.
+            auto tick_burn = [&](dc::entity::Player& b) {
+                if (b.burn_time <= 0.0f) return;
+                b.burn_time -= dt;
+                b.health -= b.burn_dps * dt;
+                if (b.health < 0.0f) b.health = 0.0f;
+            };
+            tick_burn(player);
+            for (auto& hc : host_clients) tick_burn(hc.body);
+
+            // Base damage this tick (night only): the shield soaks it first (and flashes
+            // red); only the overflow once the shield is down reaches the core. The shield
+            // recharges on solar power during the day.
+            if (core_index >= 0 && core_index < static_cast<int>(hits.size())) {
+                float dmg = hits[core_index].damage;
+                if (dmg > 0.0f) {
+                    shield_flash = 0.3f;
+                    const float absorbed = dmg < shield_health ? dmg : shield_health;
+                    shield_health -= absorbed; dmg -= absorbed;
+                    core_health -= dmg;
+                    if (core_health < 0.0f) core_health = 0.0f;
+                }
+            }
+            if (!is_night())   // daytime: solar recharge back to full
+                shield_health = std::min(shield_max, shield_health + SHIELD_RECHARGE * dt);
+
+            // Solar turrets: only fire at NIGHT (charging/idle by day). Each on its own
+            // cooldown, hits the nearest enemy in range. Host-authoritative damage.
+            for (int i = 0; i < TURRET_COUNT; ++i) {
+                if (turret_cd[i] > 0.0f) turret_cd[i] -= dt;
+                if (!is_night()) continue;
+                const dc::entity::Entity* tgt = turret_target(turret_pos[i].x, turret_pos[i].z);
+                if (tgt && turret_cd[i] <= 0.0f) {
+                    vec3 c = { tgt->position[0], tgt->position[1], tgt->position[2] };
+                    std::vector<uint32_t> one;
+                    dc::entity::radius_attack(entities, c, 0.6f, TURRET_DAMAGE, 4.0f, one, &frame_hits);
+                    turret_cd[i] = TURRET_FIRE_INTERVAL;
+                }
             }
 
             // Gunner minions: on a per-player volley timer, every minion shoots the nearest
@@ -1823,6 +2062,7 @@ int main(int argc, char** argv) {
               s.punching = punching ? 1 : 0; s.blocking = blocking ? 1 : 0;
               s.punch_time = punch_time; s.block_time = block_time;
               s.hit_flash = player.hit_flash; s.sword_scale = player.sword_scale;
+              s.burning = player.burn_time > 0.0f ? 1 : 0;
               if (thrown.active && player.weapon) {
                   s.thrown_active = 1; s.thrown_x = thrown.pos[0]; s.thrown_y = thrown.pos[1]; s.thrown_z = thrown.pos[2];
                   s.thrown_spin = thrown.spin; s.thrown_size = player.weapon->throw_size;
@@ -1850,6 +2090,7 @@ int main(int argc, char** argv) {
                 s.punching = hc.input.anim_punch; s.blocking = hc.input.anim_block;
                 s.punch_time = hc.input.punch_time; s.block_time = hc.input.block_time;
                 s.hit_flash = hc.body.hit_flash; s.sword_scale = hc.input.sword_scale;
+                s.burning = hc.body.burn_time > 0.0f ? 1 : 0;
                 s.thrown_active = hc.thrown_active ? 1 : 0; s.thrown_x = hc.thrown_pos[0]; s.thrown_y = hc.thrown_pos[1];
                 s.thrown_z = hc.thrown_pos[2]; s.thrown_spin = hc.thrown_spin; s.thrown_size = hc.thrown_size;
                 s.orbit_active = hc.orbit_active ? 1 : 0; s.orbit_count = hc.orbit_count;
@@ -1864,6 +2105,8 @@ int main(int argc, char** argv) {
                 dc::net::EnemyState e{}; e.x = en.position[0]; e.z = en.position[2]; e.yaw = en.yaw;
                 e.anim_time = en.anim_time; e.attack_time = en.attack_time; e.hit_flash = en.hit_flash;
                 e.punch_anim = en.punch_anim;
+                e.health01 = en.stats.max_health > 0.0f ? en.health / en.stats.max_health : 0.0f;
+                e.healthbar_time = en.healthbar_time;
                 e.attacking = en.attacking ? 1 : 0; e.kind = static_cast<uint8_t>(en.kind);
                 e.status = (en.burn_time > 0.0f ? 1 : 0) | (en.slow_time > 0.0f ? 2 : 0);
                 put(&e, sizeof e);
@@ -1899,6 +2142,10 @@ int main(int argc, char** argv) {
             // Enemy deaths this tick (xyz triples) so clients play the same sand-crumble.
             uint32_t ndeath = static_cast<uint32_t>(frame_deaths.size() / 3); put(&ndeath, 4);
             put(frame_deaths.data(), frame_deaths.size() * sizeof(float));
+            put(&tod, 4);          // day/night clock, so clients share the cycle
+            { uint32_t dn = static_cast<uint32_t>(day_num); put(&dn, 4); }
+            put(&core_health, 4);    // base health, for the bar on every screen
+            put(&shield_health, 4);  // shield health, for the dome on every screen
             net.broadcast(buf.data(), buf.size(), false);
         }
 
@@ -1909,17 +2156,18 @@ int main(int argc, char** argv) {
         if (net.role != dc::net::Role::Client && death_flash <= 0.0f) {
             bool all_dead = player.health <= 0.0f;
             for (auto& hc : host_clients) all_dead = all_dead && hc.body.health <= 0.0f;
-            if (all_dead) { reset_run(); death_flash = 1.2f; }
+            if (all_dead || core_health <= 0.0f) { reset_run(); death_flash = 1.2f; }   // wipe OR base destroyed
         }
         if (death_flash > 0.0f) death_flash -= dt;
 
         // Difficulty ramps with survival time: faster spawns + a higher cap.
         // (run_time resets on death, so this scales back down too.)
         const float difficulty = 1.0f + run_time / 25.0f;   // +1x base every 25s
+        const float night_mult = is_night() ? 3.0f : 1.0f;  // the horde swells after dark
         if (net.role != dc::net::Role::Client)               // host owns enemy spawning
             for (auto& sp : spawners) {
-                sp.rate = 0.5f * difficulty;                     // 0.5 = configured base rate
-                sp.max_alive = static_cast<int>(8 * difficulty); // 8 = configured base cap
+                sp.rate = 0.5f * difficulty * night_mult;                     // 0.5 = configured base rate
+                sp.max_alive = static_cast<int>(8 * difficulty * night_mult); // 8 = configured base cap
                 sp.update(dt, entities, *map);
             }
 
@@ -1963,7 +2211,8 @@ int main(int argc, char** argv) {
         int w, h; window.framebuffer_size(w, h);
         camera.third_person = tp;   // third person by default; V drops to first person
         renderer.begin_frame(*map, camera, player, dt, w, h);
-        renderer.set_light(light_pos, light_color, LIGHT_RADIUS);
+        // Day/night ambient: bright noon -> dim night (the dynamic lights carry the night).
+        renderer.set_ambient(0.5f + 3.0f * daylight01());
         renderer.draw_map(mesh);
         renderer.draw_terrain(terrain_mesh, terrain_color);
         const float GHOST_ALPHA = 0.18f;               // dead remote players render faint + translucent
@@ -2095,6 +2344,7 @@ int main(int argc, char** argv) {
         // hovering cubes (batched + drawn solid below) to prove out flying enemies.
         vec3 enemy_color  = { 0.25f, 0.80f, 0.30f };
         vec3 ranged_color = { 0.70f, 0.30f, 0.85f };
+        vec3 flame_color  = { 0.85f, 0.18f, 0.12f };   // flamethrower bruiser: angry red
         std::vector<float> flyer_verts;   // batched cube faces (9-float world-space verts)
         auto box_face = [&](float ax,float ay,float az, float bx,float by,float bz,
                             float cx,float cy,float cz, float dx,float dy,float dz, float nx,float ny,float nz) {
@@ -2154,7 +2404,8 @@ int main(int argc, char** argv) {
             vec3 epos = { en.position[0], terrain.height(en.position[0], en.position[2]) + MODEL_FOOT_LIFT, en.position[2] };
             glm_translate(eplace, epos);
             glm_rotate_y(eplace, -en.yaw + MODEL_YAW_OFFSET, eplace);
-            vec3 col; glm_vec3_copy(en.kind == dc::entity::EnemyKind::Ranged ? ranged_color : enemy_color, col);
+            vec3 col; glm_vec3_copy(en.kind == dc::entity::EnemyKind::Ranged ? ranged_color
+                                  : en.kind == dc::entity::EnemyKind::Flamethrower ? flame_color : enemy_color, col);
             if (en.hit_flash > 0.0f) {                 // flash red when struck
                 vec3 red = { 1.0f, 0.1f, 0.1f };
                 glm_vec3_lerp(col, red, en.hit_flash / dc::entity::FLASH_TIME, col);
@@ -2164,7 +2415,7 @@ int main(int argc, char** argv) {
         if (!flyer_verts.empty()) {                       // upload + draw this frame's flyer cubes
             flyer_mesh.upload(flyer_verts);
             vec3 flyer_color = { 0.85f, 0.25f, 0.30f };   // menacing red
-            renderer.draw_terrain(flyer_mesh, flyer_color);
+            renderer.draw_terrain(flyer_mesh, flyer_color, true);   // flat color, not terrain-blended
         }
 
         // Draw remote players (other connected clients), blue-tinted, posed by their
@@ -2250,6 +2501,144 @@ int main(int argc, char** argv) {
             }   // end if (!rp.ghost)
         }
 
+        // Stone pillars (static, flat-shaded so they read as grey stone, not terrain).
+        renderer.draw_terrain(pillar_mesh, pillar_color, true);
+
+        // The core pylon: a bright cyan column (flat-shaded so it self-glows). Brightens
+        // while healthy, dims toward red as it's destroyed.
+        if (core_health > 0.0f) {
+            const float frac = core_health / CORE_MAX_HEALTH;
+            const float pulse = 0.8f + 0.2f * dc::fx::flicker(t_now * 0.9f);
+            vec3 ccol = { (1.0f - frac) * 1.0f * pulse, (0.5f + 0.5f*frac) * pulse, (0.4f + 0.6f*frac) * pulse };
+            renderer.draw_terrain(core_mesh, ccol, true);
+
+            // Rising energy motes off the pylon (the "producing particles").
+            auto jit = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
+            for (int k = 0; k < 2 && sparks.size() < 1800; ++k) {
+                Spark s;
+                s.pos[0] = core_pos[0] + (jit()-0.5f)*2.0f; s.pos[1] = core_pos[1] + jit()*CORE_H; s.pos[2] = core_pos[2] + (jit()-0.5f)*2.0f;
+                s.vel[0] = (jit()-0.5f)*0.3f; s.vel[1] = 1.4f + jit()*1.4f; s.vel[2] = (jit()-0.5f)*0.3f;
+                s.color[0] = 0.4f; s.color[1] = 0.9f; s.color[2] = 1.0f;
+                s.age = 0.0f; s.life = 1.0f + jit()*0.6f; s.grav = -0.5f; s.size_mul = 1.3f; s.alpha_mul = 1.8f;
+                sparks.push_back(s);
+            }
+            // Always-on health bar above the pylon (it's the objective).
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            const float BW = 2.0f, BH = 0.18f;
+            vec3 mid = { core_pos[0], core_pos[1] + CORE_H + 1.3f, core_pos[2] };
+            auto bar = [&](float lx, float rx, float r, float g, float b, float a) {
+                auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
+                    mid[0]+R[0]*u+U[0]*v, mid[1]+R[1]*u+U[1]*v, mid[2]+R[2]*u+U[2]*v, r,g,b,a }); };
+                P(lx,-BH); P(rx,-BH); P(rx,BH);  P(lx,-BH); P(rx,BH); P(lx,BH);
+            };
+            bar(-BW, BW, 0.5f, 0.05f, 0.05f, 0.18f);                          // track
+            bar(-BW, -BW + 2.0f*BW*frac, 0.2f, 1.0f, 0.45f, 0.65f);          // fill
+            // Shield bar just above the health bar (blue), so you can read shield HP.
+            const float sfrac = shield_max > 0.0f ? shield_health / shield_max : 0.0f;
+            mid[1] += BH * 3.0f;
+            bar(-BW, BW, 0.05f, 0.1f, 0.3f, 0.16f);                            // track
+            if (sfrac > 0.0f) bar(-BW, -BW + 2.0f*BW*sfrac, 0.35f, 0.65f, 1.0f, 0.7f);  // blue fill
+        }
+
+        // Solar turrets: cylinder body + a cylinder gun. By day the gun droops to the ground
+        // (charging/idle, grey); at night it wakes (orange) and tracks the nearest enemy,
+        // spitting red tracers. Built fresh each frame so the gun can aim.
+        {
+            std::vector<float> tv;
+            auto add_cyl = [&](const vec3 p0, const vec3 p1, float rad, int sides) {
+                float dx = p1[0]-p0[0], dy = p1[1]-p0[1], dz = p1[2]-p0[2];
+                float dl = std::sqrt(dx*dx+dy*dy+dz*dz); if (dl < 1e-4f) return;
+                dx/=dl; dy/=dl; dz/=dl;
+                float ux = 0, uy = 1, uz = 0; if (std::fabs(dy) > 0.99f) { ux = 1; uy = 0; }
+                float w1x = dy*uz-dz*uy, w1y = dz*ux-dx*uz, w1z = dx*uy-dy*ux;
+                float w1l = std::sqrt(w1x*w1x+w1y*w1y+w1z*w1z); if (w1l>1e-4f){w1x/=w1l;w1y/=w1l;w1z/=w1l;}
+                float w2x = dy*w1z-dz*w1y, w2y = dz*w1x-dx*w1z, w2z = dx*w1y-dy*w1x;
+                auto V = [&](float x,float y,float z){ tv.insert(tv.end(), {x,y,z,0,1,0,0,0,0}); };
+                for (int k = 0; k < sides; ++k) {
+                    float a0 = 6.2831853f*k/sides, a1 = 6.2831853f*(k+1)/sides;
+                    float c0=std::cos(a0),s0=std::sin(a0),c1=std::cos(a1),s1=std::sin(a1);
+                    float o0x=(w1x*c0+w2x*s0)*rad,o0y=(w1y*c0+w2y*s0)*rad,o0z=(w1z*c0+w2z*s0)*rad;
+                    float o1x=(w1x*c1+w2x*s1)*rad,o1y=(w1y*c1+w2y*s1)*rad,o1z=(w1z*c1+w2z*s1)*rad;
+                    V(p0[0]+o0x,p0[1]+o0y,p0[2]+o0z); V(p0[0]+o1x,p0[1]+o1y,p0[2]+o1z); V(p1[0]+o1x,p1[1]+o1y,p1[2]+o1z);
+                    V(p0[0]+o0x,p0[1]+o0y,p0[2]+o0z); V(p1[0]+o1x,p1[1]+o1y,p1[2]+o1z); V(p1[0]+o0x,p1[1]+o0y,p1[2]+o0z);
+                }
+            };
+            const bool night = is_night();
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            for (int i = 0; i < TURRET_COUNT; ++i) {
+                const TPos& tp = turret_pos[i];
+                vec3 base = { tp.x, tp.y, tp.z }, top = { tp.x, tp.y + 1.3f, tp.z };
+                add_cyl(base, top, 0.5f, 10);                 // body
+                vec3 pivot = { tp.x, tp.y + 1.2f, tp.z };
+                // Aim: at night toward the nearest enemy (tilts in 3D); by day straight down.
+                vec3 dir = { 0.0f, -1.0f, 0.0f };
+                const dc::entity::Entity* tgt = night ? turret_target(tp.x, tp.z) : nullptr;
+                if (tgt) {
+                    dir[0] = tgt->position[0] - pivot[0];
+                    dir[1] = (terrain.height(tgt->position[0], tgt->position[2]) + 0.8f) - pivot[1];
+                    dir[2] = tgt->position[2] - pivot[2];
+                    float dl = std::sqrt(dir[0]*dir[0]+dir[1]*dir[1]+dir[2]*dir[2]);
+                    if (dl > 1e-4f) { dir[0]/=dl; dir[1]/=dl; dir[2]/=dl; } else { dir[1] = -1.0f; }
+                }
+                vec3 muzzle = { pivot[0] + dir[0]*1.4f, pivot[1] + dir[1]*1.4f, pivot[2] + dir[2]*1.4f };
+                add_cyl(pivot, muzzle, 0.18f, 8);             // gun barrel
+                // Tracer: when firing (a phase pulse), draw a red beam from muzzle to target.
+                if (tgt && std::fmod(run_time * 1.9f + i * 0.37f, TURRET_FIRE_INTERVAL) < 0.10f) {
+                    vec3 a = { muzzle[0], muzzle[1], muzzle[2] };
+                    vec3 b = { tgt->position[0], terrain.height(tgt->position[0],tgt->position[2]) + 0.9f, tgt->position[2] };
+                    const int SEG = 6;
+                    for (int s = 0; s < SEG; ++s) {
+                        float f0 = static_cast<float>(s)/SEG, f1 = static_cast<float>(s+1)/SEG;
+                        vec3 m = { a[0]+(b[0]-a[0])*0.5f*(f0+f1), a[1]+(b[1]-a[1])*0.5f*(f0+f1), a[2]+(b[2]-a[2])*0.5f*(f0+f1) };
+                        const float w = 0.06f;
+                        auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
+                            m[0]+R[0]*u+U[0]*v, m[1]+R[1]*u+U[1]*v, m[2]+R[2]*u+U[2]*v, 1.0f,0.3f,0.15f,0.9f}); };
+                        // small camera-facing segment quad
+                        P(-w,-w);P(w,-w);P(w,w); P(-w,-w);P(w,w);P(-w,w);
+                    }
+                }
+            }
+            turret_mesh.upload(tv);
+            vec3 tcol; if (night) { tcol[0]=0.8f; tcol[1]=0.45f; tcol[2]=0.2f; } else { tcol[0]=0.35f; tcol[1]=0.36f; tcol[2]=0.4f; }
+            renderer.draw_terrain(turret_mesh, tcol, true);
+
+            // Core shield dome enclosing the turrets. CHARGED bright blue at night (brighter
+            // with more shield health), flashing RED when it absorbs a hit; DOWN/grey by day
+            // (and a broken grey flicker if its health is depleted at night).
+            {
+                if (shield_flash > 0.0f) shield_flash -= dt;   // host sets on absorb, client on drop
+                const float SR = SHIELD_RADIUS;
+                vec3 c = { core_pos[0], core_pos[1] + 2.0f, core_pos[2] };
+                const float frac = shield_max > 0.0f ? shield_health / shield_max : 0.0f;
+                const float fl = shield_flash > 0.0f ? shield_flash / 0.3f : 0.0f;
+                float sr, sg, sb, sa;
+                if (night && frac > 0.0f) {                    // charged: blue, redder on hit
+                    sr = 0.25f + 0.75f * fl;
+                    sg = 0.55f * (1.0f - fl) + 0.12f * fl;
+                    sb = 1.0f  * (1.0f - fl) + 0.12f * fl;
+                    sa = 0.12f + 0.14f * frac + 0.18f * fl;
+                } else if (night) {                            // depleted at night: broken flicker
+                    sr = 0.45f; sg = 0.42f; sb = 0.45f;
+                    sa = 0.03f + 0.025f * dc::fx::flicker(t_now * 5.0f);
+                } else {                                        // day: dome down, faint grey
+                    sr = 0.42f; sg = 0.44f; sb = 0.5f; sa = 0.045f;
+                }
+                const int RINGS = 12, SEGS = 22; const float sz = 0.16f;
+                for (int ri = 1; ri < RINGS; ++ri) {
+                    const float th = 3.14159265f * ri / RINGS, st = std::sin(th), ct = std::cos(th);
+                    for (int si = 0; si < SEGS; ++si) {
+                        const float phi = 6.2831853f * si / SEGS + run_time * 0.2f;   // slow shimmer
+                        const float px = c[0] + SR * st * std::cos(phi);
+                        const float py = c[1] + SR * ct;
+                        const float pz = c[2] + SR * st * std::sin(phi);
+                        auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
+                            px + R[0]*u + U[0]*v, py + R[1]*u + U[1]*v, pz + R[2]*u + U[2]*v, sr, sg, sb, sa }); };
+                        P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
+                    }
+                }
+            }
+        }
+
         // Draw torch models (opaque, posed once at rest above). The flame part
         // glows via its emissive material.
         vec3 torch_tint = { 1.0f, 1.0f, 1.0f };
@@ -2282,44 +2671,51 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Enemy projectiles: most are glowing spheres; eye "lasers" (beam) render as a
-        // long, thin, red glowing capsule stretched along their travel direction.
+        // Enemy projectiles: ALL render as 3D glowing cylinders aligned to their travel
+        // direction (round rods from any angle, not flat quads), trailing a few embers.
+        // Eye "lasers" are long + thin; other shots (e.g. the purple enemy's) are shorter,
+        // fatter bolts. Color comes from each shot.
         {
-            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
             for (const auto& pr : entities.projectiles) {
                 const vec3 ctr = { pr.pos[0], pr.pos[1], pr.pos[2] };
                 const float cr = pr.color[0], cg = pr.color[1], cb = pr.color[2];
-                if (pr.beam) {
-                    // World-space ribbon: long axis = the 3D travel direction (so the beam
-                    // is parallel to where it's going, tilting up at elevated targets); the
-                    // width axis = perpendicular, in the plane facing the camera.
-                    float lx = pr.vel[0], ly = pr.vel[1], lz = pr.vel[2];
-                    float ll = std::sqrt(lx*lx + ly*ly + lz*lz);
-                    if (ll > 1e-4f) { lx /= ll; ly /= ll; lz /= ll; } else { lx = 1; ly = 0; lz = 0; }
-                    const float fx = R[1]*U[2]-R[2]*U[1], fy = R[2]*U[0]-R[0]*U[2], fz = R[0]*U[1]-R[1]*U[0];  // cam forward
-                    float wx = ly*fz - lz*fy, wy = lz*fx - lx*fz, wz = lx*fy - ly*fx;   // perp = L x F
-                    float wl = std::sqrt(wx*wx + wy*wy + wz*wz);
-                    if (wl > 1e-4f) { wx /= wl; wy /= wl; wz /= wl; } else { wx = R[0]; wy = R[1]; wz = R[2]; }
-                    const float LEN = 1.6f, WID = 0.12f;
-                    auto P = [&](float al, float ac, float gw, float gr, float gg, float gb, float a) {
-                        const float L = al * LEN * gw, Wd = ac * WID * (gw > 1.0f ? 3.0f : 1.0f);
+                // Orthonormal frame: long axis = travel direction; w1,w2 span the cross-section.
+                float lx = pr.vel[0], ly = pr.vel[1], lz = pr.vel[2];
+                float ll = std::sqrt(lx*lx + ly*ly + lz*lz);
+                if (ll > 1e-4f) { lx /= ll; ly /= ll; lz /= ll; } else { lx = 1; ly = 0; lz = 0; }
+                float ux = 0, uy = 1, uz = 0; if (std::fabs(ly) > 0.99f) { ux = 1; uy = 0; }   // avoid parallel
+                float w1x = ly*uz - lz*uy, w1y = lz*ux - lx*uz, w1z = lx*uy - ly*ux;
+                float w1l = std::sqrt(w1x*w1x + w1y*w1y + w1z*w1z);
+                if (w1l > 1e-4f) { w1x /= w1l; w1y /= w1l; w1z /= w1l; }
+                float w2x = ly*w1z - lz*w1y, w2y = lz*w1x - lx*w1z, w2z = lx*w1y - ly*w1x;
+                const float HALF = pr.beam ? 0.9f : 0.45f;             // laser = long rod, bolt = short
+                const float core = pr.beam ? 0.10f : 0.15f, glow = pr.beam ? 0.26f : 0.34f;
+                auto cyl = [&](float rad, float r, float g, float b, float a) {
+                    const int SIDES = 8;
+                    auto vert = [&](float ang, float end) {
+                        const float c = std::cos(ang), s = std::sin(ang);
+                        const float ox = (w1x*c + w2x*s) * rad, oy = (w1y*c + w2y*s) * rad, oz = (w1z*c + w2z*s) * rad;
                         particle_verts.insert(particle_verts.end(), {
-                            ctr[0] + lx*L + wx*Wd, ctr[1] + ly*L + wy*Wd, ctr[2] + lz*L + wz*Wd, gr, gg, gb, a });
+                            ctr[0] + lx*end + ox, ctr[1] + ly*end + oy, ctr[2] + lz*end + oz, r, g, b, a });
                     };
-                    // Bright thin core...
-                    P(-1,-1,1,cr,cg,cb,1); P(1,-1,1,cr,cg,cb,1); P(1,1,1,cr,cg,cb,1);
-                    P(-1,-1,1,cr,cg,cb,1); P(1,1,1,cr,cg,cb,1); P(-1,1,1,cr,cg,cb,1);
-                    // ...wrapped in a wider, fainter red glow.
-                    P(-1,-1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f); P(1,-1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f); P(1,1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f);
-                    P(-1,-1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f); P(1,1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f); P(-1,1,1.2f,cr,cg*0.3f,cb*0.3f,0.3f);
-                } else {
-                    const float ps = 0.3f;
-                    auto P = [&](float ax, float ay) {
-                        particle_verts.insert(particle_verts.end(), {
-                            ctr[0] + (R[0]*ax + U[0]*ay) * ps, ctr[1] + (R[1]*ax + U[1]*ay) * ps,
-                            ctr[2] + (R[2]*ax + U[2]*ay) * ps, cr, cg, cb, 1.0f });
-                    };
-                    P(-1,-1); P(1,-1); P(1,1);  P(-1,-1); P(1,1); P(-1,1);
+                    for (int k = 0; k < SIDES; ++k) {
+                        const float a0 = 6.2831853f * k / SIDES, a1 = 6.2831853f * (k + 1) / SIDES;
+                        vert(a0, -HALF); vert(a1, -HALF); vert(a1, HALF);   // side quad -> 2 tris
+                        vert(a0, -HALF); vert(a1,  HALF); vert(a0, HALF);
+                    }
+                };
+                cyl(core, cr, cg, cb, 1.0f);                            // bright solid core rod
+                cyl(glow, cr*0.6f + 0.4f, cg*0.4f, cb*0.4f, 0.30f);    // wider faint glow tube
+                // Leave a little fading trail of embers behind the shot (drops a mote each
+                // frame at its spot; the shot flies on, the motes linger + fade).
+                if (sparks.size() < 1500) {
+                    auto jit = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return ((spark_rng >> 8) * (1.0f / 16777216.0f)) - 0.5f; };
+                    Spark s;
+                    s.pos[0] = ctr[0] + jit() * 0.16f; s.pos[1] = ctr[1] + jit() * 0.16f; s.pos[2] = ctr[2] + jit() * 0.16f;
+                    s.vel[0] = s.vel[1] = s.vel[2] = 0.0f;
+                    s.color[0] = cr; s.color[1] = cg * 0.5f + 0.1f; s.color[2] = cb * 0.5f + 0.1f;
+                    s.age = 0.0f; s.life = 0.35f; s.grav = 0.0f; s.size_mul = 1.2f; s.alpha_mul = 1.6f;
+                    sparks.push_back(s);
                 }
             }
         }
@@ -2510,6 +2906,35 @@ int main(int argc, char** argv) {
                 }
         }
 
+        // Block bubble: while blocking, a faint transparent sphere surrounds you (the shield
+        // is omnidirectional now). It flashes red for a moment whenever it absorbs a hit.
+        if (block_flash > 0.0f) block_flash -= dt;
+        if (blocking && !dead) {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            const float fl = block_flash > 0.0f ? block_flash / 0.3f : 0.0f;   // 0..1 red pulse
+            // Calm blue normally; lerp toward red on absorb.
+            const float cr = 0.35f + 0.65f * fl, cg = 0.55f * (1.0f - fl) + 0.10f * fl, cb = 0.95f * (1.0f - fl) + 0.10f * fl;
+            const float al = 0.10f + 0.22f * fl;   // subtle, brighter on a hit
+            const vec3 c = { player.position[0], player.position[1] - dc::world::EYE_HEIGHT + 1.0f, player.position[2] };
+            const float rad = 1.4f, sz = 0.09f;
+            const int RINGS = 6, SEGS = 12;
+            for (int ri = 0; ri <= RINGS; ++ri) {
+                const float theta = 3.14159265f * ri / RINGS;
+                const float st = std::sin(theta), ct = std::cos(theta);
+                for (int si = 0; si < SEGS; ++si) {
+                    const float phi = 6.2831853f * si / SEGS;
+                    const float px = c[0] + rad * st * std::cos(phi);
+                    const float py = c[1] + rad * ct;
+                    const float pz = c[2] + rad * st * std::sin(phi);
+                    auto P = [&](float u, float v) {
+                        particle_verts.insert(particle_verts.end(), {
+                            px + (R[0]*u + U[0]*v), py + (R[1]*u + U[1]*v), pz + (R[2]*u + U[2]*v), cr, cg, cb, al });
+                    };
+                    P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
+                }
+            }
+        }
+
         // Melee forcefield bursts: when a melee enemy punches, an expanding shell of
         // orange shockwave motes blasts outward to MELEE_FORCEFIELD_RADIUS and fades. Driven
         // by the replicated punch_anim, so every peer sees it.
@@ -2539,6 +2964,35 @@ int main(int argc, char** argv) {
                         P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
                     }
                 }
+            }
+        }
+
+        // Enemy health bars: a subtle, semi-transparent red bar over the head of any enemy
+        // hit in the last HEALTHBAR_TIME seconds (fading out over the final second). A faint
+        // full-width track plus a brighter red fill proportional to remaining health.
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            const float BARW = 0.9f, BARH = 0.10f;
+            auto quad = [&](float lx, float rx, const vec3 mid, float y, float r, float g, float b, float a) {
+                // lx..rx are offsets along camera-right from `mid`; y offsets along camera-up.
+                auto P = [&](float u, float v) {
+                    particle_verts.insert(particle_verts.end(), {
+                        mid[0] + R[0]*u + U[0]*v, mid[1] + R[1]*u + U[1]*v, mid[2] + R[2]*u + U[2]*v, r, g, b, a });
+                };
+                P(lx, y - BARH); P(rx, y - BARH); P(rx, y + BARH);
+                P(lx, y - BARH); P(rx, y + BARH); P(lx, y + BARH);
+            };
+            for (const auto& en : entities.items) {
+                if (en.type != dc::entity::EntityType::Enemy || en.healthbar_time <= 0.0f) continue;
+                const float frac = en.stats.max_health > 0.0f
+                                 ? std::fmax(0.0f, std::fmin(1.0f, en.health / en.stats.max_health)) : 0.0f;
+                const float headY = terrain.height(en.position[0], en.position[2])
+                                  + (en.kind == dc::entity::EnemyKind::Flying ? dc::entity::FLY_HOVER : 0.0f) + 2.5f;
+                vec3 mid = { en.position[0], headY, en.position[2] };
+                const float fade = std::fmin(1.0f, en.healthbar_time);   // fade out over the last second
+                const float L = -BARW, Rr = BARW;
+                quad(L, Rr, mid, 0.0f, 0.5f, 0.05f, 0.05f, 0.12f * fade);                       // faint full track
+                if (frac > 0.0f) quad(L, L + (Rr - L) * frac, mid, 0.0f, 1.0f, 0.12f, 0.10f, 0.5f * fade);  // red fill
             }
         }
 
@@ -2678,6 +3132,43 @@ int main(int argc, char** argv) {
                 vec3 base = { en.position[0], ey, en.position[2] };
                 emit(base, em);
             }
+            // Flamethrower spray: a firing Pyro belches a cone of flame motes forward along
+            // its facing — bright orange/yellow, rising as they fly + fade (hot -> smoke).
+            auto add_flame = [&](float x, float y, float z, float vx, float vy, float vz, float life, float warm) {
+                if (sparks.size() > 1800) return;
+                Spark s;
+                s.pos[0] = x; s.pos[1] = y; s.pos[2] = z;
+                s.vel[0] = vx; s.vel[1] = vy; s.vel[2] = vz;
+                s.color[0] = 1.0f; s.color[1] = 0.45f + 0.35f * warm; s.color[2] = 0.12f * warm;
+                s.age = 0.0f; s.life = life; s.grav = -2.2f;   // negative grav -> rises
+                s.size_mul = 2.0f; s.alpha_mul = 2.2f;
+                sparks.push_back(s);
+            };
+            for (const auto& en : entities.items) {
+                if (en.type != dc::entity::EntityType::Enemy || en.kind != dc::entity::EnemyKind::Flamethrower || !en.attacking) continue;
+                const float fx = std::cos(en.attack_yaw), fz = std::sin(en.attack_yaw);
+                const float my = terrain.height(en.position[0], en.position[2]) + 1.2f;
+                const float mx = en.position[0] + fx * 0.6f, mz = en.position[2] + fz * 0.6f;
+                for (int k = 0; k < 6; ++k) {                       // a steady gout each frame
+                    const float spread = (frand() - 0.5f) * 0.5f;   // fan out sideways
+                    const float rx = -fz, rz = fx;                  // perpendicular (spray width)
+                    const float reach = 3.0f + frand() * 5.0f;      // varied travel speed -> cone depth
+                    add_flame(mx + rx * spread, my + (frand() - 0.5f) * 0.3f, mz + rz * spread,
+                              fx * reach + rx * spread * 2.0f, 0.6f + frand() * 1.0f, fz * reach + rz * spread * 2.0f,
+                              0.35f + frand() * 0.3f, frand());
+                }
+            }
+            // Players who are on fire smolder with flame motes (local player + burning peers).
+            auto emit_burn = [&](float x, float y, float z) {
+                for (int k = 0; k < 3; ++k)
+                    add_flame(x + (frand() - 0.5f) * 0.5f, y + frand() * 1.2f, z + (frand() - 0.5f) * 0.5f,
+                              (frand() - 0.5f) * 0.6f, 1.2f + frand() * 1.2f, (frand() - 0.5f) * 0.6f,
+                              0.3f + frand() * 0.25f, frand());
+            };
+            if (!dead && player.burn_time > 0.0f)
+                emit_burn(player.position[0], player.position[1] - dc::world::EYE_HEIGHT, player.position[2]);
+            for (const auto& rp : remotes)
+                if (!rp.ghost && rp.burning) emit_burn(rp.pos[0], rp.pos[1] - dc::world::EYE_HEIGHT, rp.pos[2]);
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
             for (std::size_t i = 0; i < sparks.size();) {
                 sparks[i].age += dt;
@@ -2971,15 +3462,6 @@ int main(int argc, char** argv) {
                 float dx = -0.88f;
                 for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
             }
-            // Survival timer (top-center): seconds survived, in 7-segment digits.
-            {
-                const float dw = 0.04f, dh = 0.085f, dt = 0.013f, gap = dw + dt * 2.0f;
-                const float by = 0.88f;
-                char num[16]; std::snprintf(num, sizeof num, "%d", static_cast<int>(run_time));
-                const int n = static_cast<int>(std::strlen(num));
-                float dx = -(n * gap) * 0.5f;        // center horizontally
-                for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
-            }
 
             // Item inventory (top-left, under the coins): one chip per upgrade held, with
             // its placeholder shape + color. Stack counts are drawn as text after draw_hud;
@@ -3123,6 +3605,17 @@ int main(int argc, char** argv) {
             renderer.draw_hud(hud);
 
             // --- Text overlays (separate glyph pass, drawn on top of the HUD rects) ---
+            // Day/time clock (top-center): e.g. "Day 2   7:14 PM". Tinted warm by day, cool
+            // blue at night so the phase reads at a glance.
+            {
+                char clk[32]; clock_str(clk, sizeof clk);
+                const float cpx = 22.0f;
+                const float w = renderer.text_width(clk, cpx, fbw);
+                vec3 col;
+                if (is_night()) { col[0] = 0.55f; col[1] = 0.7f; col[2] = 1.0f; }
+                else            { col[0] = 1.0f;  col[1] = 0.92f; col[2] = 0.6f; }
+                renderer.draw_text(clk, -w * 0.5f, 0.95f, cpx, col, 1.0f, fbw, fbh);
+            }
             // Item stack counts: bottom-right of each inventory chip.
             {
                 float ix = inv_x0;
@@ -3235,6 +3728,9 @@ int main(int argc, char** argv) {
     helmet_model.destroy();
     shield_model.destroy();
     torch_model.destroy();
+    pillar_mesh.destroy();
+    core_mesh.destroy();
+    turret_mesh.destroy();
     player_model.destroy();
     sword_model.destroy();
     if (eye_loaded) eye_model.destroy();

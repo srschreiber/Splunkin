@@ -30,7 +30,7 @@ inline constexpr float PLAYER_MAX_HEALTH = 100.0f;
 // of the arc it covers (smaller cos = wider arc).
 struct Shield {
     float block_rate      = 0.5f;   // stamina spent per point of damage blocked
-    float block_cos       = 0.6f;   // arccos(.6) ~53 deg half-cone
+    float block_cos       = -1.0f;  // omnidirectional: a full bubble blocks hits from any angle
     float block_speed     = 2.0f;   // raise-animation playback multiplier (lower = slower to ready)
     float stamina_per_sec = 8.0f;   // drained per second while the shield is up
     // Shield-bash nova (3): a white sphere expands from you, knocking everything it
@@ -47,10 +47,10 @@ struct Shield {
 // (unarmed) attack; reach/cone define the swing arc — every enemy inside is hit.
 struct Weapon {
     float attack_bonus     = 10.0f;  // added to the player's base attack_damage
-    float reach            = 5.0f;   // swing reach (world units) — long poke, ranged-ish feel
+    float reach            = 7.5f;   // swing reach (world units) — 1.5x longer poke by default
     float cone_cos         = 0.80f;  // arccos(.80) ~37 deg half-arc — skinny + long
-    float attack_speed     = 0.7f;   // swing-animation playback multiplier (lower = slower)
-    float cooldown         = 0.25f;  // seconds after a swing before the next is allowed
+    float attack_speed     = 1.4f;   // swing-animation playback multiplier (faster swing)
+    float cooldown         = 0.083f; // seconds after a swing before the next is allowed (~1/3 of before)
     float stamina_per_swing = 20.0f; // stamina spent per swing
     // Thrown special (MMB): the sword detaches, flies `throw_distance` out, then
     // boomerangs back. Bigger cost/cooldown, more damage than a swing.
@@ -88,14 +88,14 @@ struct Player {
     bool  on_ground = true;
     float speed = MOVE_SPEED;              // horizontal move speed (set per-frame: walk vs run)
     float health = PLAYER_MAX_HEALTH;      // clamps at 0 (no death screen yet)
-    float health_regen = 3.0f;             // hp/sec while alive (upgradeable)
+    float health_regen = 4.5f;             // hp/sec while alive (1.5x base; upgradeable)
     // combat: attack_damage/knockback used when striking, weight resists incoming knockback
     Stats stats = { PLAYER_MAX_HEALTH, 5.0f, 10.0f, 5.0f };  // attack_damage = base/unarmed
     float stamina       = 100.0f;
     float stamina_max   = 100.0f;
     float stamina_regen = 18.0f;               // per second, while not blocking
     // Upgrade modifiers (from chest cards). knockback upgrade bumps stats.knockback.
-    float stamina_mult       = 1.0f;           // green: scales all stamina costs (<1 cheaper)
+    float stamina_mult       = 0.5f;           // base: every action costs half endurance (green upgrade cheapens further)
     float damage_mult        = 1.0f;           // red: scales melee + throw damage
     float swing_reach_bonus  = 0.0f;           // blue: + melee reach
     float swing_cone_bonus   = 0.0f;           // blue: widens the swing arc (subtract from cos)
@@ -119,6 +119,8 @@ struct Player {
     std::optional<Weapon> weapon = Weapon{};   // equipped weapon (nullopt = fists)
     vec3  knock_vel = {0.0f, 0.0f, 0.0f};  // horizontal knockback velocity (decays in update)
     float hit_flash = 0.0f;                // red-flash timer (decayed by main)
+    float burn_time = 0.0f;                // on fire: seconds of burn DoT remaining (flamethrower)
+    float burn_dps  = 0.0f;                // burn damage per second while burn_time > 0
     // Dodge-dash (Shift): a burst of velocity with brief invincibility. All upgradeable.
     float dash_speed    = 24.0f;   // initial burst speed (units/s)
     float dash_decay    = 8.0f;    // how fast the burst tapers (1/s; higher = shorter dash)

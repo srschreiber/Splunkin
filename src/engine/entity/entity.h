@@ -12,7 +12,7 @@ enum class EntityType : uint8_t { Enemy };
 // Enemy behavior archetype. Targeting is shared (pick_target); the per-kind action
 // (melee swing vs. ranged standoff + projectile) branches in update_enemies. Flying
 // is a ranged variant that hovers above the ground (only reachable by jumping).
-enum class EnemyKind : uint8_t { Melee, Ranged, Flying };
+enum class EnemyKind : uint8_t { Melee, Ranged, Flying, Flamethrower };
 
 inline constexpr float FLASH_TIME = 0.15f;   // red hit-flash duration (seconds)
 inline constexpr float KNOCK_DAMP = 9.0f;    // knockback velocity decay rate (1/s)
@@ -39,6 +39,7 @@ struct Entity {
     Stats      stats;
     vec3       knock_vel  = {0.0f, 0.0f, 0.0f};  // horizontal knockback velocity (decays)
     float      hit_flash  = 0.0f;                // red-flash timer (counts down)
+    float      healthbar_time = 0.0f;            // seconds left to show the over-head health bar (refreshed on hit)
 
     // animation / combat clocks
     float anim_time   = 0.0f;   // walk clock (advances while moving)

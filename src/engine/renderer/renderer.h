@@ -20,9 +20,11 @@ struct Renderer {
     int world_viewproj_loc = -1, world_use_solid_loc = -1, world_solid_loc = -1;
     int model_viewproj_loc = -1, model_model_loc = -1, model_color_loc = -1, model_emissive_loc = -1, model_alpha_loc = -1;
     int particle_viewproj_loc = -1;
-    // Point-light uniforms (one nearest torch), looked up per program.
-    int world_light_pos_loc = -1, world_light_color_loc = -1, world_light_radius_loc = -1;
-    int model_light_pos_loc = -1, model_light_color_loc = -1, model_light_radius_loc = -1;
+    // Point-light uniforms: a small array of dynamic lights (torches, flamethrowers, glowing
+    // projectiles). Each program sums their contributions.
+    int world_light_count_loc = -1, world_light_pos_loc = -1, world_light_color_loc = -1, world_light_radius_loc = -1;
+    int model_light_count_loc = -1, model_light_pos_loc = -1, model_light_color_loc = -1, model_light_radius_loc = -1;
+    int world_ambient_loc = -1, model_ambient_loc = -1;   // day/night ambient scale
     uint32_t particle_vao = 0, particle_vbo = 0;
     // Text rendering: a baked glyph atlas (single-channel coverage) drawn as textured
     // NDC quads. ASCII 32..126 are baked from assets/fonts/sansrounded.ttf at FONT_BAKE_PX
@@ -42,12 +44,19 @@ struct Renderer {
     bool init();
     // Set viewport, clear color+depth, compute the frame's view-projection + camera basis.
     void begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player, float dt, int fb_w, int fb_h);
-    // Set the single point light for this frame on both lit programs. color=0 -> no torch.
-    void set_light(const vec3 pos, const vec3 color, float radius);
+    // Max dynamic lights the shaders sum per fragment (must match the shader array size).
+    static constexpr int MAX_LIGHTS = 12;
+    // Upload this frame's point lights to both lit programs. `pos`/`color` are tightly
+    // packed float[count*3]; `radius` is float[count]. count is clamped to MAX_LIGHTS.
+    void set_lights(int count, const float* pos, const float* color, const float* radius);
+    // Day/night ambient scale on both lit programs (1 = the dim baseline, higher = daylight).
+    void set_ambient(float ambient);
     // Draw the textured wall mesh.
     void draw_map(const Mesh& mesh);
-    // Draw the solid-color terrain floor mesh (same world program, no texture).
-    void draw_terrain(const Mesh& mesh, const vec3 color);
+    // Draw the solid-color terrain floor mesh (same world program, no texture). `plain`
+    // skips the dirt/grass albedo blend for a flat color — used for props (flyer cubes,
+    // stone pillars) rather than the ground.
+    void draw_terrain(const Mesh& mesh, const vec3 color, bool plain = false);
     // Draw a model: each part i uses placement * part_world[i] (from pose_model), flat color.
     // alpha < 1 alpha-blends the model (used to render dead players as faint ghosts).
     void draw_model(const Model& model, const std::vector<Mat4>& part_world, mat4 placement, vec3 color, float alpha = 1.0f);
