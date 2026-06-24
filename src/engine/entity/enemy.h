@@ -6,6 +6,18 @@
 
 namespace dc::entity {
 
+// Base XP an enemy of `kind` is worth when killed (the caller scales by run difficulty).
+// Tougher kinds drop more so XP tracks roughly with how hard they are to take down.
+inline float enemy_xp(EnemyKind kind) {
+    switch (kind) {
+        case EnemyKind::Ranged:       return 12.0f;
+        case EnemyKind::Flying:       return 15.0f;
+        case EnemyKind::Flamethrower: return 25.0f;
+        case EnemyKind::Melee:
+        default:                      return 10.0f;
+    }
+}
+
 inline constexpr float ENEMY_RADIUS          = 0.4f;   // collision circle
 inline constexpr float ENEMY_SPEED           = 2.5f;   // units/s (a touch slower than the player)
 inline constexpr float ENEMY_MAX_HEALTH      = 70.0f;  // beefier (fewer but stronger)
@@ -162,7 +174,8 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     std::vector<EnemyHitPlayer>& out, float dt,
                     std::vector<float>* deaths = nullptr,
                     std::vector<HitNumber>* hits = nullptr,
-                    const std::vector<float>* tile_heights = nullptr);
+                    const std::vector<float>* tile_heights = nullptr,
+                    std::vector<float>* death_xp = nullptr);   // parallel to `deaths`: XP per kill
 
 // Advance in-flight projectiles (host-authoritative): move, expire by lifetime, die
 // on walls, and on reaching a LIVING player deal damage + knockback into out[i]

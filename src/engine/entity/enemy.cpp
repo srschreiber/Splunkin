@@ -109,7 +109,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     const std::vector<dc::world::FlowField>& flows, const std::vector<PlayerCombat>& players,
                     std::vector<EnemyHitPlayer>& out, float dt,
                     std::vector<float>* deaths, std::vector<HitNumber>* hits,
-                    const std::vector<float>* tile_heights) {
+                    const std::vector<float>* tile_heights, std::vector<float>* death_xp) {
     out.assign(players.size(), EnemyHitPlayer{});
     // Frontal-shield block pool (same model as projectiles): a blocking player spends
     // block_rate stamina per point of melee-forcefield damage to negate it, drawn down
@@ -406,6 +406,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 deaths->push_back(list.items[i].position[1]);
                 deaths->push_back(list.items[i].position[2]);
             }
+            if (death_xp) death_xp->push_back(enemy_xp(list.items[i].kind));
             list.items[i] = list.items.back();
             list.items.pop_back();
         } else ++i;

@@ -20,6 +20,17 @@ const UpgradeDef& upgrade_def(Upgrade u) {
         { "Trailblazer",  "Leave a burning trail as you run; +damage & longer burn per stack.", IconShape::Streak, 1.00f, 0.40f, 0.10f },  // ember
         { "Supersonic",   "Dodging breaks the sound barrier: knocks back + hurts nearby enemies (+dmg per stack).", IconShape::Boom, 0.85f, 0.90f, 1.00f },  // shockwave white
         { "Drone Sensors","+6 minion targeting range per stack.",             IconShape::Pip,      0.35f, 0.90f, 0.55f },  // green (drone)
+        // --- level-up only (gated) ---
+        { "Orbit Blades", "Unlock the Orbit autocast (uses a spell slot).",    IconShape::Ring,     0.30f, 0.85f, 0.95f },  // cyan autocast
+        { "Force Nova",   "Unlock the Force Nova autocast (uses a spell slot).",IconShape::Burst,    0.85f, 0.90f, 1.00f },  // shockwave white
+        { "Attunement",   "+1 spell slot (hold another autocast).",            IconShape::Slot,     0.70f, 0.55f, 0.95f },  // violet
+        { "More Blades",  "+1 sword in your orbit ring.",                      IconShape::Ring,     0.40f, 0.90f, 1.00f },  // orbit
+        { "Orbit Tempo",  "Orbit spins faster and re-hits sooner.",            IconShape::Ring,     0.20f, 0.95f, 0.80f },  // orbit
+        { "Orbit Cycle",  "Orbit autocast recharges 15% faster per stack.",    IconShape::Ring,     0.25f, 0.70f, 0.95f },  // orbit
+        { "Wider Nova",   "+1 Force Nova blast radius per stack.",             IconShape::Burst,    0.80f, 0.85f, 1.00f },  // nova
+        { "Nova Cycle",   "Force Nova recharges 15% faster per stack.",        IconShape::Burst,    0.70f, 0.80f, 1.00f },  // nova
+        { "Overclock",    "All autocasts recharge 9% faster per stack.",       IconShape::Slot,     0.45f, 0.75f, 1.00f },  // global
+        { "Swordstorm",   "Throw an extra sword at once (up to 3).",           IconShape::Streak,   0.90f, 0.85f, 0.95f },  // throw
     };
     return defs[static_cast<int>(u)];
 }
@@ -46,6 +57,42 @@ void apply_upgrade(dc::entity::Player& p, Upgrade u) {
         case Upgrade::Trailblazer: p.trail_damage += 8.0f; p.trail_life += 0.8f; break;  // fire trail: +dmg, longer burn
         case Upgrade::Supersonic:  p.supersonic_damage += 14.0f;          break;  // dodge shockwave damage
         case Upgrade::DroneRange:  p.minion_range += 6.0f;                break;  // +drone targeting range
+        // --- level-up only (gated) ---
+        case Upgrade::UnlockOrbit:      p.orbit_unlocked = true;              break;  // occupies a spell slot
+        case Upgrade::UnlockForcefield: p.forcefield_unlocked = true;         break;  // occupies a spell slot
+        case Upgrade::ExtraSpellSlot:   if (p.spell_slots < dc::entity::SPELL_SLOTS_MAX) p.spell_slots++; break;
+        case Upgrade::OrbitSword:       if (p.weapon && p.weapon->orbit_count < dc::entity::ORBIT_COUNT_MAX) p.weapon->orbit_count++; break;
+        case Upgrade::OrbitTempo:       p.orbit_spin_mult += 0.30f; p.orbit_tick_mult *= 0.82f; break;  // faster spin + re-hit
+        case Upgrade::OrbitCooldown:    p.orbit_cd_mult *= 0.85f;             break;  // targeted -15%
+        case Upgrade::NovaRadius:       if (p.shield) p.shield->bash_radius += 1.0f; break;
+        case Upgrade::NovaCooldown:     p.forcefield_cd_mult *= 0.85f;        break;  // targeted -15%
+        case Upgrade::AutocastHaste:    p.autocast_cd_mult *= (1.0f - 0.15f * 0.6f); break;  // global: 3/5 of targeted
+        case Upgrade::MultiThrow:       if (p.throw_count < dc::entity::THROW_MAX) p.throw_count++; break;
+    }
+}
+
+bool upgrade_eligible(const dc::entity::Player& p, Upgrade u) {
+    const int used_slots = (p.orbit_unlocked ? 1 : 0) + (p.forcefield_unlocked ? 1 : 0);
+    const bool free_slot = used_slots < p.spell_slots;
+    switch (u) {
+        // Unlock an autocast only if it's still locked AND a slot is free to hold it.
+        case Upgrade::UnlockOrbit:      return !p.orbit_unlocked && free_slot;
+        case Upgrade::UnlockForcefield: return !p.forcefield_unlocked && free_slot;
+        case Upgrade::ExtraSpellSlot:   return p.spell_slots < dc::entity::SPELL_SLOTS_MAX;
+        // Orbit upgrades need orbit unlocked; nova upgrades need nova unlocked.
+        case Upgrade::OrbitSword:       return p.orbit_unlocked && p.weapon && p.weapon->orbit_count < dc::entity::ORBIT_COUNT_MAX;
+        case Upgrade::OrbitTempo:
+        case Upgrade::OrbitCooldown:    return p.orbit_unlocked;
+        case Upgrade::NovaRadius:
+        case Upgrade::NovaCooldown:     return p.forcefield_unlocked;
+        case Upgrade::AutocastHaste:    return p.orbit_unlocked || p.forcefield_unlocked;
+        case Upgrade::MultiThrow:       return p.weapon.has_value() && p.throw_count < dc::entity::THROW_MAX;
+        // Drone upgrades require owning a drone; getting the first comes from Gunner.
+        case Upgrade::Gunner:           return p.minion_count < 4;
+        case Upgrade::Munitions:
+        case Upgrade::DroneRange:       return p.minion_count > 0;
+        // Everything else (core melee/dodge/elemental) is always eligible.
+        default:                        return true;
     }
 }
 

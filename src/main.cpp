@@ -65,6 +65,15 @@ struct Coin {
     float age   = 0.0f;
 };
 
+// A dropped XP orb: a blue glowing mote left where an enemy died. Like a coin it
+// settles briefly, then magnets to the nearest player and is absorbed for `value` XP.
+struct XPOrb {
+    vec3  pos;
+    float value = 0.0f;   // XP granted on pickup (scaled by enemy difficulty)
+    float age   = 0.0f;
+    float bob   = 0.0f;   // phase offset so a cluster shimmers out of sync
+};
+
 // An updraft pad: stepping onto it launches you upward (traversal). Position only;
 // placed deterministically so every peer agrees (no replication).
 struct Updraft { float x = 0.0f, z = 0.0f; };
@@ -203,10 +212,22 @@ int main(int argc, char** argv) {
     {
         uint32_t seed = 0x51ED7u + static_cast<uint32_t>(map->width * 73856093 + map->height * 19349663);
         auto nextu = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
-        for (auto& ch : chests)
-            for (int k = 0; k < 4; ++k) ch.contents[k] = static_cast<Upgrade>(nextu() % UPGRADE_COUNT);
+        for (auto& ch : chests) {
+            // Pick 4 DISTINCT core upgrades (Fisher-Yates prefix on the pool) so a chest
+            // never shows the same card twice — forces variety in what's on offer.
+            int pool[CHEST_UPGRADE_COUNT];
+            for (int i = 0; i < CHEST_UPGRADE_COUNT; ++i) pool[i] = i;
+            for (int k = 0; k < 4; ++k) {
+                const int j = k + static_cast<int>(nextu() % static_cast<uint32_t>(CHEST_UPGRADE_COUNT - k));
+                const int tmp = pool[k]; pool[k] = pool[j]; pool[j] = tmp;
+                ch.contents[k] = static_cast<Upgrade>(pool[k]);
+            }
+        }
     }
     int menu_chest = -1;   // index of the chest whose purchase menu is open locally (-1 = none)
+    bool levelup_open = false;          // level-up upgrade-pick overlay is showing
+    Upgrade levelup_cards[4] = {};      // the (up to 4) eligible cards drawn for this pick
+    int  levelup_card_count = 0;        // how many cards are actually offered
     vec3 player_prev = {0,0,0};   // local player's last-frame position (for shot-leading velocity)
 
     // Updraft launch pads (slipstreams): mostly placed ON TOP of and AROUND the plateaus
@@ -360,7 +381,11 @@ int main(int argc, char** argv) {
     }
 
     std::vector<Coin> coins;                 // dropped on kills, magnet to the player
+    std::vector<XPOrb> xp_orbs;              // blue XP motes dropped on kills, magnet to the local player
+    int   pending_levelups = 0;              // queued level-up choices (XP can grant several at once)
+    uint32_t levelup_rng = 0x1EEDBEEFu;      // draws the eligible upgrade cards per level-up
     std::vector<float> frame_deaths;         // enemy death positions this frame (xyz triples)
+    std::vector<float> frame_death_xp;       // XP per death this frame (parallel to frame_deaths/3)
     std::vector<dc::entity::HitNumber> frame_hits;   // damage events this frame (host-computed)
     // Floating damage numbers: rise + fade over their life. Spawned from frame_hits
     // (host/standalone) or the snapshot (client). Rendered as billboarded 7-seg digits.
@@ -567,12 +592,14 @@ int main(int argc, char** argv) {
     bool  esc_prev = false;                            // edge-detect ESC
     bool  pause_click_prev = false;                    // edge-detect the quit-button click
     bool  menu_click_prev = false;                     // edge-detect the chest-menu buy click
+    bool  levelup_click_prev = false;                  // edge-detect the level-up card click
     int   inventory[UPGRADE_COUNT] = {0, 0, 0, 0};     // how many of each upgrade picked (RoR2-style stacks)
     bool  punch_struck = false;                        // strike lands once per punch
     float attack_cd = 0.0f;                            // weapon cooldown between swings
     bool  punch_is_throw = false;                      // this punch clip is a sword throw
     float throw_cd = 0.0f;                             // cooldown between throws
-    // The in-flight thrown sword (one at a time). While active, the hand is empty.
+    // In-flight thrown swords. Usually one, but the Swordstorm upgrade launches a small
+    // fan of them at once. While any are in flight the hand is empty.
     struct ThrownSword {
         bool  active = false, returning = false;
         vec3  pos = {0.0f, 0.0f, 0.0f};
@@ -580,7 +607,8 @@ int main(int argc, char** argv) {
         float traveled = 0.0f;
         float spin = 0.0f;
         std::vector<uint32_t> hit_ids;   // enemies hit this pass (cleared on the return leg)
-    } thrown;
+    };
+    std::vector<ThrownSword> throwns;
     // Orbit special (2): spinning swords circling the player for a short time.
     struct Orbit {
         bool  active = false;
@@ -622,6 +650,8 @@ int main(int argc, char** argv) {
     const float base_minion_range = player.minion_range;     // Drone Sensors resets to this
     const float base_trail_damage = player.trail_damage, base_trail_life = player.trail_life;
     const float base_supersonic = player.supersonic_damage;
+    const int   base_orbit_count = player.weapon ? player.weapon->orbit_count : 3;   // More Blades resets to this
+    const float base_bash_radius = player.shield ? player.shield->bash_radius : 4.5f; // Wider Nova resets to this
 
     // Reset the run (solo death = game over -> start over). Player back to spawn at
     // full health/stamina, currency + upgrades cleared, enemies/coins reset.
@@ -638,7 +668,7 @@ int main(int argc, char** argv) {
         player.dash_vel[0] = player.dash_vel[2] = 0.0f; player.iframes = 0.0f; player.dash_cd = 0.0f;
         player.hit_flash = 0.0f;
         player.burn_time = 0.0f; player.burn_dps = 0.0f;
-        thrown.active = false;
+        throwns.clear();
         orbit.active = false;
         bash.active = false;
         if (menu_chest >= 0) { menu_chest = -1; window.set_relative_mouse(true); }
@@ -659,6 +689,16 @@ int main(int argc, char** argv) {
         player.trail_damage = base_trail_damage; player.trail_life = base_trail_life;
         player.supersonic_damage = base_supersonic;
         player.stats.knockback = base_knockback;
+        // XP / leveling + autocast unlocks back to a fresh run.
+        player.level = 1; player.xp = 0.0f; player.xp_to_next = dc::entity::xp_for_level(1);
+        player.spell_slots = 2;
+        player.orbit_unlocked = false; player.forcefield_unlocked = false;
+        player.orbit_cd_mult = 1.0f; player.forcefield_cd_mult = 1.0f; player.autocast_cd_mult = 1.0f;
+        player.orbit_spin_mult = 1.0f; player.orbit_tick_mult = 1.0f;
+        player.throw_count = 1;
+        if (player.weapon) player.weapon->orbit_count = base_orbit_count;
+        if (player.shield) player.shield->bash_radius = base_bash_radius;
+        pending_levelups = 0; xp_orbs.clear(); levelup_open = false;
         for (int& n : inventory) n = 0;   // empty the item stacks
         currency = START_GOLD;
         host_damage = 0.0; my_damage = 0.0f;   // reset the damage leaderboard
@@ -704,6 +744,25 @@ int main(int argc, char** argv) {
 
     // Local player buys an item: apply its upgrade + grow the stack.
     auto apply_pickup = [&](Upgrade u) { apply_upgrade(player, u); inventory[static_cast<int>(u)]++; };
+    // Draw up to 4 distinct currently-eligible upgrades for a level-up pick. Builds the
+    // eligible pool, then samples without replacement (Fisher-Yates on the pool prefix).
+    auto open_levelup = [&]() {
+        Upgrade pool[UPGRADE_COUNT];
+        int np = 0;
+        for (int i = 0; i < UPGRADE_COUNT; ++i) {
+            const Upgrade u = static_cast<Upgrade>(i);
+            if (upgrade_eligible(player, u)) pool[np++] = u;
+        }
+        levelup_card_count = np < 4 ? np : 4;
+        for (int i = 0; i < levelup_card_count; ++i) {
+            levelup_rng = levelup_rng * 1664525u + 1013904223u;
+            const int j = i + static_cast<int>((levelup_rng >> 8) % static_cast<uint32_t>(np - i));
+            Upgrade tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;   // swap chosen into place
+            levelup_cards[i] = pool[i];
+        }
+        levelup_open = levelup_card_count > 0;
+        if (levelup_open) window.set_relative_mouse(false);
+    };
     const float CHEST_REACH = 3.0f;            // how close you must be to open a chest
     const float CHEST_LOCK_TIME = 30.0f;       // host: auto-release a lock held this long (safety)
     // Gunner minions: loosely follow the owner, volley-fire the nearest enemy in range.
@@ -1064,8 +1123,13 @@ int main(int argc, char** argv) {
         if (!tab_now && tab_prev && scoreboard)                { scoreboard = false; if (!paused && menu_chest < 0) window.set_relative_mouse(true); }
         tab_prev = tab_now;
 
-        // Any open UI (upgrade cards, pause, or scoreboard) freezes player control.
-        const bool ui_open = menu_chest >= 0 || paused || scoreboard;
+        // A queued level-up opens the upgrade-pick overlay, but never on top of another
+        // menu (chest/pause/scoreboard) — it waits its turn.
+        if (!levelup_open && pending_levelups > 0 && menu_chest < 0 && !paused && !scoreboard)
+            open_levelup();
+
+        // Any open UI (upgrade cards, pause, scoreboard, or level-up) freezes player control.
+        const bool ui_open = menu_chest >= 0 || paused || scoreboard || levelup_open;
         // Dead = ghost: you can still walk around to spectate, but can't fight, block,
         // use specials, or buy chests. Movement is intentionally NOT gated on this.
         const bool dead = player.health <= 0.0f;
@@ -1183,14 +1247,29 @@ int main(int argc, char** argv) {
         if (orbit_cd  > 0.0f) orbit_cd  -= dt;
         if (bash_cd   > 0.0f) bash_cd   -= dt;
 
-        // Shield bash nova (3): needs a shield + stamina, slow cooldown. Fires a sphere
-        // that expands and shoves enemies back (resolved in the update block below).
-        if (player.shield && !ui_open && !dead && !punching && !thrown.active && !bash.active
-            && bash_cd <= 0.0f && input.key_down(SDL_SCANCODE_3)
-            && player.stamina >= player.shield->stamina_per_bash) {
+        // True when any living enemy is within `r` (xz) of the local player. Autocasts
+        // only fire when there's something to hit, so they idle when you're exploring.
+        // Uses entities.items, which is the live list on the host and the replicated
+        // mirror on clients (both have enemy positions).
+        auto enemy_within = [&](float r) {
+            const float r2 = r * r;
+            for (const auto& e : entities.items) {
+                if (!e.alive) continue;
+                const float dx = e.position[0] - player.position[0];
+                const float dz = e.position[2] - player.position[2];
+                if (dx * dx + dz * dz <= r2) return true;
+            }
+            return false;
+        };
+        const float ORBIT_TRIGGER = 6.0f;   // orbit autocasts when an enemy is this close
+
+        // Force Nova autocast: once unlocked it occupies a spell slot and fires on its own
+        // cooldown whenever an enemy is inside its blast radius. Costs no stamina; the
+        // expanding sphere shoves enemies back (resolved in the update block below).
+        if (player.forcefield_unlocked && player.shield && !ui_open && !dead && !bash.active
+            && bash_cd <= 0.0f && enemy_within(player.shield->bash_radius)) {
             bash.active = true; bash.time = 0.0f; bash.radius = 0.0f; bash.hit_ids.clear();
-            player.stamina -= player.shield->stamina_per_bash * player.stamina_mult;
-            bash_cd = player.shield->bash_cooldown * player.cooldown_mult;
+            bash_cd = player.shield->bash_cooldown * player.forcefield_cd_mult * player.autocast_cd_mult;
             // Event model: tell the host once (reliable). It runs the damage + tells
             // everyone else; we just predicted the visual above.
             if (net.role == dc::net::Role::Client) {
@@ -1206,16 +1285,15 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Orbit special (2): summon spinning swords for a while (big stamina cost).
-        if (player.weapon && !ui_open && !dead && !orbit.active && orbit_cd <= 0.0f
-            && input.key_down(SDL_SCANCODE_2)
-            && player.stamina >= player.weapon->stamina_per_orbit) {
+        // Orbit autocast: once unlocked it occupies a spell slot and fires on its own
+        // cooldown whenever an enemy is near. Costs no stamina; spinning swords circle you.
+        if (player.orbit_unlocked && player.weapon && !ui_open && !dead && !orbit.active
+            && orbit_cd <= 0.0f && enemy_within(ORBIT_TRIGGER)) {
             orbit.active = true;
             orbit.time = player.weapon->orbit_duration;
             orbit.angle = 0.0f; orbit.spin = 0.0f; orbit.tick = 0.0f;
             orbit.hit_ids.clear();
-            player.stamina -= player.weapon->stamina_per_orbit * player.stamina_mult;
-            orbit_cd = player.weapon->orbit_cooldown * player.cooldown_mult;
+            orbit_cd = player.weapon->orbit_cooldown * player.orbit_cd_mult * player.autocast_cd_mult;
             if (net.role == dc::net::Role::Client) {   // reliable cast: host runs damage + broadcasts
                 const auto& w = *player.weapon;
                 dc::net::OrbitCast oc;
@@ -1231,8 +1309,8 @@ int main(int argc, char** argv) {
         }
         // Start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
         // the difference is resolved at the strike frame below.
-        if (!punching && !thrown.active && !ui_open && !dead) {
-            if (player.weapon && input.key_down(SDL_SCANCODE_1)
+        if (!punching && throwns.empty() && !ui_open && !dead) {
+            if (player.weapon && input.mouse_down(SDL_BUTTON_MIDDLE)
                 && throw_cd <= 0.0f && player.stamina >= throw_cost) {
                 punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = true;
                 player.stamina -= throw_cost * player.stamina_mult;
@@ -1248,29 +1326,38 @@ int main(int argc, char** argv) {
             if (!punch_struck && punch_time >= PUNCH_STRIKE) {
                 punch_struck = true;
                 if (punch_is_throw && player.weapon) {
-                    // Release: detach the sword as a spinning projectile flying forward.
-                    thrown.active = true; thrown.returning = false;
-                    thrown.traveled = 0.0f; thrown.spin = 0.0f; thrown.hit_ids.clear();
-                    // Launch from the eye along the full 3D look direction (yaw + pitch),
-                    // so the sword flies exactly where the crosshair points.
-                    glm_vec3_copy(player.position, thrown.pos);
+                    // Release: detach the sword(s) as spinning projectiles flying forward.
+                    // Swordstorm (throw_count > 1) launches a horizontal fan; a single throw
+                    // flies straight along the 3D look direction (yaw + pitch).
                     vec3 f; player.front(f);   // already normalized
-                    glm_vec3_copy(f, thrown.dir);
-                    throw_cd = player.weapon->throw_cooldown * player.cooldown_mult;
-                    if (net.role == dc::net::Role::Client) {   // reliable cast: host flies + damages it
-                        const auto& w = *player.weapon;
-                        dc::net::ThrownCast tc;
-                        tc.dx = f[0]; tc.dy = f[1]; tc.dz = f[2];
-                        tc.ox = player.position[0]; tc.oy = player.position[1]; tc.oz = player.position[2];
-                        tc.speed = w.throw_speed; tc.distance = w.throw_distance;
-                        tc.radius = w.throw_radius * w.throw_size * player.sword_scale;
-                        tc.damage = w.throw_damage * player.damage_mult; tc.knockback = player.stats.knockback;
-                        tc.size = w.throw_size;
-                        unsigned char buf[1 + sizeof tc];
-                        buf[0] = static_cast<unsigned char>(dc::net::MsgType::ThrownCast);
-                        std::memcpy(buf + 1, &tc, sizeof tc);
-                        net.send_to_host(buf, sizeof buf, true);
+                    const int n = player.throw_count < 1 ? 1 : player.throw_count;
+                    const float SPREAD = 0.16f;   // radians between adjacent swords in the fan
+                    for (int t = 0; t < n; ++t) {
+                        const float off = (n > 1) ? (t - (n - 1) * 0.5f) * SPREAD : 0.0f;
+                        const float ca = std::cos(off), sa = std::sin(off);
+                        // Rotate the aim around world-Y so the fan spreads left/right.
+                        vec3 d = { f[0] * ca - f[2] * sa, f[1], f[0] * sa + f[2] * ca };
+                        ThrownSword ts; ts.active = true; ts.returning = false;
+                        ts.traveled = 0.0f; ts.spin = 0.0f;
+                        glm_vec3_copy(player.position, ts.pos);
+                        glm_vec3_copy(d, ts.dir);
+                        throwns.push_back(std::move(ts));
+                        if (net.role == dc::net::Role::Client) {   // reliable cast: host flies + damages it
+                            const auto& w = *player.weapon;
+                            dc::net::ThrownCast tc;
+                            tc.dx = d[0]; tc.dy = d[1]; tc.dz = d[2];
+                            tc.ox = player.position[0]; tc.oy = player.position[1]; tc.oz = player.position[2];
+                            tc.speed = w.throw_speed; tc.distance = w.throw_distance;
+                            tc.radius = w.throw_radius * w.throw_size * player.sword_scale;
+                            tc.damage = w.throw_damage * player.damage_mult; tc.knockback = player.stats.knockback;
+                            tc.size = w.throw_size;
+                            unsigned char buf[1 + sizeof tc];
+                            buf[0] = static_cast<unsigned char>(dc::net::MsgType::ThrownCast);
+                            std::memcpy(buf + 1, &tc, sizeof tc);
+                            net.send_to_host(buf, sizeof buf, true);
+                        }
                     }
+                    throw_cd = player.weapon->throw_cooldown * player.cooldown_mult;
                 } else {
                     player_strike = true;
                     // Air-slash "cut" at full extension: a thin bright crescent of motes
@@ -1405,6 +1492,29 @@ int main(int argc, char** argv) {
             menu_click_prev = click;
         }
 
+        // Level-up overlay: click one of the offered cards to apply it. If more level-ups
+        // are queued the next one opens immediately (re-drawn next frame).
+        if (levelup_open) {
+            float mx, my; input.mouse_pos(mx, my);
+            int ww, wh; window.window_size(ww, wh);
+            const float nx = (ww > 0) ? (mx / ww) * 2.0f - 1.0f : 0.0f;
+            const float ny = (wh > 0) ? 1.0f - (my / wh) * 2.0f : 0.0f;
+            const bool click = input.mouse_down(SDL_BUTTON_LEFT);
+            if (click && !levelup_click_prev) {
+                for (int s = 0; s < levelup_card_count; ++s) {
+                    const float x0 = card_x0(s), x1 = x0 + CARD_W;
+                    if (nx < x0 || nx > x1 || ny < CARD_BOT || ny > CARD_TOP) continue;
+                    apply_pickup(levelup_cards[s]);
+                    levelup_open = false;
+                    if (pending_levelups > 0) pending_levelups--;
+                    if (pending_levelups == 0 && menu_chest < 0 && !paused && !scoreboard)
+                        window.set_relative_mouse(true);
+                    break;
+                }
+            }
+            levelup_click_prev = click;
+        }
+
 
         // Pause menu: click the red Quit button to exit.
         if (paused) {
@@ -1526,28 +1636,35 @@ int main(int argc, char** argv) {
         // Thrown sword: spin, fly out `throw_distance`, then boomerang back to the
         // player; damage enemies in its path (once per leg). Runs before the enemy
         // sim so kills/knockback are folded into this frame's update.
-        if (thrown.active && player.weapon) {
+        if (!throwns.empty() && player.weapon) {
             const auto& w = *player.weapon;
-            thrown.spin += 22.0f * dt;                 // procedural horizontal spin
-            float step = w.throw_speed * dt;
-            if (!thrown.returning) {
-                thrown.pos[0] += thrown.dir[0] * step;   // fly straight along the 3D aim
-                thrown.pos[1] += thrown.dir[1] * step;
-                thrown.pos[2] += thrown.dir[2] * step;
-                thrown.traveled += step;
-                if (thrown.traveled >= w.throw_distance) { thrown.returning = true; thrown.hit_ids.clear(); }
-            } else {
-                // Boomerang back to the player's current eye, in 3D.
-                float hx = player.position[0] - thrown.pos[0];
-                float hy = player.position[1] - thrown.pos[1];
-                float hz = player.position[2] - thrown.pos[2];
-                float hd = std::sqrt(hx * hx + hy * hy + hz * hz);
-                if (hd < 1.0f) thrown.active = false;  // caught -> sword back in hand
-                else { thrown.pos[0] += hx / hd * step; thrown.pos[1] += hy / hd * step; thrown.pos[2] += hz / hd * step; }
+            const float step = w.throw_speed * dt;
+            for (auto& th : throwns) {
+                th.spin += 22.0f * dt;                  // procedural horizontal spin
+                if (!th.returning) {
+                    th.pos[0] += th.dir[0] * step;       // fly straight along the 3D aim
+                    th.pos[1] += th.dir[1] * step;
+                    th.pos[2] += th.dir[2] * step;
+                    th.traveled += step;
+                    if (th.traveled >= w.throw_distance) { th.returning = true; th.hit_ids.clear(); }
+                } else {
+                    // Boomerang back to the player's current eye, in 3D.
+                    float hx = player.position[0] - th.pos[0];
+                    float hy = player.position[1] - th.pos[1];
+                    float hz = player.position[2] - th.pos[2];
+                    float hd = std::sqrt(hx * hx + hy * hy + hz * hz);
+                    if (hd < 1.0f) th.active = false;    // caught -> sword back in hand
+                    else { th.pos[0] += hx / hd * step; th.pos[1] += hy / hd * step; th.pos[2] += hz / hd * step; }
+                }
+                if (net.role != dc::net::Role::Client)   // damage is host-authoritative; client flight is cosmetic
+                    host_damage += dc::entity::radius_attack(entities, th.pos, w.throw_radius * w.throw_size * player.sword_scale,
+                                              w.throw_damage * player.damage_mult, player.stats.knockback, th.hit_ids, &frame_hits);
             }
-            if (net.role != dc::net::Role::Client)   // damage is host-authoritative; client flight is cosmetic
-                host_damage += dc::entity::radius_attack(entities, thrown.pos, w.throw_radius * w.throw_size * player.sword_scale,
-                                          w.throw_damage * player.damage_mult, player.stats.knockback, thrown.hit_ids, &frame_hits);
+            // Drop swords that were caught (swap-pop; order doesn't matter for rendering).
+            for (std::size_t i = 0; i < throwns.size();) {
+                if (!throwns[i].active) { throwns[i] = throwns.back(); throwns.pop_back(); }
+                else ++i;
+            }
         }
 
         // Orbit special: revolve + spin the swords; damage on periodic ticks (each
@@ -1556,11 +1673,11 @@ int main(int argc, char** argv) {
             const auto& w = *player.weapon;
             orbit.time -= dt;
             if (orbit.time <= 0.0f) orbit.active = false;
-            orbit.angle += 3.0f * dt;     // revolve speed around the player
-            orbit.spin  += 22.0f * dt;    // each sword's own spin
+            orbit.angle += 3.0f * player.orbit_spin_mult * dt;     // revolve speed (Orbit Tempo speeds this up)
+            orbit.spin  += 22.0f * player.orbit_spin_mult * dt;    // each sword's own spin
             orbit.tick  -= dt;
             if (orbit.active && orbit.tick <= 0.0f) {
-                orbit.tick = 0.25f;       // damage-tick interval
+                orbit.tick = 0.25f * player.orbit_tick_mult;       // damage re-tick (Orbit Tempo shortens this)
                 orbit.hit_ids.clear();
                 for (int i = 0; i < w.orbit_count; ++i) {
                     float a = orbit.angle + (6.2831853f * i) / w.orbit_count;
@@ -1796,9 +1913,10 @@ int main(int argc, char** argv) {
 
         // Enemy sim is host-authoritative; clients render replicated enemies instead.
         frame_deaths.clear();
+        frame_death_xp.clear();
         std::vector<dc::entity::EnemyHitPlayer> hits;
         if (net.role != dc::net::Role::Client) {
-            dc::entity::update_enemies(entities, *map, flows, players, hits, dt, &frame_deaths, &frame_hits, &tile_heights);
+            dc::entity::update_enemies(entities, *map, flows, players, hits, dt, &frame_deaths, &frame_hits, &tile_heights, &frame_death_xp);
             // Advance ranged enemies' shots; their hits add into the same `hits`.
             dc::entity::update_projectiles(entities, *map, players, hits, dt);
             // out[0] -> local player.
@@ -1993,13 +2111,33 @@ int main(int argc, char** argv) {
         for (const auto& hn : frame_hits)
             dmg_numbers.push_back({ {hn.pos[0], hn.pos[1], hn.pos[2]}, hn.amount, 0.0f, hn.crit });
 
-        // Drop a coin where each enemy died (frame_deaths holds xyz triples), and burst the
-        // body into a cloud of sand: lots of tan motes thrown outward + up that fall and fade,
-        // so the enemy looks like it crumbles away.
-        for (std::size_t i = 0; i + 2 < frame_deaths.size(); i += 3) {
-            Coin c; c.pos[0] = frame_deaths[i]; c.pos[1] = frame_deaths[i + 1]; c.pos[2] = frame_deaths[i + 2];
-            coins.push_back(c);
-            burst_sand(c.pos[0], c.pos[1], c.pos[2]);   // host/standalone crumble (clients do it off the snapshot)
+        // Loot drops: for each enemy that died this frame (frame_deaths holds xyz triples,
+        // frame_death_xp the parallel per-kill XP that also encodes difficulty), crumble the
+        // body to sand, then scatter gold coins + a blue XP orb around the death point so
+        // they don't stack. Rarer (tougher) enemies drop more gold and more XP.
+        {
+            auto frand = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
+            const float xp_scale = 1.0f + run_time / 90.0f;     // late-run kills are worth a bit more
+            for (std::size_t i = 0; i + 2 < frame_deaths.size(); i += 3) {
+                const std::size_t k = i / 3;
+                const float cx = frame_deaths[i], cy = frame_deaths[i + 1], cz = frame_deaths[i + 2];
+                burst_sand(cx, cy, cz);   // host/standalone crumble (clients do it off the snapshot)
+                const float raw = (k < frame_death_xp.size()) ? frame_death_xp[k] : 10.0f;   // base per-kind difficulty
+                // Scatter a point within `rad` of the death spot (uniform over the disc).
+                auto scattered = [&](float rad, float& ox, float& oz) {
+                    const float ang = frand() * 6.2831853f, r = rad * std::sqrt(frand());
+                    ox = cx + std::cos(ang) * r; oz = cz + std::sin(ang) * r;
+                };
+                int gold = static_cast<int>(std::round(raw / 7.0f)); if (gold < 1) gold = 1;   // ~1..4 by rarity
+                for (int g = 0; g < gold; ++g) {
+                    Coin c; c.pos[1] = cy; scattered(0.9f, c.pos[0], c.pos[2]);
+                    coins.push_back(c);
+                }
+                XPOrb o; o.pos[1] = cy; scattered(0.8f, o.pos[0], o.pos[2]);
+                o.value = raw * xp_scale;
+                o.bob = frand() * 6.2831853f;
+                xp_orbs.push_back(o);
+            }
         }
 
         // Coins: settle briefly (so they're always visible), then magnet toward the
@@ -2041,6 +2179,39 @@ int main(int argc, char** argv) {
             }
         }
 
+        // XP orbs: settle briefly, then magnet to the LOCAL player and grant XP on
+        // contact. Filling the bar levels you up (queued so a big absorb can grant
+        // several picks at once). XP/levels are local per-player progression.
+        auto add_xp = [&](float amount) {
+            player.xp += amount;
+            while (player.xp >= player.xp_to_next) {
+                player.xp -= player.xp_to_next;
+                player.level++;
+                player.xp_to_next = dc::entity::xp_for_level(player.level);
+                pending_levelups++;
+            }
+        };
+        {
+            const float XP_MAGNET = 3.2f, XP_COLLECT = 0.7f, XP_SPEED = 9.0f, XP_SETTLE = 0.25f;
+            for (std::size_t i = 0; i < xp_orbs.size();) {
+                xp_orbs[i].age += dt;
+                if (xp_orbs[i].age < XP_SETTLE || dead) { ++i; continue; }
+                const float dx = player.position[0] - xp_orbs[i].pos[0];
+                const float dz = player.position[2] - xp_orbs[i].pos[2];
+                const float d = std::sqrt(dx * dx + dz * dz);
+                if (d < XP_COLLECT) {
+                    add_xp(xp_orbs[i].value);
+                    xp_orbs[i] = xp_orbs.back(); xp_orbs.pop_back(); continue;
+                }
+                if (d < XP_MAGNET && d > 1e-4f) {
+                    const float step = XP_SPEED * dt;
+                    xp_orbs[i].pos[0] += dx / d * step;
+                    xp_orbs[i].pos[2] += dz / d * step;
+                }
+                ++i;
+            }
+        }
+
         // Host: broadcast the combined world snapshot (players + enemies + coins),
         // built now that everything has advanced this frame.
         if (net.role == dc::net::Role::Host && !host_clients.empty()) {
@@ -2063,9 +2234,10 @@ int main(int argc, char** argv) {
               s.punch_time = punch_time; s.block_time = block_time;
               s.hit_flash = player.hit_flash; s.sword_scale = player.sword_scale;
               s.burning = player.burn_time > 0.0f ? 1 : 0;
-              if (thrown.active && player.weapon) {
-                  s.thrown_active = 1; s.thrown_x = thrown.pos[0]; s.thrown_y = thrown.pos[1]; s.thrown_z = thrown.pos[2];
-                  s.thrown_spin = thrown.spin; s.thrown_size = player.weapon->throw_size;
+              if (!throwns.empty() && player.weapon) {   // remotes see the lead sword of a volley
+                  const auto& th = throwns.front();
+                  s.thrown_active = 1; s.thrown_x = th.pos[0]; s.thrown_y = th.pos[1]; s.thrown_z = th.pos[2];
+                  s.thrown_spin = th.spin; s.thrown_size = player.weapon->throw_size;
               }
               if (orbit.active && player.weapon) {
                   s.orbit_active = 1; s.orbit_count = player.weapon->orbit_count;
@@ -2262,8 +2434,8 @@ int main(int argc, char** argv) {
 
         // Gear hidden while a ghost (dead = no weapon).
         if (!dead) {
-        // Sword in hand: only when equipped AND not currently thrown.
-        if (player.weapon && !thrown.active) {
+        // Sword in hand: only when equipped AND no sword is currently in flight.
+        if (player.weapon && throwns.empty()) {
             mat4 sword_place;
             glm_mat4_mul(gear_place, l_hand_world.m, sword_place);
             blade_pos[0] = sword_place[3][0]; blade_pos[1] = sword_place[3][1]; blade_pos[2] = sword_place[3][2];
@@ -2276,20 +2448,22 @@ int main(int argc, char** argv) {
         // Thrown sword: spinning in flight. Match the in-hand size by reusing the
         // hand bone's world scale (the player rig is ~0.22x), times the throw_size
         // upgrade. Without this it'd draw at full model scale (way too big).
-        if (thrown.active) {
+        if (!throwns.empty()) {
             float rig_scale = std::sqrt(l_hand_world.m[0][0] * l_hand_world.m[0][0]
                                       + l_hand_world.m[0][1] * l_hand_world.m[0][1]
                                       + l_hand_world.m[0][2] * l_hand_world.m[0][2]);
             float s = rig_scale * player.sword_scale * (player.weapon ? player.weapon->throw_size : 1.0f);
-            mat4 tplace;
-            glm_mat4_identity(tplace);
-            vec3 tpos = { thrown.pos[0], thrown.pos[1], thrown.pos[2] };   // 3D flight (follows aim)
-            glm_translate(tplace, tpos);
-            glm_rotate_y(tplace, thrown.spin, tplace);
             vec3 sc = { s, s, s };
-            glm_scale(tplace, sc);
             vec3 sword_color = { 0.85f, 0.85f, 0.95f };
-            renderer.draw_model(sword_model, sword_offset, tplace, sword_color);
+            for (const auto& th : throwns) {
+                mat4 tplace;
+                glm_mat4_identity(tplace);
+                vec3 tpos = { th.pos[0], th.pos[1], th.pos[2] };   // 3D flight (follows aim)
+                glm_translate(tplace, tpos);
+                glm_rotate_y(tplace, th.spin, tplace);
+                glm_scale(tplace, sc);
+                renderer.draw_model(sword_model, sword_offset, tplace, sword_color);
+            }
         }
 
         // Orbit special: spinning swords circling the player at waist height.
@@ -2620,8 +2794,9 @@ int main(int argc, char** argv) {
                 } else if (night) {                            // depleted at night: broken flicker
                     sr = 0.45f; sg = 0.42f; sb = 0.45f;
                     sa = 0.03f + 0.025f * dc::fx::flicker(t_now * 5.0f);
-                } else {                                        // day: dome down, faint grey
-                    sr = 0.42f; sg = 0.44f; sb = 0.5f; sa = 0.045f;
+                } else {                                        // day: dome idle, but a faint blue
+                    sr = 0.25f; sg = 0.45f; sb = 0.75f;          // bubble is still clearly present
+                    sa = 0.10f;
                 }
                 const int RINGS = 12, SEGS = 22; const float sz = 0.16f;
                 for (int ri = 1; ri < RINGS; ++ri) {
@@ -2668,6 +2843,34 @@ int main(int argc, char** argv) {
                 };
                 P(-1,-1); P(1,-1); P(1,1);
                 P(-1,-1); P(1,1); P(-1,1);
+            }
+        }
+
+        // XP orbs: blue glowing motes that bob just off the floor, with a couple of
+        // smaller sparkle billboards orbiting each for a "little particles" shimmer.
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            auto quad = [&](float cx, float cy, float cz, float sz, float r, float g, float b, float a) {
+                vec3 ctr = { cx, cy, cz };
+                auto P = [&](float ax, float ay) {
+                    particle_verts.insert(particle_verts.end(), {
+                        ctr[0] + (R[0] * ax + U[0] * ay) * sz,
+                        ctr[1] + (R[1] * ax + U[1] * ay) * sz,
+                        ctr[2] + (R[2] * ax + U[2] * ay) * sz, r, g, b, a });
+                };
+                P(-1,-1); P(1,-1); P(1,1);
+                P(-1,-1); P(1,1); P(-1,1);
+            };
+            for (const auto& o : xp_orbs) {
+                const float ph = t_now * 4.0f + o.bob;
+                const float bob = terrain.height(o.pos[0], o.pos[2]) + 0.5f + 0.08f * std::sin(ph);
+                quad(o.pos[0], bob, o.pos[2], 0.20f, 0.35f, 0.55f, 1.0f, 0.9f);   // soft outer glow
+                quad(o.pos[0], bob, o.pos[2], 0.10f, 0.70f, 0.90f, 1.0f, 1.0f);   // bright core
+                for (int s = 0; s < 3; ++s) {
+                    const float a = ph * 1.7f + s * 2.094f;
+                    quad(o.pos[0] + std::cos(a) * 0.18f, bob + std::sin(a * 1.3f) * 0.12f,
+                         o.pos[2] + std::sin(a) * 0.18f, 0.045f, 0.55f, 0.85f, 1.0f, 0.9f);   // sparkles
+                }
             }
         }
 
@@ -3088,9 +3291,10 @@ int main(int argc, char** argv) {
                               1.0f, 0.55f, 0.1f);
             for (const auto& sp : spawners)                                              // spawn zones: green disc
                 draw_cone(sp.pos[0], sp.pos[2], 0.0f, 3.14159265f, sp.radius, 0.1f, 0.9f, 0.2f);
-            if (thrown.active && player.weapon)                                          // thrown hit area: red disc
-                draw_cone(thrown.pos[0], thrown.pos[2], 0.0f, 3.14159265f,
-                          player.weapon->throw_radius * player.weapon->throw_size * player.sword_scale, 0.9f, 0.2f, 0.2f);
+            if (player.weapon)                                                          // thrown hit area: red disc
+                for (const auto& th : throwns)
+                    draw_cone(th.pos[0], th.pos[2], 0.0f, 3.14159265f,
+                              player.weapon->throw_radius * player.weapon->throw_size * player.sword_scale, 0.9f, 0.2f, 0.2f);
         }
         // Elemental sword sparks: spawn from each player's blade (by their element mask),
         // then simulate + draw as small billboards. Fire rises, ice sinks, earth scatters.
@@ -3389,11 +3593,40 @@ int main(int argc, char** argv) {
                         }
                         break;
                     }
+                    case IconShape::Ring: {    // annulus ring (orbit autocast)
+                        const int N = 20; const float ir = 0.55f;   // inner radius fraction
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                            const float c0 = std::cos(a0), s0 = std::sin(a0), c1 = std::cos(a1), s1 = std::sin(a1);
+                            hud_tri(cx + sx * c0, cy + s * s0, cx + sx * c1, cy + s * s1, cx + sx * ir * c1, cy + s * ir * s1, r, g, b, a);
+                            hud_tri(cx + sx * c0, cy + s * s0, cx + sx * ir * c1, cy + s * ir * s1, cx + sx * ir * c0, cy + s * ir * s0, r, g, b, a);
+                        }
+                        break;
+                    }
+                    case IconShape::Burst: {   // thin ring + center dot (nova blast)
+                        const int N = 20; const float ir = 0.72f;
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                            const float c0 = std::cos(a0), s0 = std::sin(a0), c1 = std::cos(a1), s1 = std::sin(a1);
+                            hud_tri(cx + sx * c0, cy + s * s0, cx + sx * c1, cy + s * s1, cx + sx * ir * c1, cy + s * ir * s1, r, g, b, a);
+                            hud_tri(cx + sx * c0, cy + s * s0, cx + sx * ir * c1, cy + s * ir * s1, cx + sx * ir * c0, cy + s * ir * s0, r, g, b, a);
+                            hud_tri(cx, cy, cx + sx * 0.34f * c0, cy + s * 0.34f * s0, cx + sx * 0.34f * c1, cy + s * 0.34f * s1, r, g, b, a);
+                        }
+                        break;
+                    }
+                    case IconShape::Slot: {    // square frame (a spell slot)
+                        const float ty = s * 0.26f, tx = ty / aspect;
+                        hud_rect(cx - sx, cy + s - ty, cx + sx, cy + s, r, g, b, a);   // top
+                        hud_rect(cx - sx, cy - s, cx + sx, cy - s + ty, r, g, b, a);   // bottom
+                        hud_rect(cx - sx, cy - s, cx - sx + tx, cy + s, r, g, b, a);   // left
+                        hud_rect(cx + sx - tx, cy - s, cx + sx, cy + s, r, g, b, a);   // right
+                        break;
+                    }
                 }
             };
             // Cursor in NDC, but only while a menu is open (otherwise the mouse drives the
             // first-person look and is captured). Used for hover-to-describe.
-            const bool cursor_free = (menu_chest >= 0 || paused || scoreboard);
+            const bool cursor_free = (menu_chest >= 0 || paused || scoreboard || levelup_open);
             float mxn = -2.0f, myn = -2.0f;
             if (cursor_free) {
                 float mx, my; input.mouse_pos(mx, my);
@@ -3447,6 +3680,11 @@ int main(int argc, char** argv) {
             hud_rect(x0, y0, x1, y1, 0.05f, 0.05f, 0.05f, 0.6f);
             float sf = clamp01(player.stamina_max > 0.0f ? player.stamina / player.stamina_max : 0.0f);
             hud_rect(x0, y0, x0 + (x1 - x0) * sf, y1, 0.2f, 0.9f, 0.3f, 0.95f);
+            // XP bar (blue), under the stamina bar. Fills toward the next level.
+            const float xpy0 = -0.975f, xpy1 = -0.945f;
+            hud_rect(x0, xpy0, x1, xpy1, 0.04f, 0.05f, 0.09f, 0.6f);
+            float xpf = clamp01(player.xp_to_next > 0.0f ? player.xp / player.xp_to_next : 0.0f);
+            hud_rect(x0, xpy0, x0 + (x1 - x0) * xpf, xpy1, 0.30f, 0.62f, 1.0f, 0.95f);
             // Coin counter (top-left): a gold coin icon + the currency as 7-segment
             // digits built from rects — no font/text renderer needed.
             auto draw_digit = [&](float bx, float by, float w, float h, float t, int d) {
@@ -3461,6 +3699,19 @@ int main(int argc, char** argv) {
                 char num[16]; std::snprintf(num, sizeof num, "%d", currency);
                 float dx = -0.88f;
                 for (char* p = num; *p; ++p) { draw_digit(dx, by, dw, dh, dt, *p - '0'); dx += gap; }
+            }
+            // Level readout (blue, by the XP bar): the player's current level in 7-seg digits.
+            {
+                const float dw = 0.018f, dh = 0.036f, dt = 0.006f, gap = dw + dt * 2.0f;
+                const float ly = -0.972f;
+                char num[16]; std::snprintf(num, sizeof num, "%d", player.level);
+                float dx = x1 + 0.018f;
+                for (char* p = num; *p; ++p) {
+                    seven_seg(*p - '0', dw, dh, dt, [&](float u0, float v0, float u1, float v1) {
+                        hud_rect(dx + u0, ly + v0, dx + u1, ly + v1, 0.45f, 0.72f, 1.0f, 1.0f);
+                    });
+                    dx += gap;
+                }
             }
 
             // Item inventory (top-left, under the coins): one chip per upgrade held, with
@@ -3482,31 +3733,35 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Special-ability icons (bottom-right): "1" throw, "2" orbit (weapon),
-            // "3" shield-bash (shield), each boxed. On use a white overlay fills the box
-            // and drains down as the cooldown elapses (height = remaining / total).
+            // Spell slots (bottom-right): one box per slot. An unlocked autocast fills a
+            // slot with its icon; empty slots show a plain frame. A white sweep fills the
+            // box while the autocast is recharging (height = remaining / total).
             {
-                auto draw_special = [&](float x0, float y0, float w, float h, int d, float frac) {
-                    const float x1 = x0 + w, y1 = y0 + h;
-                    hud_rect(x0 - 0.007f, y0 - 0.007f, x1 + 0.007f, y1 + 0.007f, 0.9f, 0.9f, 0.9f, 0.9f);  // border
-                    hud_rect(x0, y0, x1, y1, 0.10f, 0.10f, 0.12f, 0.85f);                                  // backing
-                    const float t = (w < h ? w : h) * 0.12f;
-                    draw_digit(x0 + w * 0.28f, y0 + h * 0.18f, w * 0.45f, h * 0.64f, t, d);                // label
-                    if (frac > 0.0f) {                                                                     // cooldown drain
-                        const float fh = h * (frac > 1.0f ? 1.0f : frac);
-                        hud_rect(x0, y0, x1, y0 + fh, 1.0f, 1.0f, 1.0f, 0.55f);
-                    }
-                };
-                const float bw = 0.06f, bh = 0.105f, by = -0.93f, gap = 0.09f, x3 = 0.74f;
-                if (player.weapon) {
-                    const float tf = player.weapon->throw_cooldown > 0.0f ? throw_cd / player.weapon->throw_cooldown : 0.0f;
-                    const float of = player.weapon->orbit_cooldown > 0.0f ? orbit_cd / player.weapon->orbit_cooldown : 0.0f;
-                    draw_special(x3,            by, bw, bh, 1, tf);
-                    draw_special(x3 + gap,      by, bw, bh, 2, of);
+                struct SpellSlot { IconShape sh; float r, g, b, frac; };
+                std::vector<SpellSlot> spells;
+                if (player.orbit_unlocked && player.weapon) {
+                    const float cd = player.weapon->orbit_cooldown * player.orbit_cd_mult * player.autocast_cd_mult;
+                    spells.push_back({ IconShape::Ring, 0.35f, 0.85f, 0.95f, cd > 0.0f ? orbit_cd / cd : 0.0f });
                 }
-                if (player.shield) {
-                    const float bf = player.shield->bash_cooldown > 0.0f ? bash_cd / player.shield->bash_cooldown : 0.0f;
-                    draw_special(x3 + gap * 2.0f, by, bw, bh, 3, bf);
+                if (player.forcefield_unlocked && player.shield) {
+                    const float cd = player.shield->bash_cooldown * player.forcefield_cd_mult * player.autocast_cd_mult;
+                    spells.push_back({ IconShape::Burst, 0.85f, 0.90f, 1.0f, cd > 0.0f ? bash_cd / cd : 0.0f });
+                }
+                const float bh = 0.12f, bw = bh / aspect, by = -0.95f, gap = bw + 0.035f, x_start = 0.55f;
+                for (int i = 0; i < player.spell_slots; ++i) {
+                    const float bx0 = x_start + i * gap, bx1 = bx0 + bw, by1 = by + bh;
+                    hud_rect(bx0 - 0.007f, by - 0.007f, bx1 + 0.007f, by1 + 0.007f, 0.85f, 0.85f, 0.9f, 0.9f);  // border
+                    hud_rect(bx0, by, bx1, by1, 0.10f, 0.10f, 0.12f, 0.85f);                                    // backing
+                    if (i < static_cast<int>(spells.size())) {
+                        const SpellSlot& sp = spells[i];
+                        icon_shape((bx0 + bx1) * 0.5f, (by + by1) * 0.5f, bh * 0.34f, sp.sh, sp.r, sp.g, sp.b, 1.0f);
+                        if (sp.frac > 0.0f) {                                                                  // cooldown sweep
+                            const float fh = bh * (sp.frac > 1.0f ? 1.0f : sp.frac);
+                            hud_rect(bx0, by, bx1, by + fh, 1.0f, 1.0f, 1.0f, 0.40f);
+                        }
+                    } else {
+                        icon_shape((bx0 + bx1) * 0.5f, (by + by1) * 0.5f, bh * 0.30f, IconShape::Slot, 0.30f, 0.30f, 0.35f, 0.8f);  // empty frame
+                    }
                 }
             }
 
@@ -3527,6 +3782,23 @@ int main(int argc, char** argv) {
                     const float bw = hot ? 0.014f : 0.008f;
                     hud_rect(cx0 - bw, CARD_BOT - bw, cx1 + bw, CARD_TOP + bw, 0.97f, 0.97f, 0.97f, 0.97f);  // border
                     if (sold) { hud_rect(cx0, CARD_BOT, cx1, CARD_TOP, 0.09f, 0.09f, 0.10f, 0.95f); continue; }
+                    hud_rect(cx0, CARD_BOT, cx1, CARD_TOP, 0.12f, 0.12f, 0.14f, 0.96f);                      // backing
+                    hud_rect(cx0, 0.08f, cx1, CARD_TOP, d.r * 0.5f, d.g * 0.5f, d.b * 0.5f, 0.9f);           // color band
+                    icon_shape((cx0 + cx1) * 0.5f, 0.25f, 0.10f, d.shape, d.r, d.g, d.b, 1.0f);
+                    if (hot) { tip = &d; tip_x = mxn + 0.012f; tip_y = myn - 0.012f; }
+                }
+            }
+
+            // Level-up menu: dim + the (up to 4) eligible upgrade cards. Same layout as a
+            // chest; click one to gain it. Title text drawn after draw_hud.
+            if (levelup_open) {
+                hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.55f);   // dim backdrop
+                for (int s = 0; s < levelup_card_count; ++s) {
+                    const float cx0 = card_x0(s), cx1 = cx0 + CARD_W;
+                    const UpgradeDef& d = upgrade_def(levelup_cards[s]);
+                    const bool hot = cursor_free && mxn >= cx0 && mxn <= cx1 && myn >= CARD_BOT && myn <= CARD_TOP;
+                    const float bw = hot ? 0.014f : 0.008f;
+                    hud_rect(cx0 - bw, CARD_BOT - bw, cx1 + bw, CARD_TOP + bw, 0.97f, 0.97f, 0.97f, 0.97f);  // border
                     hud_rect(cx0, CARD_BOT, cx1, CARD_TOP, 0.12f, 0.12f, 0.14f, 0.96f);                      // backing
                     hud_rect(cx0, 0.08f, cx1, CARD_TOP, d.r * 0.5f, d.g * 0.5f, d.b * 0.5f, 0.9f);           // color band
                     icon_shape((cx0 + cx1) * 0.5f, 0.25f, 0.10f, d.shape, d.r, d.g, d.b, 1.0f);
@@ -3702,6 +3974,18 @@ int main(int argc, char** argv) {
                     char price[16]; std::snprintf(price, sizeof price, "%d g", mc.cost);
                     const bool afford = currency >= mc.cost;
                     renderer.draw_text(price, cxc - renderer.text_width(price, 14.0f, fbw) * 0.5f, -0.30f, 14.0f, afford ? gold : dimc, 1.0f, fbw, fbh);
+                }
+            }
+
+            // Level-up menu text: title (with the new level) + each card's name.
+            if (levelup_open) {
+                vec3 white = {0.97f, 0.97f, 1.0f}, cyanc = {0.45f, 0.85f, 1.0f};
+                char title[32]; std::snprintf(title, sizeof title, "LEVEL %d", player.level);
+                renderer.draw_text(title, -renderer.text_width(title, 24.0f, fbw) * 0.5f, CARD_TOP + 0.10f, 24.0f, cyanc, 1.0f, fbw, fbh);
+                for (int s = 0; s < levelup_card_count; ++s) {
+                    const float cxc = card_x0(s) + CARD_W * 0.5f;
+                    const UpgradeDef& d = upgrade_def(levelup_cards[s]);
+                    renderer.draw_text(d.name, cxc - renderer.text_width(d.name, 15.0f, fbw) * 0.5f, -0.02f, 15.0f, white, 1.0f, fbw, fbh);
                 }
             }
 

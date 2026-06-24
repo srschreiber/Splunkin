@@ -1,5 +1,6 @@
 #pragma once
 #include <cglm/cglm.h>
+#include <cmath>
 #include <optional>
 #include "engine/world/map.h"
 #include "engine/world/terrain.h"
@@ -80,6 +81,18 @@ inline constexpr float UNARMED_ATTACK_SPEED = 1.2f;
 inline constexpr float UNARMED_COOLDOWN     = 0.15f;
 inline constexpr float UNARMED_STAMINA      = 5.0f;   // stamina per fist jab
 
+// Progression caps. Spell slots hold autocasts; multi-throw + orbit have ceilings.
+inline constexpr int SPELL_SLOTS_MAX = 4;   // most simultaneous autocasts
+inline constexpr int THROW_MAX       = 3;   // max swords released per throw
+inline constexpr int ORBIT_COUNT_MAX = 8;   // max swords in the orbit ring
+
+// XP needed to advance FROM `level` to the next one. Grows ~25% per level so each
+// level costs progressively more kills. Base is ~3 early kills (a melee enemy is worth
+// ~10 XP), so the first level-up isn't instant.
+inline float xp_for_level(int level) {
+    return std::round(28.0f * std::pow(1.25f, static_cast<float>(level - 1)));
+}
+
 struct Player {
     vec3  position = {0.0f, 0.0f, 0.0f};   // EYE position (authoritative)
     float yaw   = 0.0f;                    // radians
@@ -115,6 +128,24 @@ struct Player {
     float trail_damage       = 0.0f;           // trailblazer: fire-trail damage/sec (0 = not equipped)
     float trail_life         = 0.0f;           // how long each trail segment burns (upgradable decay)
     float supersonic_damage  = 0.0f;           // supersonic: dodge shockwave damage (0 = not equipped)
+    // XP / leveling: killing enemies drops XP orbs; filling the bar grants a level-up
+    // (pick one of four eligible upgrade cards). Per-player, local progression.
+    int   level        = 1;
+    float xp           = 0.0f;                 // accumulated toward the next level
+    float xp_to_next   = xp_for_level(1);      // recomputed each level-up (grows)
+    // Autocast spell slots: orbit + force-nova are no longer keyed; once unlocked each
+    // occupies a slot and fires automatically (see below). Start with two empty slots.
+    int   spell_slots         = 2;             // total slots (upgradeable, cap SPELL_SLOTS_MAX)
+    bool  orbit_unlocked      = false;         // orbit autocast unlocked (consumes a slot)
+    bool  forcefield_unlocked = false;         // force-nova autocast unlocked (consumes a slot)
+    // Autocast cooldown scaling: a per-ability (targeted) factor times a global factor.
+    // The global upgrade is intentionally 3/5 as strong as a targeted one.
+    float orbit_cd_mult      = 1.0f;           // targeted: orbit refire cooldown (<1 = faster)
+    float forcefield_cd_mult = 1.0f;           // targeted: nova refire cooldown
+    float autocast_cd_mult   = 1.0f;           // global: scales every autocast cooldown
+    float orbit_spin_mult    = 1.0f;           // orbit tempo: faster revolve + per-sword spin
+    float orbit_tick_mult    = 1.0f;           // orbit tempo: shorter damage re-tick (<1 = faster)
+    int   throw_count        = 1;              // multi-throw: swords released per throw (cap THROW_MAX)
     std::optional<Shield> shield = Shield{};   // equipped shield (nullopt = none)
     std::optional<Weapon> weapon = Weapon{};   // equipped weapon (nullopt = fists)
     vec3  knock_vel = {0.0f, 0.0f, 0.0f};  // horizontal knockback velocity (decays in update)
