@@ -248,7 +248,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 pr.vel[2] = az * shot_spd;
                 pr.vel[1] = (dist > 0.1f) ? (tgt.pos[1] - pr.pos[1]) * shot_spd / dist : 0.0f;   // climb to the target's height
                 pr.damage = dmg; pr.knockback = RANGED_KNOCKBACK; pr.life = RANGED_SHOT_LIFE;
-                pr.radius = RANGED_SHOT_RADIUS;
+                pr.radius = RANGED_SHOT_RADIUS; pr.owner_id = e.id;   // so its hits can taunt
                 if (flying) { pr.color[0] = 1.0f; pr.color[1] = 0.12f; pr.color[2] = 0.08f; pr.beam = true; }   // red glowing laser
                 if (e.elite) {                          // bigger, harder-hitting elite shot
                     pr.damage *= ELITE_DAMAGE_MULT; pr.knockback *= ELITE_KNOCKBACK_MULT;
@@ -308,6 +308,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     out[pi].damage += dmg;
                     if (dmg > 0.0f) {                     // only ignites if the flame got through
                         out[pi].hit = true;
+                        out[pi].attacker_id = e.id;
                         out[pi].ignite_dps  = FLAME_BURN_DPS;
                         out[pi].ignite_time = FLAME_BURN_TIME;
                     }
@@ -370,7 +371,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                         }
                     }
                     out[pi].damage += dmg;
-                    if (dmg > 0.0f) out[pi].hit = true;
+                    if (dmg > 0.0f) { out[pi].hit = true; out[pi].attacker_id = e.id; }
                     if (d > 1e-4f) {   // shove radially outward from the punch (unblockable)
                         out[pi].knock[0] += (dx / d) * kb;
                         out[pi].knock[2] += (dz / d) * kb;
@@ -476,7 +477,7 @@ void update_projectiles(EntityList& list, const dc::world::Map& map,
                         }
                     }
                     out[pi].damage += dmg;
-                    if (dmg > 0.0f) out[pi].hit = true;
+                    if (dmg > 0.0f) { out[pi].hit = true; out[pi].attacker_id = p.owner_id; }   // the shooter taunts
                     if (d > 1e-4f) {   // shove the player along the shot's path
                         out[pi].knock[0] += (dx / d) * kb;
                         out[pi].knock[2] += (dz / d) * kb;

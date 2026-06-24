@@ -881,6 +881,7 @@ int main(int argc, char** argv) {
     struct FloatTaunt { vec3 pos; uint8_t idx; uint8_t reactive; float age; };
     std::vector<FloatTaunt> taunts;
     float taunt_cd = 0.0f;
+    float react_cd[16] = {0};   // per-player cooldown so reactive taunts don't spam on every tick
     constexpr float TAUNT_LIFE = 2.8f, TAUNT_INTERVAL = 1.6f, TAUNT_RANGE = 9.0f;
     constexpr int   MAX_TAUNTS = 3;     // at most this many on screen / talking at once
     auto taunt_line = [](int idx, bool reactive) { return reactive ? dc::game::reactive_text(idx) : dc::game::taunt_text(idx); };
@@ -970,9 +971,9 @@ int main(int argc, char** argv) {
         vec3 fwd = { std::cos(yaw), 0.0f, std::sin(yaw) };
         vec3 right = { fwd[2], 0.0f, -fwd[0] };
         vec3 up = { 0.0f, 1.0f, 0.0f };
-        vec3 c = { head[0] + fwd[0] * 0.22f, head[1], head[2] + fwd[2] * 0.22f };
+        vec3 c = { head[0] + fwd[0] * 0.24f, head[1] + 0.08f, head[2] + fwd[2] * 0.24f };   // on the head front surface
         std::vector<float> fcol[dc::game::PALETTE_N];
-        append_face(fcol, c, fwd, right, up, 0.030f * look.bone_head, look);
+        append_face(fcol, c, fwd, right, up, 0.018f * look.bone_head, look);
         draw_faces(fcol);
     };
 
@@ -1130,7 +1131,8 @@ int main(int argc, char** argv) {
             {
                 std::vector<BoneSave> saves; push_bones(my_look, saves);
                 std::vector<dc::renderer::AnimLayer> el;
-                dc::renderer::pose_model(model_data, el, 0.0f, part_world);
+                dc::renderer::Mat4 prev_head;
+                dc::renderer::pose_model(model_data, el, 0.0f, part_world, { model_data.head_node }, { &prev_head });
                 vec3 fwd; player.front(fwd); fwd[1] = 0.0f;
                 float fl = std::sqrt(fwd[0]*fwd[0] + fwd[2]*fwd[2]); if (fl > 1e-4f) { fwd[0] /= fl; fwd[2] /= fl; }
                 const float feet = player.position[1] - dc::world::EYE_HEIGHT;
@@ -1142,18 +1144,20 @@ int main(int argc, char** argv) {
                 glm_rotate_y(place, ang + glm_rad(-90.0f), place);   // MODEL_YAW_OFFSET
                 vec3 skin = { my_look.skin[0], my_look.skin[1], my_look.skin[2] };
                 renderer.draw_model(player_model, part_world, place, skin);
+                // Exact head-bone world position (so the face sits ON the head, not floating).
+                mat4 hpm; glm_mat4_mul(place, prev_head.m, hpm);
+                vec3 headpos = { hpm[3][0], hpm[3][1], hpm[3][2] };
                 pop_bones(saves);
-                // Face plate on the front of the head, facing the camera (toward -fwd).
-                vec3 facing = { -fwd[0], 0.0f, -fwd[2] };   // points at the camera
-                // rotate facing by preview_yaw around Y so it tracks the spin
+                // Face plate on the head front, facing the camera (so you see it as you draw),
+                // tracking the spin. Small + close so it reads as the face, not a billboard.
+                vec3 facing = { -fwd[0], 0.0f, -fwd[2] };
                 const float cs = std::cos(preview_yaw), sn = std::sin(preview_yaw);
                 vec3 fr = { facing[0]*cs - facing[2]*sn, 0.0f, facing[0]*sn + facing[2]*cs };
                 vec3 up = { 0.0f, 1.0f, 0.0f };
                 vec3 right = { fr[2], 0.0f, -fr[0] };
-                const float headY = feet + 1.45f * my_look.bone_torso;
-                vec3 hc = { ppos[0] + fr[0]*0.28f, headY, ppos[2] + fr[2]*0.28f };
+                vec3 hc = { headpos[0] + fr[0]*0.24f, headpos[1] + 0.08f, headpos[2] + fr[2]*0.24f };
                 std::vector<float> fcol[dc::game::PALETTE_N];
-                append_face(fcol, hc, fr, right, up, 0.030f * my_look.bone_head, my_look);
+                append_face(fcol, hc, fr, right, up, 0.018f * my_look.bone_head, my_look);
                 draw_faces(fcol);
             }
 
@@ -1407,7 +1411,7 @@ int main(int argc, char** argv) {
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::Taunt
                            && ev.data.size() >= 1 + sizeof(dc::net::TauntState)) {
                     dc::net::TauntState ts; std::memcpy(&ts, ev.data.data() + 1, sizeof ts);
-                    spawn_taunt(ts.x, ts.y, ts.z, ts.idx, false);   // float + speak locally (don't re-broadcast)
+                    spawn_taunt(ts.x, ts.y, ts.z, ts.idx, ts.reactive != 0, false);   // float + speak locally
                 } else if (net.role == dc::net::Role::Client && mt == dc::net::MsgType::XpGranted
                            && ev.data.size() >= 1 + sizeof(float)) {
                     float amount; std::memcpy(&amount, ev.data.data() + 1, sizeof amount);
@@ -2398,8 +2402,35 @@ int main(int argc, char** argv) {
             dc::entity::update_enemies(entities, *map, flows, players, hits, dt, &frame_deaths, &frame_hits, &tile_heights, &frame_death_xp);
             // Advance ranged enemies' shots; their hits add into the same `hits`.
             dc::entity::update_projectiles(entities, *map, players, hits, dt);
+            // When a player gets hit, the nearest enemy gloats with a reactive line (the
+            // enemy "that dealt it"). Per-player cooldown + the global cap keep it sane.
+            auto react_for = [&](int pi, uint32_t attacker_id, float px, float pz) {
+                if (pi >= 16 || react_cd[pi] > 0.0f || static_cast<int>(taunts.size()) >= MAX_TAUNTS) return;
+                int best = -1;
+                // Prefer the exact enemy that dealt it (melee, flame, OR the ranged shooter).
+                for (std::size_t e = 0; e < entities.items.size(); ++e)
+                    if (entities.items[e].type == dc::entity::EntityType::Enemy && entities.items[e].id == attacker_id) { best = static_cast<int>(e); break; }
+                if (best < 0) {   // fallback: nearest enemy (attacker already despawned)
+                    float bd = 14.0f * 14.0f;
+                    for (std::size_t e = 0; e < entities.items.size(); ++e) {
+                        const auto& en = entities.items[e];
+                        if (en.type != dc::entity::EntityType::Enemy) continue;
+                        const float dx = en.position[0] - px, dz = en.position[2] - pz, d2 = dx*dx + dz*dz;
+                        if (d2 < bd) { bd = d2; best = static_cast<int>(e); }
+                    }
+                }
+                if (best < 0) return;
+                const auto& en = entities.items[best];
+                const float hy = terrain.height(en.position[0], en.position[2])
+                               + (en.kind == dc::entity::EnemyKind::Flying ? dc::entity::FLY_HOVER + 1.4f : 2.4f);
+                spark_rng = spark_rng * 1664525u + 1013904223u;
+                const int idx = static_cast<int>(spark_rng % static_cast<uint32_t>(dc::game::reactive_count()));
+                spawn_taunt(en.position[0], hy, en.position[2], idx, true, true);
+                react_cd[pi] = 2.2f;
+            };
             // out[0] -> local player.
             const dc::entity::EnemyHitPlayer& hit = hits[0];
+            if (hit.hit && hit.damage > 0.0f && !dead) react_for(0, hit.attacker_id, player.position[0], player.position[2]);
             player.health -= hit.damage;
             if (player.health < 0.0f) player.health = 0.0f;
             player.knock_vel[0] += hit.knock[0];        // integrated (with collision) in player.update next frame
@@ -2415,6 +2446,7 @@ int main(int argc, char** argv) {
             for (std::size_t i = 0; i < host_clients.size(); ++i) {
                 const dc::entity::EnemyHitPlayer& h = hits[i + 1];
                 auto& b = host_clients[i].body;
+                if (h.hit && h.damage > 0.0f && b.health > 0.0f) react_for(static_cast<int>(i + 1), h.attacker_id, b.position[0], b.position[2]);
                 b.health -= h.damage;
                 if (b.health < 0.0f) b.health = 0.0f;
                 b.knock_vel[0] += h.knock[0];
@@ -2870,6 +2902,7 @@ int main(int argc, char** argv) {
             if (taunts[i].age >= TAUNT_LIFE) { taunts[i] = taunts.back(); taunts.pop_back(); }
             else ++i;
         }
+        for (float& rc : react_cd) if (rc > 0.0f) rc -= dt;
         if (net.role != dc::net::Role::Client) {
             if (taunt_cd > 0.0f) taunt_cd -= dt;
             if (taunt_cd <= 0.0f && static_cast<int>(taunts.size()) < MAX_TAUNTS) {
@@ -4684,7 +4717,7 @@ int main(int argc, char** argv) {
                 if (clip[3] <= 0.05f) continue;                       // behind the camera
                 const float ndcx = clip[0] / clip[3], ndcy = clip[1] / clip[3];
                 if (ndcx < -1.1f || ndcx > 1.1f || ndcy < -1.1f || ndcy > 1.1f) continue;
-                const char* txt = dc::game::taunt_text(t.idx);
+                const char* txt = t.reactive ? dc::game::reactive_text(t.idx) : dc::game::taunt_text(t.idx);
                 const float w = renderer.text_width(txt, 17.0f, fbw);
                 vec3 yellow = { 1.0f, 0.92f, 0.15f };
                 renderer.draw_text(txt, ndcx - w * 0.5f, ndcy, 17.0f, yellow, 1.0f - t.age / TAUNT_LIFE, fbw, fbh);

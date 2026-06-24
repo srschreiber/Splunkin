@@ -80,6 +80,7 @@ struct Projectile {
     float life      = 0.0f;   // seconds remaining before it fizzles
     float radius    = 0.35f;  // sphere size + hit radius (bigger for elite shots)
     bool  beam      = false;  // render as a stretched glowing laser (eye), not a sphere
+    uint32_t owner_id = 0;    // the enemy that fired it (so its hits can be attributed -> taunts)
 };
 
 // The world's dynamic entities plus the sim's RNG seed. The RNG lives here (in

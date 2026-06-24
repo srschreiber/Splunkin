@@ -163,6 +163,7 @@ struct EnemyHitPlayer {
     float dealt   = 0.0f;                // damage THIS player dealt to enemies this tick (melee; for the scoreboard)
     float ignite_dps  = 0.0f;            // flamethrower: set the player on fire at this dps...
     float ignite_time = 0.0f;            // ...for this many seconds (0 = no ignite this tick)
+    uint32_t attacker_id = NO_TARGET;    // id of the enemy that dealt this tick's damage (for taunts; ranged included)
 };
 
 // Advance enemies one tick against ALL players (co-op). Each player's strike is
