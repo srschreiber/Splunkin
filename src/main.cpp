@@ -20,6 +20,7 @@
 #include "game/seven_seg.h"
 #include "game/appearance.h"
 #include "game/taunts.h"
+#include "game/base.h"
 #include <thread>
 #include <atomic>
 #include <string>
@@ -35,6 +36,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unordered_set>
 
 // Number of TTS voices currently speaking (caps how many taunts talk over each other).
 static std::atomic<int> g_tts_active{0};
@@ -116,7 +118,7 @@ struct DroneVendor { float x = 0.0f, z = 0.0f; bool bought = false; };
 
 int main(int argc, char** argv) {
     bool smoke = false;
-    const char* map_path = "assets/maps/test.txt";
+    const char* map_path = "assets/maps/lane.txt";
     // Networking: --host [port] listens; --connect <ip> [port] joins. Default = solo.
     dc::net::Role net_role = dc::net::Role::Standalone;
     const char* connect_ip = "127.0.0.1";
@@ -203,6 +205,10 @@ int main(int argc, char** argv) {
     dc::renderer::ModelData knight_class_data, wizard_class_data;
     const bool knight_class_loaded = dc::renderer::read_model("assets/models/knight_class.glb", knight_class_data);
     const bool wizard_class_loaded = dc::renderer::read_model("assets/models/wizard_class.glb", wizard_class_data);
+    dc::renderer::ModelData scavenger_data;   // friendly coin-collecting mob (dapper gentleman)
+    const bool scavenger_loaded = dc::renderer::read_model("assets/models/scavenger.glb", scavenger_data);
+    if (!scavenger_loaded) std::fprintf(stderr, "note: assets/models/scavenger.glb not found; run blender/make_scavenger.py\n");
+
     dc::renderer::ModelData skeleton_data;
     const bool skeleton_loaded = dc::renderer::read_model("assets/models/skeleton.glb", skeleton_data);
     if (!skeleton_loaded) std::fprintf(stderr, "note: assets/models/skeleton.glb not found; run blender/make_skeleton.py to enable skeletons\n");
@@ -220,8 +226,11 @@ int main(int argc, char** argv) {
     // host + clients). Walls/gameplay come from the tile map; this only shapes height.
     dc::world::Terrain terrain;
     // Second map-gen pass: scatter sheer-cliff plateaus (deterministic) before meshing.
-    terrain.place_plateaus(6, map->width * dc::world::TILE, map->height * dc::world::TILE,
+    // The lane map is kept FLAT for now (0 plateaus) — leave the call so later maps can use it.
+    terrain.place_plateaus(0, map->width * dc::world::TILE, map->height * dc::world::TILE,
                            (map->spawn_col + 0.5f) * dc::world::TILE, (map->spawn_row + 0.5f) * dc::world::TILE);
+    // Flatten the rolling hills/mounds too so the lane reads clean (terrain code kept intact).
+    terrain.hill_amp = 0.0f; terrain.mound_amp = 0.0f; terrain.base_amp = 0.0f;
     const vec3 terrain_color = { 0.32f, 0.40f, 0.26f };   // mossy green-brown
 
     // Per-tile ground height (sampled at tile centers), computed once — terrain is static.
@@ -257,6 +266,8 @@ int main(int argc, char** argv) {
     if (eye_loaded) eye_model.upload(eye_data);
     dc::renderer::Model skeleton_model;
     if (skeleton_loaded) skeleton_model.upload(skeleton_data);   // upload after the GL context exists
+    dc::renderer::Model scavenger_model;
+    if (scavenger_loaded) scavenger_model.upload(scavenger_data);
     dc::renderer::Model bat_model;
     if (bat_loaded) bat_model.upload(bat_data);
     dc::renderer::Model gnome_model;
@@ -493,9 +504,10 @@ int main(int argc, char** argv) {
     std::vector<dc::entity::Spawner> spawners;
     {
         dc::entity::Spawner sp;
-        sp.pos[0] = map->width  * 0.5f * dc::world::TILE;
+        // Enemies pour out of the ENEMY BASE at the far (right) end of the lane and march on us.
+        sp.pos[0] = (map->width - 16.0f) * dc::world::TILE;
         sp.pos[2] = map->height * 0.5f * dc::world::TILE;
-        sp.radius = map->width * 0.35f * dc::world::TILE;   // spread across the (bigger) arena
+        sp.radius = 7.0f * dc::world::TILE;                 // cluster around the enemy base mouth
         sp.rate = 0.4f; sp.max_alive = 6;                   // fewer, but stronger (see ENEMY_MAX_HEALTH)
         sp.ranged_fraction = 0.30f;   // ~30% ground shooters
         sp.flying_fraction = 0.15f;   // ~15% hovering shooters
@@ -578,11 +590,32 @@ int main(int argc, char** argv) {
             const float h = frand();
             s.color[0] = 0.45f + h*0.2f; s.color[1] = 0.6f + h*0.2f; s.color[2] = 1.0f;   // blue-violet
             s.age = 0.0f; s.life = 0.5f + frand()*0.5f;
-            s.grav = -0.8f; s.size_mul = 2.0f; s.alpha_mul = 1.6f;   // float gently upward
+            s.grav = -0.8f; s.size_mul = 2.0f; s.alpha_mul = 0.4f;   // float gently upward (faint, see-through mist)
             sparks.push_back(s);
         }
     };
-    constexpr int START_GOLD = 30;   // dev: each run begins with this (was 0)
+    // Ground slam dust: a wide ring of brown-grey debris kicked up across the whole affected
+    // disk (e.g. the troll's slam radius). Filled uniformly over the disk so the big AoE reads.
+    auto burst_dust = [&](float x, float z, float radius, int count) {
+        auto frand = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
+        for (int g = 0; g < count && sparks.size() < 2200; ++g) {
+            Spark s;
+            const float ang = frand() * 6.2831853f;
+            const float rr  = radius * std::sqrt(frand());        // uniform over the disk
+            s.pos[0] = x + std::cos(ang) * rr;
+            s.pos[2] = z + std::sin(ang) * rr;
+            s.pos[1] = terrain.height(s.pos[0], s.pos[2]) + 0.1f + frand() * 0.3f;
+            const float out = 1.5f + (rr / radius) * 3.5f + frand() * 1.5f;   // outer ring flings further
+            s.vel[0] = std::cos(ang) * out; s.vel[2] = std::sin(ang) * out;
+            s.vel[1] = 2.0f + frand() * 4.0f;                     // kicked upward
+            const float h = 0.28f + frand() * 0.22f;              // earthy brown-grey
+            s.color[0] = h * 1.15f; s.color[1] = h; s.color[2] = h * 0.78f;
+            s.age = 0.0f; s.life = 0.45f + frand() * 0.55f;
+            s.grav = 7.0f; s.size_mul = 2.8f; s.alpha_mul = 0.9f;
+            sparks.push_back(s);
+        }
+    };
+    constexpr int START_GOLD = 120;  // enough to muster mobs + place a defense or two up front
     int   currency = START_GOLD;
     double host_damage = 0.0;                // host/standalone: this player's total damage dealt (scoreboard)
     float  my_damage = 0.0f;                 // client: our own total, read back from the snapshot
@@ -590,6 +623,7 @@ int main(int argc, char** argv) {
     bool   tab_prev = false;                 // edge-detect Tab
     float run_time = 0.0f;                    // seconds survived this run (top-of-screen timer)
     float death_flash = 0.0f;                // red "you died" overlay timer
+    float victory_flash = 0.0f;              // gold "VICTORY" overlay timer (enemy base destroyed)
 
     // Day/night cycle. By day you roam, gather, and the base is safe; at night the horde
     // swells, enemies march on the base, and the solar turrets wake up to defend it.
@@ -617,13 +651,19 @@ int main(int argc, char** argv) {
         return 0.08f + 0.10f * std::min(u, 1.0f - u) * 2.0f;  // stays dark, faint twilight at the edges
     };
 
-    // The base/core you defend: a glowing column at the map center. At night the horde
-    // marches on it (targeted like a player); by day it's safe. If it falls, the run ends.
+    // Two bases face off down the lane: OURS (blue) at the left end, the ENEMY's (red) at the
+    // right end. Enemies spawn from the enemy core and march on ours; destroying the enemy core
+    // wins the run, losing ours ends it. Both sit on the lane's center row.
     const float CORE_MAX_HEALTH = 2000.0f;
+    const float laneZ = map->height * 0.5f * dc::world::TILE;             // center of the lane
     float core_health = CORE_MAX_HEALTH;
-    vec3 core_pos = { map->width * 0.5f * dc::world::TILE, 0.0f, map->height * 0.5f * dc::world::TILE };
+    vec3 core_pos = { 16.0f * dc::world::TILE, 0.0f, laneZ };             // player base, left end
     core_pos[1] = terrain.height(core_pos[0], core_pos[2]);
     const uint32_t CORE_ID = 0xC0FFEE01u;   // pseudo-player id for enemy targeting
+    // Enemy base (red) at the right end — the objective the lane push is aimed at.
+    float enemy_core_health = CORE_MAX_HEALTH;
+    vec3 enemy_core_pos = { (map->width - 16.0f) * dc::world::TILE, 0.0f, laneZ };
+    enemy_core_pos[1] = terrain.height(enemy_core_pos[0], enemy_core_pos[2]);
     // Core column mesh (static): a tall cylinder, drawn bright so it reads as a glowing pylon.
     const float CORE_H = 5.5f, CORE_RAD = 1.1f;
     dc::renderer::Mesh core_mesh;
@@ -643,35 +683,186 @@ int main(int argc, char** argv) {
         }
         core_mesh.upload(cv);
     }
+    // Networking transport (enet), declared up here because the base-building helpers below
+    // read net.role. Standalone = no socket; host listens; client joins (started further down).
+    dc::net::Net net;
     // Energy shield dome over the base: absorbs enemy damage before the core does, flashes
-    // red when hit, and has its own (upgradable) health. Charged blue at night; by day it
-    // drops (grey) and recharges on solar power.
-    const float SHIELD_RADIUS = 11.0f;
+    // red when hit, and has its own (upgradable) health.
+    // The player-built base does NOT carry across runs — it starts fresh every run. Seed a
+    // ring of default turrets around the perimeter so a new base still has some defense; the
+    // player then places more barricades/landmines/turrets during the run.
+    dc::game::BaseSave base;
+    auto seed_base = [&]() {
+        base.pieces.clear();
+        base.build_radius = dc::game::BASE_AREA_START;
+        const int seed_turrets = 7;
+        const float ring = base.build_radius - 1.5f;
+        for (int i = 0; i < seed_turrets; ++i) {
+            const float a = 6.2831853f * i / seed_turrets;
+            const float wx = core_pos[0] + std::cos(a) * ring, wz = core_pos[2] + std::sin(a) * ring;
+            dc::game::BasePiece tp;
+            tp.col = static_cast<int16_t>(wx / dc::world::TILE);
+            tp.row = static_cast<int16_t>(wz / dc::world::TILE);
+            tp.piece = static_cast<uint8_t>(dc::game::BuildPiece::Turret);
+            base.pieces.push_back(tp);
+        }
+        // Two starter GRUNT barracks (toward the lane) so an army musters from the first second.
+        for (int i = 0; i < 2; ++i) {
+            const float bx = core_pos[0] + 4.0f, bz = core_pos[2] + (i == 0 ? 2.5f : -2.5f);
+            dc::game::BasePiece bp;
+            bp.col = static_cast<int16_t>(bx / dc::world::TILE);
+            bp.row = static_cast<int16_t>(bz / dc::world::TILE);
+            bp.piece = static_cast<uint8_t>(dc::game::BuildPiece::Barracks);
+            bp.rot = 0;   // Grunt
+            base.pieces.push_back(bp);
+        }
+    };
+    seed_base();
+    // The protective dome / safe zone grows with the buildable area (they're the same radius).
+    float shield_radius = base.build_radius;
     const float SHIELD_RECHARGE = 90.0f;   // hp/sec regained while charging (daytime)
     float shield_max = 800.0f;             // upgradable capacity
     float shield_health = shield_max;
     float shield_flash = 0.0f;             // red pulse timer on absorb
     float shield_prev = shield_max;        // to detect drops (client-side flash)
-    // Solar turret ring around the core (inside the shield). Charge/idle by day (gun down),
-    // active at night: aim at the nearest enemy and fire. Host does the damage; aim + tracers
-    // are computed per-peer from the (replicated) enemies, like the gunner minions.
-    const int   TURRET_COUNT = 7;
-    const float TURRET_RING = 8.0f, TURRET_RANGE = 18.0f, TURRET_DAMAGE = 16.0f, TURRET_FIRE_INTERVAL = 0.55f;
+    // --- Base building state ---------------------------------------------------------------
+    // The host owns `base.pieces`; clients receive the layout in the snapshot into `net_pieces`
+    // and mirror `shield_radius`. `live_pieces()` returns whichever is authoritative locally.
+    std::vector<dc::game::BasePiece> net_pieces;     // client: pieces from the snapshot
+    // Per-piece RUNTIME state (parallel to the pieces): barricade HP, or landmine armed flag
+    // (1 = armed, 0 = spent). Host owns `piece_hp`; clients mirror it into `net_piece_hp`.
+    std::vector<float> piece_hp;
+    std::vector<float> net_piece_hp;
+    // Friendly lane mobs (barracks output). Host owns `allies`; clients render `net_allies`.
+    struct Ally { vec3 pos; float yaw = 0.0f, health = 0.0f, attack_cd = 0.0f; uint8_t kind = 0; };
+    std::vector<Ally> allies;
+    std::vector<dc::net::AllyState> net_allies;
+    const uint32_t ALLY_ID_BASE = 0xA11E0000u;   // pseudo-ids so they slot into the combat target list
+    uint32_t ally_rng = 0xA11E5Eedu;
+    bool building_mode = false;                      // B toggles the build/place mode
+    int  build_sel = 0;                              // selected piece kind (0..Count-1)
+    int  build_rot = 0;                              // current placement rotation (0..3)
+    int  build_tier = 0;                             // for Barracks: which mob TYPE to build (0..MOB_TYPE_COUNT-1)
+    bool bld_t_prev = false;                          // edge-detect the tier-cycle key
+    // Barracks mob types must be UNLOCKED before they can be built. Bit i = type i unlocked;
+    // Grunt (0) is free from the start. Host-authoritative; clients mirror it from the snapshot.
+    uint32_t barracks_unlocked = 1u;                 // bit 0 (Grunt) unlocked
+    bool spawn_menu = false;                          // the base "Muster" menu (E near the core)
+    bool spawn_digit_prev[4] = { false, false, false, false };
+    bool base_dirty = false;                         // host: base layout changed this frame
+    auto piece_full_hp = [](int piece) -> float {
+        if (piece == static_cast<int>(dc::game::BuildPiece::Barricade)) return dc::game::BARRICADE_MAX_HP;
+        if (piece == static_cast<int>(dc::game::BuildPiece::Barracks))  return 1.0f;  // spawn timer (per-type interval set on spawn)
+        return 1.0f;   // landmine: armed; turret: unused
+    };
+    // Edge-detect + ghost-target state (persisted across frames; read by the renderer/HUD).
+    bool b_prev = false, bld_r_prev = false, bld_f_prev = false, bld_lmb_prev = false, bld_rmb_prev = false;
+    bool digit_prev[5] = { false, false, false, false, false };
+    int  build_col = 0, build_row = 0;               // tile the crosshair is aiming at
+    bool build_has_target = false, build_valid = false;
+    auto live_pieces = [&]() -> const std::vector<dc::game::BasePiece>& {
+        return (net.role == dc::net::Role::Client) ? net_pieces : base.pieces;
+    };
+    auto live_hp = [&]() -> const std::vector<float>& {
+        return (net.role == dc::net::Role::Client) ? net_piece_hp : piece_hp;
+    };
+    // Initial runtime HP for the seeded base.
+    piece_hp.resize(base.pieces.size());
+    for (std::size_t i = 0; i < base.pieces.size(); ++i) piece_hp[i] = piece_full_hp(base.pieces[i].piece);
+    const float NO_BUILD_INNER = CORE_RAD + 2.0f;    // keep the glyph clear: no building on/around it
+    // A tile is buildable if its center is inside the dome AND outside the glyph's no-build ring.
+    auto tile_buildable = [&](int col, int row) -> bool {
+        const float wx = (col + 0.5f) * dc::world::TILE, wz = (row + 0.5f) * dc::world::TILE;
+        const float dx = wx - core_pos[0], dz = wz - core_pos[2];
+        const float d = std::sqrt(dx * dx + dz * dz);
+        return d <= shield_radius && d >= NO_BUILD_INNER;
+    };
+    auto piece_index_at = [&](int col, int row) -> int {
+        for (std::size_t i = 0; i < base.pieces.size(); ++i)
+            if (base.pieces[i].col == col && base.pieces[i].row == row) return static_cast<int>(i);
+        return -1;
+    };
+    // Host-authoritative edits (used by the local host player AND by client request messages).
+    // `wallet` is the requesting player's coin purse; cost is deducted there.
+    auto host_place = [&](int col, int row, int piece, int rot, int& wallet) -> bool {
+        if (!tile_buildable(col, row) || piece_index_at(col, row) >= 0) return false;
+        // Barracks cost the selected mob TYPE's place_cost (the type is stored in `rot`) and
+        // require that type to be UNLOCKED first.
+        const bool barracks = (piece == static_cast<int>(dc::game::BuildPiece::Barracks));
+        if (barracks && !(barracks_unlocked & (1u << rot))) return false;
+        const int cost = barracks ? dc::game::mob_type(rot).place_cost
+                       : dc::game::piece_cost(static_cast<dc::game::BuildPiece>(piece));
+        if (wallet < cost) return false;
+        wallet -= cost;
+        base.pieces.push_back({ static_cast<int16_t>(col), static_cast<int16_t>(row),
+                                static_cast<uint8_t>(piece), static_cast<uint8_t>(rot) });
+        piece_hp.push_back(piece_full_hp(piece));
+        base_dirty = true; return true;
+    };
+    auto host_remove = [&](int col, int row, int& wallet) -> bool {
+        const int idx = piece_index_at(col, row);
+        if (idx < 0) return false;
+        wallet += dc::game::piece_cost(static_cast<dc::game::BuildPiece>(base.pieces[idx].piece)) / 2;  // half refund
+        base.pieces[idx] = base.pieces.back(); base.pieces.pop_back();
+        if (static_cast<std::size_t>(idx) < piece_hp.size()) { piece_hp[idx] = piece_hp.back(); piece_hp.pop_back(); }
+        base_dirty = true; return true;
+    };
+    auto host_buy_area = [&](int& wallet) -> bool {
+        if (base.build_radius >= dc::game::BASE_AREA_MAX) return false;
+        const int cost = dc::game::base_area_cost(base.build_radius);
+        if (wallet < cost) return false;
+        wallet -= cost;
+        base.build_radius += dc::game::BASE_AREA_STEP;
+        shield_radius = base.build_radius;
+        base_dirty = true; return true;
+    };
+    auto host_unlock = [&](int tier, int& wallet) -> bool {
+        if (tier < 0 || tier >= dc::game::MOB_TYPE_COUNT) return false;
+        if (barracks_unlocked & (1u << tier)) return false;            // already unlocked
+        const int cost = dc::game::mob_type(tier).unlock_cost;
+        if (wallet < cost) return false;
+        wallet -= cost; barracks_unlocked |= (1u << tier); return true;
+    };
+
+    // Solar turrets are now PLACED build pieces (a working gun you put where you want); their
+    // world positions are derived from every Turret piece in the layout. Host does the damage;
+    // aim + tracers are computed per-peer from the (replicated) enemies, like the gunner minions.
+    const float TURRET_RANGE = 18.0f, TURRET_DAMAGE = 16.0f, TURRET_FIRE_INTERVAL = 0.55f;
     struct TPos { float x, y, z; };
-    std::vector<TPos>  turret_pos(TURRET_COUNT);
-    std::vector<TPos>  turret_aim(TURRET_COUNT);        // last-known aim dir (3D, unit); frozen when no target
-    std::vector<float> turret_cd(TURRET_COUNT, 0.0f);   // host per-turret fire timers
-    std::vector<float> turret_flash(TURRET_COUNT, 0.0f);// per-turret tracer-fire timer
-    for (int i = 0; i < TURRET_COUNT; ++i) {
-        const float a = 6.2831853f * i / TURRET_COUNT;
-        const float x = core_pos[0] + std::cos(a) * TURRET_RING, z = core_pos[2] + std::sin(a) * TURRET_RING;
-        turret_pos[i] = { x, terrain.height(x, z), z };
-        turret_aim[i] = { std::cos(a), 0.0f, std::sin(a) };   // start aimed outward
-        turret_flash[i] = i * 0.07f;                          // stagger so they don't all fire in unison
-    }
+    std::vector<TPos>  turret_pos;
+    std::vector<TPos>  turret_aim;        // last-known aim dir (3D, unit); frozen when no target
+    std::vector<float> turret_cd;         // host per-turret fire timers
+    std::vector<float> turret_flash;      // per-turret tracer-fire timer
+    uint64_t turret_built_sig = ~0ull;    // signature of the turret layout the arrays were built for
+    auto turret_sig = [&](const std::vector<dc::game::BasePiece>& ps) {
+        uint64_t s = 1469598103934665603ull; uint32_t n = 0;
+        for (const auto& p : ps) if (p.piece == static_cast<uint8_t>(dc::game::BuildPiece::Turret)) {
+            s = (s ^ static_cast<uint32_t>(p.col * 73856093 ^ p.row * 19349663)) * 1099511628211ull; ++n;
+        }
+        return s ^ (static_cast<uint64_t>(n) << 1);
+    };
+    // Rebuild turret world positions from the current pieces, but only when the layout actually
+    // changed (so per-turret cooldown/aim/flash state survives between frames).
+    auto rebuild_turrets = [&]() {
+        const auto& ps = live_pieces();
+        const uint64_t sig = turret_sig(ps);
+        if (sig == turret_built_sig) return;
+        turret_built_sig = sig;
+        std::vector<TPos> np;
+        for (const auto& p : ps) if (p.piece == static_cast<uint8_t>(dc::game::BuildPiece::Turret)) {
+            const float x = (p.col + 0.5f) * dc::world::TILE, z = (p.row + 0.5f) * dc::world::TILE;
+            np.push_back({ x, terrain.height(x, z), z });
+        }
+        const std::size_t n = np.size();
+        turret_pos = std::move(np);
+        turret_aim.resize(n, { 1.0f, 0.0f, 0.0f });   // resize preserves existing entries by index
+        turret_cd.resize(n, 0.0f);
+        turret_flash.resize(n, 0.0f);
+    };
+    rebuild_turrets();
     // Travelling turret tracer rounds (cosmetic; the damage is instant at fire time). Each
     // peer spawns them from the synced phase pulse so everyone sees the same fire.
-    struct TBullet { vec3 pos, vel; float life; };
+    struct TBullet { vec3 pos, vel; float life; bool red = false; };
     std::vector<TBullet> turret_bullets;
     // Nearest live enemy to a turret within range (xz). Shared by host damage + render aim.
     auto turret_target = [&](float tx, float tz) -> const dc::entity::Entity* {
@@ -685,6 +876,25 @@ int main(int argc, char** argv) {
         return best;
     };
     dc::renderer::Mesh turret_mesh;   // rebuilt each frame (body + aimed gun)
+    // ENEMY-BASE turrets: a red ring around the enemy core that fires on our pushing army (and
+    // the player if close). A fixed ring; host does the damage, every peer renders aim + tracers.
+    const int   ENEMY_TURRET_COUNT = 6;
+    const float ENEMY_TURRET_RING = 6.5f, ENEMY_TURRET_RANGE = 17.0f, ENEMY_TURRET_DAMAGE = 12.0f, ENEMY_TURRET_CD = 0.7f;
+    std::vector<TPos>  eturret_pos(ENEMY_TURRET_COUNT);
+    std::vector<TPos>  eturret_aim(ENEMY_TURRET_COUNT);
+    std::vector<float> eturret_cd(ENEMY_TURRET_COUNT, 0.0f);
+    std::vector<float> eturret_flash(ENEMY_TURRET_COUNT, 0.0f);
+    for (int i = 0; i < ENEMY_TURRET_COUNT; ++i) {
+        const float a = 6.2831853f * i / ENEMY_TURRET_COUNT;
+        const float x = enemy_core_pos[0] + std::cos(a) * ENEMY_TURRET_RING, z = enemy_core_pos[2] + std::sin(a) * ENEMY_TURRET_RING;
+        eturret_pos[i] = { x, terrain.height(x, z), z };
+        eturret_aim[i] = { -std::cos(a), 0.0f, -std::sin(a) };   // aim inward/down-lane initially
+        eturret_flash[i] = i * 0.08f;
+    }
+    // Base build-piece meshes: one per kind (so each draws in its own color) + a ghost preview.
+    // Rebuilt each frame from the placed pieces (cheap for a base-sized layout).
+    dc::renderer::Mesh build_mesh[static_cast<int>(dc::game::BuildPiece::Count)];
+    dc::renderer::Mesh build_ghost_mesh;
 
     dc::renderer::Camera camera;
 
@@ -697,7 +907,7 @@ int main(int argc, char** argv) {
     dc::input::Input input;
 
     // Networking transport (enet). Standalone = no socket; host listens; client joins.
-    dc::net::Net net;
+    // (Declared earlier, above the base-building state, since those helpers read net.role.)
     if (net_role == dc::net::Role::Host) {
         if (net.start_host(net_port)) std::printf("[net] hosting on port %u\n", net_port);
         else std::fprintf(stderr, "[net] failed to host on port %u\n", net_port);
@@ -768,6 +978,11 @@ int main(int argc, char** argv) {
     bool  blocking = false;
     bool  exhausted = false;                           // winded: must recover before blocking
     bool  shift_prev = false;                          // edge-trigger for the dodge-dash
+    float roll_t = 0.0f;                               // knight dodge-roll timer (counts down to 0)
+    int   roll_dir = 0;                                // 0 = forward roll, 1 = left, 2 = right side-roll
+    float roll_yaw = 0.0f;                             // facing for a forward roll (world dir of the dodge)
+    const float ROLL_DUR = 0.5f;                       // seconds for one full forward roll
+    std::unordered_set<uint32_t> troll_slamming;       // troll ids mid-slam (edge-detect dust burst)
     bool  paused = false;                              // ESC pause menu (frees the cursor)
     bool  esc_prev = false;                            // edge-detect ESC
     bool  pause_click_prev = false;                    // edge-detect the quit-button click
@@ -847,6 +1062,9 @@ int main(int argc, char** argv) {
     // full health/stamina, currency + upgrades cleared, enemies/coins reset.
     auto reset_run = [&]() {
         core_health = CORE_MAX_HEALTH; shield_health = shield_max; shield_flash = 0.0f;   // base + shield restored
+        enemy_core_health = CORE_MAX_HEALTH;   // the enemy base is rebuilt too
+        allies.clear(); net_allies.clear();    // the lane army resets with the run
+        barracks_unlocked = 1u;                 // only Grunt unlocked again
         tod = 0.0f; day_num = 1;   // back to dawn of day 1
         player.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
         player.position[1] = dc::world::EYE_HEIGHT;
@@ -908,6 +1126,10 @@ int main(int argc, char** argv) {
             hc.body.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
         }
         run_time = 0.0f;
+        seed_base();   // base doesn't carry across runs: back to the default turret ring
+        shield_radius = base.build_radius;
+        piece_hp.assign(base.pieces.size(), 1.0f);   // rebuild runtime HP for the fresh layout
+        for (std::size_t i = 0; i < base.pieces.size(); ++i) piece_hp[i] = piece_full_hp(base.pieces[i].piece);
         for (auto& ch : chests) {   // re-close + restock every chest, drop any lock
             ch.opened = false; ch.open_t = 0.0f; ch.locked_by = NO_LOCK; ch.lock_time = 0.0f;
             for (bool& t : ch.taken) t = false;
@@ -1482,8 +1704,8 @@ int main(int argc, char** argv) {
                     HostClient* hc = nullptr;
                     for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
                     if (hc && idx < chests.size() && slot < 4 && chests[idx].locked_by == hc->id
-                        && !chests[idx].taken[slot] && hc->currency >= chests[idx].cost) {
-                        hc->currency -= chests[idx].cost;
+                        && !chests[idx].taken[slot] && currency >= chests[idx].cost) {   // shared team gold
+                        currency -= chests[idx].cost;
                         chests[idx].taken[slot] = true;            // replicated in the snapshot
                         chests[idx].locked_by = NO_LOCK;           // buying closes the menu -> unlock
                         unsigned char gbuf[1 + 1];
@@ -1506,15 +1728,32 @@ int main(int argc, char** argv) {
                     HostClient* hc = nullptr;
                     for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
                     if (hc && idx < drone_vendors.size() && !drone_vendors[idx].bought
-                        && hc->currency >= DRONE_COST && hc->input.minion_count < 4) {
+                        && currency >= DRONE_COST && hc->input.minion_count < 4) {   // shared team gold
                         const float dx = drone_vendors[idx].x - hc->body.position[0];
                         const float dz = drone_vendors[idx].z - hc->body.position[2];
                         if (dx*dx + dz*dz <= (CHEST_REACH + 1.5f) * (CHEST_REACH + 1.5f)) {
-                            hc->currency -= DRONE_COST; drone_vendors[idx].bought = true;
+                            currency -= DRONE_COST; drone_vendors[idx].bought = true;
                             unsigned char gbuf[1]; gbuf[0] = static_cast<unsigned char>(dc::net::MsgType::DroneGranted);
                             net.send_to_peer(ev.peer, gbuf, sizeof gbuf, true);
                         }
                     }
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::BuildPlace
+                           && ev.data.size() >= 1 + sizeof(dc::net::BuildEdit)) {
+                    dc::net::BuildEdit be; std::memcpy(&be, ev.data.data() + 1, sizeof be);
+                    HostClient* hc = nullptr; for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
+                    if (hc) host_place(be.col, be.row, be.piece, be.rot, currency);   // shared team gold
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::BuildRemove
+                           && ev.data.size() >= 1 + sizeof(dc::net::BuildEdit)) {
+                    dc::net::BuildEdit be; std::memcpy(&be, ev.data.data() + 1, sizeof be);
+                    HostClient* hc = nullptr; for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
+                    if (hc) host_remove(be.col, be.row, currency);
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::BuyBaseArea) {
+                    HostClient* hc = nullptr; for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
+                    if (hc) host_buy_area(currency);
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::BuyUnlock
+                           && ev.data.size() >= 2) {
+                    HostClient* hc = nullptr; for (auto& c : host_clients) if (c.peer == ev.peer) { hc = &c; break; }
+                    if (hc) host_unlock(static_cast<int>(ev.data[1]), currency);
                 } else if (mt == dc::net::MsgType::Appearance && ev.data.size() >= 5 + sizeof(dc::game::Appearance)) {
                     uint32_t id; std::memcpy(&id, ev.data.data() + 1, 4);
                     dc::game::Appearance a; std::memcpy(&a, ev.data.data() + 5, sizeof a);
@@ -1688,6 +1927,26 @@ int main(int argc, char** argv) {
                     std::memcpy(&shield_health, p, 4); p += 4;
                     if (shield_health < shield_prev - 0.5f) shield_flash = 0.3f;   // dropped -> flash red
                     shield_prev = shield_health;
+                    std::memcpy(&enemy_core_health, p, 4); p += 4;   // enemy base health (objective)
+                    // Player base: buildable radius (mirrors the dome) + placed pieces.
+                    std::memcpy(&shield_radius, p, 4); p += 4;
+                    uint32_t nbp; std::memcpy(&nbp, p, 4); p += 4;
+                    if (nbp < 100000u) {
+                        net_pieces.resize(nbp); net_piece_hp.resize(nbp, 0.0f);
+                        if (nbp) {
+                            std::memcpy(net_pieces.data(), p, nbp * sizeof(dc::game::BasePiece));
+                            p += nbp * sizeof(dc::game::BasePiece);
+                            std::memcpy(net_piece_hp.data(), p, nbp * sizeof(float));
+                            p += nbp * sizeof(float);
+                        }
+                    }
+                    uint32_t na; std::memcpy(&na, p, 4); p += 4;   // friendly lane mobs (render-only)
+                    if (na < 100000u) {
+                        net_allies.resize(na);
+                        if (na) { std::memcpy(net_allies.data(), p, na * sizeof(dc::net::AllyState));
+                                  p += na * sizeof(dc::net::AllyState); }
+                    }
+                    std::memcpy(&barracks_unlocked, p, 4); p += 4;   // unlocked mob types (for our menu)
                 }
             }
         }
@@ -1704,7 +1963,11 @@ int main(int argc, char** argv) {
         // the other window during net testing). Re-captures on resume.
         bool esc_now = input.key_down(SDL_SCANCODE_ESCAPE);
         if (esc_now && !esc_prev) {
-            if (menu_chest >= 0) {
+            if (spawn_menu) {                 // Esc closes the muster menu
+                spawn_menu = false; window.set_relative_mouse(true);
+            } else if (building_mode) {        // Esc cancels build mode
+                building_mode = false;
+            } else if (menu_chest >= 0) {
                 // Close the chest menu without buying: tell the host to drop our lock.
                 if (net.role == dc::net::Role::Client) {
                     uint32_t idx = static_cast<uint32_t>(menu_chest);
@@ -1714,7 +1977,7 @@ int main(int argc, char** argv) {
                     chests[menu_chest].locked_by = NO_LOCK;
                 }
                 menu_chest = -1; window.set_relative_mouse(true);
-            } else {
+            } else {                           // only open the quit/pause menu when nothing else is up
                 paused = !paused;
                 if (paused) { window.set_relative_mouse(false); pause_click_prev = true; }
                 else window.set_relative_mouse(true);
@@ -1734,11 +1997,112 @@ int main(int argc, char** argv) {
         if (!levelup_open && pending_levelups > 0 && menu_chest < 0 && !paused && !scoreboard)
             open_levelup();
 
-        // Any open UI (upgrade cards, pause, scoreboard, or level-up) freezes player control.
-        const bool ui_open = menu_chest >= 0 || paused || scoreboard || levelup_open;
+        // Any open UI (upgrade cards, pause, scoreboard, level-up, or muster menu) freezes control.
+        const bool ui_open = menu_chest >= 0 || paused || scoreboard || levelup_open || spawn_menu;
         // Dead = ghost: you can still walk around to spectate, but can't fight, block,
         // use specials, or buy chests. Movement is intentionally NOT gated on this.
         const bool dead = player.health <= 0.0f;
+
+        // Muster menu (E at base): 1-4 UNLOCK a locked mob type (pay) or SELECT an unlocked one
+        // to build (jumps into build mode with that barracks). E/Esc closes it.
+        if (spawn_menu) {
+            const int kscan[4] = { SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4 };
+            for (int k = 0; k < dc::game::MOB_TYPE_COUNT; ++k) {
+                const bool d = input.key_down(kscan[k]);
+                if (d && !spawn_digit_prev[k]) {
+                    if (barracks_unlocked & (1u << k)) {            // unlocked -> select for building
+                        build_sel = static_cast<int>(dc::game::BuildPiece::Barracks);
+                        build_tier = k; building_mode = true; spawn_menu = false;
+                        window.set_relative_mouse(true);
+                        // Swallow this digit so build mode's own "1-4 = piece" handler doesn't
+                        // re-read the still-held key and reset the selection to Barricade.
+                        for (int j = 0; j < 5; ++j) digit_prev[j] = true;
+                    } else if (net.role == dc::net::Role::Client) { // locked -> request unlock
+                        unsigned char buf[2] = { static_cast<unsigned char>(dc::net::MsgType::BuyUnlock), static_cast<unsigned char>(k) };
+                        net.send_to_host(buf, 2, true);
+                    } else host_unlock(k, currency);
+                }
+                spawn_digit_prev[k] = d;
+            }
+            if (input.key_down(SDL_SCANCODE_E) && !e_prev) { spawn_menu = false; window.set_relative_mouse(true); }
+        }
+
+        // --- Build mode (B): place/remove base pieces with the crosshair --------------------
+        // B toggles it. You keep mouselook + movement; the mouse buttons + number keys drive
+        // building instead of combat (combat is suppressed below while building_mode is on).
+        {
+            const bool b_now = input.key_down(SDL_SCANCODE_B);
+            if (b_now && !b_prev && !ui_open && !dead) building_mode = !building_mode;
+            b_prev = b_now;
+            // Other menus cancel build mode, but the MUSTER menu is excluded: selecting a mob
+            // type there intentionally jumps straight into build mode (closing the menu).
+            if (paused || menu_chest >= 0 || scoreboard || levelup_open || dead) building_mode = false;
+        }
+        build_has_target = false; build_valid = false;
+        if (building_mode && !spawn_menu) {
+            // 1..5 select the piece kind; R rotates 90°.
+            const int kscan[5] = { SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_5 };
+            for (int k = 0; k < static_cast<int>(dc::game::BuildPiece::Count); ++k) {
+                const bool d = input.key_down(kscan[k]);
+                if (d && !digit_prev[k]) build_sel = k;
+                digit_prev[k] = d;
+            }
+            const bool r_now = input.key_down(SDL_SCANCODE_R);
+            if (r_now && !bld_r_prev) build_rot = (build_rot + 1) & 3;
+            bld_r_prev = r_now;
+            // T cycles the Barracks MOB TYPE (Grunt/Soldier/Brute/Scavenger).
+            const bool t_now = input.key_down(SDL_SCANCODE_T);
+            if (t_now && !bld_t_prev && build_sel == static_cast<int>(dc::game::BuildPiece::Barracks))
+                build_tier = (build_tier + 1) % dc::game::MOB_TYPE_COUNT;
+            bld_t_prev = t_now;
+            // For barracks, the placement "rotation" field carries the chosen mob type.
+            const int place_rot = (build_sel == static_cast<int>(dc::game::BuildPiece::Barracks)) ? build_tier : build_rot;
+            // March the look ray to the ground to find the targeted tile.
+            vec3 aim; player.front(aim);
+            float t = 0.0f; vec3 hp = { player.position[0], player.position[1], player.position[2] };
+            for (int s = 0; s < 100; ++s) {
+                t += 0.2f;
+                vec3 pnt = { player.position[0] + aim[0]*t, player.position[1] + aim[1]*t, player.position[2] + aim[2]*t };
+                if (pnt[1] <= terrain.height(pnt[0], pnt[2])) { glm_vec3_copy(pnt, hp); build_has_target = true; break; }
+            }
+            if (build_has_target) {
+                build_col = static_cast<int>(std::floor(hp[0] / dc::world::TILE));
+                build_row = static_cast<int>(std::floor(hp[2] / dc::world::TILE));
+                build_valid = tile_buildable(build_col, build_row);
+            }
+            const bool is_client = (net.role == dc::net::Role::Client);
+            // LMB place, RMB remove (edge-triggered).
+            const bool lmb = input.mouse_down(SDL_BUTTON_LEFT), rmb = input.mouse_down(SDL_BUTTON_RIGHT);
+            if (lmb && !bld_lmb_prev && build_has_target && build_valid) {
+                if (is_client) {
+                    dc::net::BuildEdit be{}; be.col = static_cast<int16_t>(build_col); be.row = static_cast<int16_t>(build_row);
+                    be.piece = static_cast<uint8_t>(build_sel); be.rot = static_cast<uint8_t>(place_rot);
+                    unsigned char buf[1 + sizeof be]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::BuildPlace);
+                    std::memcpy(buf + 1, &be, sizeof be); net.send_to_host(buf, sizeof buf, true);
+                } else host_place(build_col, build_row, build_sel, place_rot, currency);
+            }
+            if (rmb && !bld_rmb_prev && build_has_target) {
+                if (is_client) {
+                    dc::net::BuildEdit be{}; be.col = static_cast<int16_t>(build_col); be.row = static_cast<int16_t>(build_row);
+                    unsigned char buf[1 + sizeof be]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::BuildRemove);
+                    std::memcpy(buf + 1, &be, sizeof be); net.send_to_host(buf, sizeof buf, true);
+                } else host_remove(build_col, build_row, currency);
+            }
+            bld_lmb_prev = lmb; bld_rmb_prev = rmb;
+            // F buys a buildable-area expansion (grows the dome).
+            const bool f_now = input.key_down(SDL_SCANCODE_F);
+            if (f_now && !bld_f_prev) {
+                if (is_client) { unsigned char b = static_cast<unsigned char>(dc::net::MsgType::BuyBaseArea); net.send_to_host(&b, 1, true); }
+                else host_buy_area(currency);
+            }
+            bld_f_prev = f_now;
+        } else {
+            bld_lmb_prev = false; bld_rmb_prev = false;   // don't carry a click across mode exit
+        }
+        // Refresh turret positions from the (possibly just-edited, or replicated) piece layout.
+        // The base is NOT saved to disk — it lives only for the current run.
+        base_dirty = false;
+        rebuild_turrets();
 
         if (!ui_open) player.add_look(input.mouse_dx, input.mouse_dy);   // freeze look in any menu
         float forward = ui_open ? 0.0f : (input.key_down(SDL_SCANCODE_W) ? 1.0f : 0.0f)
@@ -1773,8 +2137,22 @@ int main(int argc, char** argv) {
             player.iframes = player.dash_iframes;
             player.dash_cd = player.dash_cooldown * player.cooldown_mult;
             player.stamina -= player.dash_cost * player.stamina_mult;
-            if (my_look.weapon_class == 1)   // wizard: dissolve into a mist of motes
+            if (my_look.weapon_class == 1) {  // wizard: dissolve into a mist of motes
                 burst_mist(player.position[0], player.position[1] - dc::world::EYE_HEIGHT + 0.9f, player.position[2], 70);
+            } else {                           // knight: a DIRECTIONAL dodge keyed off the input axis
+                const bool standing = (std::fabs(forward) < 1e-3f && std::fabs(strafe) < 1e-3f);
+                if (standing || (std::fabs(forward) >= std::fabs(strafe) && forward < 0.0f)) {
+                    // backward (or neutral) dodge: a backward HOP, no roll.
+                    player.vel_y = dc::entity::JUMP_SPEED * 0.7f; player.on_ground = false;
+                    roll_t = 0.0f;
+                } else if (std::fabs(forward) >= std::fabs(strafe)) {
+                    roll_dir = 0; roll_t = ROLL_DUR;            // forward shoulder-roll (covered)
+                    roll_yaw = std::atan2(dz, dx);             // somersault toward the actual dodge dir
+                } else {
+                    roll_dir = (strafe > 0.0f) ? 2 : 1;         // side-roll: right (D) / left (A)
+                    roll_t = ROLL_DUR;
+                }
+            }
             if (player.supersonic_damage > 0.0f) {   // spiral-gust visual on every peer; host queues the damage
                 ss_anim = SS_ANIM_TIME; glm_vec3_copy(player.position, ss_pos);
                 if (net.role != dc::net::Role::Client)
@@ -1791,6 +2169,7 @@ int main(int argc, char** argv) {
             }
         }
         shift_prev = shift_now;
+        if (roll_t > 0.0f) roll_t -= dt;
         // Sprint: keep holding Shift (after the dash burst) to run faster — strafe into a
         // sprint. Drains stamina while running (pauses regen below); stops when you run out
         // or are exhausted.
@@ -1840,7 +2219,7 @@ int main(int argc, char** argv) {
         // Block held (right mouse): needs a shield and some stamina. The shield is on the
         // right arm and the swing is on the left, so you can do both at once (each drains
         // its own stamina).
-        bool block_held = player.shield.has_value() && !exhausted && !ui_open && !dead
+        bool block_held = player.shield.has_value() && !exhausted && !ui_open && !dead && !building_mode
                         && input.mouse_down(SDL_BUTTON_RIGHT);
 
         // Attack (left mouse): one-shot swing, gated by cooldown, not-blocking, and
@@ -1948,15 +2327,15 @@ int main(int argc, char** argv) {
         // Wizard fires staff bolts (half the knight's swing rate by default). While the fire
         // button is held the staff is held OUT in a steady cast pose (set after the punch
         // update below) — it doesn't re-swing the arm each shot.
-        const bool wiz_firing = wizard && !ui_open && !dead
+        const bool wiz_firing = wizard && !ui_open && !dead && !building_mode
                               && (input.mouse_down(SDL_BUTTON_LEFT) || input.mouse_down(SDL_BUTTON_MIDDLE));
-        if (wizard && !ui_open && !dead) {
+        if (wizard && !ui_open && !dead && !building_mode) {
             if (input.mouse_down(SDL_BUTTON_MIDDLE) && throw_cd <= 0.0f) { fire_bolts(true);  throw_cd = 1.7f * player.cooldown_mult; }
             else if (input.mouse_down(SDL_BUTTON_LEFT) && bolt_cd <= 0.0f) { fire_bolts(false); bolt_cd = 0.44f * player.cooldown_mult; }
         }
         // Knight: start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
         // the difference is resolved at the strike frame below.
-        if (!wizard && !punching && throwns.empty() && !ui_open && !dead) {
+        if (!wizard && !punching && throwns.empty() && !ui_open && !dead && !building_mode) {
             if (player.weapon && input.mouse_down(SDL_BUTTON_MIDDLE)
                 && throw_cd <= 0.0f && player.stamina >= throw_cost) {
                 punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = true;
@@ -2070,6 +2449,11 @@ int main(int argc, char** argv) {
         // items left and isn't in use (one player at a time).
         bool e_now = input.key_down(SDL_SCANCODE_E);
         if (e_now && !e_prev && !ui_open && !dead) {
+            // Standing at your base core: E opens the MUSTER menu (unlock/select mob types).
+            const float dcx = core_pos[0] - player.position[0], dcz = core_pos[2] - player.position[2];
+            const bool at_core = (dcx*dcx + dcz*dcz <= (CORE_RAD + 4.5f)*(CORE_RAD + 4.5f));
+            if (at_core) { spawn_menu = true; window.set_relative_mouse(false); }
+            else {
             // Drone vendor in reach takes priority over a chest: pay DRONE_COST -> +1 minion.
             int dbest = -1; float dbest2 = CHEST_REACH * CHEST_REACH;
             for (std::size_t i = 0; i < drone_vendors.size(); ++i) {
@@ -2109,6 +2493,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            }   // end !at_core
         }
         e_prev = e_now;
 
@@ -2325,7 +2710,7 @@ int main(int argc, char** argv) {
             for (auto& b : bolts) {
                 b.pos[0] += b.dir[0]*step; b.pos[1] += b.dir[1]*step; b.pos[2] += b.dir[2]*step;
                 b.traveled += step;
-                const float dealt = dc::entity::radius_attack(entities, b.pos, b.radius, b.damage, b.knockback, b.hit_ids, &frame_hits);
+                float dealt = dc::entity::radius_attack(entities, b.pos, b.radius, b.damage, b.knockback, b.hit_ids, &frame_hits);
                 if (b.owner == my_id) host_damage += dealt;
                 else for (auto& hc : host_clients) if (hc.id == b.owner) { hc.damage_dealt += dealt; break; }
             }
@@ -2559,11 +2944,83 @@ int main(int argc, char** argv) {
             players.push_back(cc);
         }
 
-        // The core joins the target list at NIGHT only: enemies path to + attack it exactly
-        // like a player (closest-first, retarget-on-hit), but it never strikes back. By day
-        // it's omitted, so the base is safe. Host owns the sim, so only add it there.
+        // Friendly lane mobs join the combat list as PlayerCombat entries: enemies path to and
+        // attack them (hits mapped back below), and their `strike` cone damages enemies through
+        // the same resolution the players use. They march toward the enemy base and chip its core.
+        int ally_start = -1;
+        if (net.role != dc::net::Role::Client && !allies.empty()) {
+            ally_start = static_cast<int>(players.size());
+            for (std::size_t i = 0; i < allies.size(); ++i) {
+                Ally& a = allies[i];
+                const dc::game::MobType& mt = dc::game::mob_type(a.kind);
+                // Find the nearest live enemy within aggro range (for combat / self-defense).
+                dc::entity::Entity* tgt = nullptr; float bd2 = dc::game::ALLY_AGGRO * dc::game::ALLY_AGGRO;
+                for (auto& e : entities.items) {
+                    if (e.type != dc::entity::EntityType::Enemy || !e.alive) continue;
+                    const float dx = e.position[0]-a.pos[0], dz = e.position[2]-a.pos[2], d2 = dx*dx+dz*dz;
+                    if (d2 < bd2) { bd2 = d2; tgt = &e; }
+                }
+                // Pick where to go. Fighters chase the enemy, else march on the enemy base.
+                // Scavengers ignore the lane and roam to the nearest dropped coin (they only
+                // fight if an enemy is right next to them — decent self-defense).
+                float tx, tz; bool march_core = false;
+                if (mt.scavenger) {
+                    const Coin* nc = nullptr; float cb2 = 1e18f;
+                    for (const auto& cn : coins) {
+                        const float dx = cn.pos[0]-a.pos[0], dz = cn.pos[2]-a.pos[2], d2 = dx*dx+dz*dz;
+                        if (d2 < cb2) { cb2 = d2; nc = &cn; }
+                    }
+                    if (nc) { tx = nc->pos[0]; tz = nc->pos[2]; }
+                    else if (tgt && bd2 < 9.0f) { tx = tgt->position[0]; tz = tgt->position[2]; }   // defend if cornered
+                    else { tx = a.pos[0] + 2.0f; tz = a.pos[2]; }   // idle drift if nothing to grab
+                } else if (tgt) { tx = tgt->position[0]; tz = tgt->position[2]; }
+                else { tx = enemy_core_pos[0]; tz = enemy_core_pos[2]; march_core = true; }
+                float dx = tx - a.pos[0], dz = tz - a.pos[2];
+                float d = std::sqrt(dx*dx + dz*dz); if (d < 1e-4f) { dx = 1.0f; dz = 0.0f; d = 1.0f; }
+                a.yaw = std::atan2(dz, dx);
+                const float stop = (!mt.scavenger && tgt) ? dc::game::ALLY_REACH : 0.4f;
+                if (d > stop) {
+                    const float step = std::min(dc::game::ALLY_SPEED * dt, d - stop);
+                    a.pos[0] += dx/d * step; a.pos[2] += dz/d * step;
+                }
+                a.pos[1] = terrain.height(a.pos[0], a.pos[2]) + dc::world::EYE_HEIGHT;
+                if (a.attack_cd > 0.0f) a.attack_cd -= dt;
+                // Strike an enemy in reach (resolved via the cone below), or — for fighters with
+                // no enemy near — chip the enemy core when adjacent to it.
+                bool striking = false;
+                const float ereach = (tgt) ? std::sqrt(bd2) : 1e9f;
+                if (a.attack_cd <= 0.0f) {
+                    if (tgt && ereach <= dc::game::ALLY_REACH + 0.4f) { striking = true; a.attack_cd = dc::game::ALLY_ATTACK_CD; }
+                    else if (march_core) {
+                        const float cx = enemy_core_pos[0]-a.pos[0], cz = enemy_core_pos[2]-a.pos[2];
+                        if (cx*cx + cz*cz <= (dc::game::ALLY_REACH + CORE_RAD + 0.5f)*(dc::game::ALLY_REACH + CORE_RAD + 0.5f)
+                            && enemy_core_health > 0.0f) {
+                            enemy_core_health -= mt.damage; if (enemy_core_health < 0.0f) enemy_core_health = 0.0f;
+                            a.attack_cd = dc::game::ALLY_ATTACK_CD;
+                        }
+                    }
+                }
+                dc::entity::PlayerCombat ac{};
+                ac.id = ALLY_ID_BASE + static_cast<uint32_t>(i);
+                ac.alive = true; ac.invincible = false;
+                glm_vec3_copy(a.pos, ac.pos);
+                ac.weight = 3.0f; ac.block_rate = 0.0f;
+                ac.strike = striking;
+                ac.strike_damage = mt.damage; ac.strike_reach = dc::game::ALLY_REACH;
+                ac.strike_cos = -0.3f; ac.strike_knockback = 4.0f; ac.crit_mult = 1.0f;
+                if (tgt) { const float ex = tgt->position[0]-a.pos[0], ez = tgt->position[2]-a.pos[2];
+                           const float el = std::sqrt(ex*ex+ez*ez); ac.aim[0] = el>1e-4f?ex/el:1.0f; ac.aim[2] = el>1e-4f?ez/el:0.0f; }
+                else { ac.aim[0] = dx/d; ac.aim[2] = dz/d; }
+                ac.aim[1] = 0.0f;
+                players.push_back(ac);
+            }
+        }
+
+        // The core is ALWAYS a target now (the lane war never pauses): enemies path to + attack
+        // it like a player (closest-first, retarget-on-hit), but it never strikes back. Night is
+        // purely cosmetic. Host owns the sim, so only add it there.
         int core_index = -1;
-        if (net.role != dc::net::Role::Client && is_night() && core_health > 0.0f) {
+        if (net.role != dc::net::Role::Client && core_health > 0.0f) {
             dc::entity::PlayerCombat cc{};
             cc.id = CORE_ID; cc.alive = true; cc.invincible = false;
             cc.pos[0] = core_pos[0]; cc.pos[1] = core_pos[1] + 1.5f; cc.pos[2] = core_pos[2];
@@ -2594,6 +3051,8 @@ int main(int argc, char** argv) {
             dc::entity::update_enemies(entities, *map, flows, players, hits, dt, &frame_deaths, &frame_hits, &tile_heights, &frame_death_xp);
             // Advance ranged enemies' shots; their hits add into the same `hits`.
             dc::entity::update_projectiles(entities, *map, players, hits, dt, &frame_booms);
+            // NOTE: the enemy base can ONLY be destroyed by your MOBS pushing the lane — the
+            // hero player clears enemies but can't damage the tower directly.
             // When a player gets hit, the nearest enemy gloats with a reactive line (the
             // enemy "that dealt it"). Per-player cooldown + the global cap keep it sane.
             auto react_for = [&](int pi, uint32_t attacker_id, float px, float pz) {
@@ -2672,13 +3131,26 @@ int main(int argc, char** argv) {
                     if (core_health < 0.0f) core_health = 0.0f;
                 }
             }
-            if (!is_night())   // daytime: solar recharge back to full
-                shield_health = std::min(shield_max, shield_health + SHIELD_RECHARGE * dt);
+            // Friendly mobs take their enemy hits (parallel to `players`) and the slain are pruned.
+            if (ally_start >= 0) {
+                for (std::size_t i = 0; i < allies.size(); ++i) {
+                    const int hidx = ally_start + static_cast<int>(i);
+                    if (hidx < static_cast<int>(hits.size())) {
+                        allies[i].health -= hits[hidx].damage;
+                        host_damage += hits[hidx].dealt;   // credit damage the mob dealt to enemies
+                    }
+                }
+                for (std::size_t i = 0; i < allies.size();)
+                    if (allies[i].health <= 0.0f) { allies[i] = allies.back(); allies.pop_back(); }
+                    else ++i;
+            }
+            // Shield recharges continuously now (night is cosmetic).
+            shield_health = std::min(shield_max, shield_health + SHIELD_RECHARGE * dt);
 
             // Solar turrets: ALWAYS active (day + night) — they never power down, just hold
             // their last aim when nothing's in range. Each on its own cooldown, hits the
             // nearest enemy in range. Host-authoritative damage.
-            for (int i = 0; i < TURRET_COUNT; ++i) {
+            for (int i = 0; i < static_cast<int>(turret_pos.size()); ++i) {
                 if (turret_cd[i] > 0.0f) turret_cd[i] -= dt;
                 const dc::entity::Entity* tgt = turret_target(turret_pos[i].x, turret_pos[i].z);
                 if (tgt && turret_cd[i] <= 0.0f) {
@@ -2686,6 +3158,89 @@ int main(int argc, char** argv) {
                     std::vector<uint32_t> one;
                     dc::entity::radius_attack(entities, c, 0.6f, TURRET_DAMAGE, 4.0f, one, &frame_hits);
                     turret_cd[i] = TURRET_FIRE_INTERVAL;
+                }
+            }
+
+            // ENEMY-BASE turrets fire on the nearest of our mobs (then players) in range.
+            for (int i = 0; i < ENEMY_TURRET_COUNT; ++i) {
+                if (eturret_cd[i] > 0.0f) eturret_cd[i] -= dt;
+                const float bx = eturret_pos[i].x, bz = eturret_pos[i].z;
+                float bd2 = ENEMY_TURRET_RANGE * ENEMY_TURRET_RANGE; float* targHP = nullptr;
+                auto consider = [&](float px, float pz, float* hp) {
+                    const float dx = px - bx, dz = pz - bz, d2 = dx*dx + dz*dz;
+                    if (d2 < bd2) { bd2 = d2; targHP = hp; }
+                };
+                for (auto& a : allies) consider(a.pos[0], a.pos[2], &a.health);          // mobs are the priority
+                if (player.health > 0.0f) consider(player.position[0], player.position[2], &player.health);
+                for (auto& hc : host_clients) if (hc.body.health > 0.0f) consider(hc.body.position[0], hc.body.position[2], &hc.body.health);
+                if (targHP && eturret_cd[i] <= 0.0f) { *targHP -= ENEMY_TURRET_DAMAGE; eturret_cd[i] = ENEMY_TURRET_CD; }
+            }
+            // Prune mobs the enemy turrets just killed (the ally-hit pass also prunes, next frame).
+            for (std::size_t i = 0; i < allies.size();)
+                if (allies[i].health <= 0.0f) { allies[i] = allies.back(); allies.pop_back(); } else ++i;
+
+            // Defensive build pieces (host-authoritative): barricades block + soak enemies and
+            // repair by day; landmines detonate on the first enemy to step near. piece_hp is
+            // replicated so every peer renders the same wall HP / spent mines.
+            piece_hp.resize(base.pieces.size(), 0.0f);   // safety: stay parallel to the layout
+            for (std::size_t pi = 0; pi < base.pieces.size(); ++pi) {
+                const auto& bp = base.pieces[pi];
+                const float bx = (bp.col + 0.5f) * dc::world::TILE, bz = (bp.row + 0.5f) * dc::world::TILE;
+                if (bp.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barricade)) {
+                    float& hp = piece_hp[pi];
+                    if (hp <= 0.0f) {   // broken: slowly rebuilds when not under attack
+                        hp = std::min(dc::game::BARRICADE_MAX_HP, hp + dc::game::BARRICADE_REGEN * dt);
+                        continue;
+                    }
+                    bool touched = false;
+                    const float RR = dc::game::BARRICADE_BLOCK_R + 0.5f;   // block ring (+ enemy body)
+                    for (auto& e : entities.items) {
+                        if (e.type != dc::entity::EntityType::Enemy || !e.alive) continue;
+                        float dx = e.position[0] - bx, dz = e.position[2] - bz;
+                        const float d2 = dx*dx + dz*dz;
+                        if (d2 >= RR*RR) continue;
+                        float d = std::sqrt(d2); if (d < 1e-4f) { dx = 1.0f; dz = 0.0f; d = 1.0f; }
+                        e.position[0] = bx + dx/d * RR; e.position[2] = bz + dz/d * RR;   // shove back to the wall face
+                        touched = true;
+                    }
+                    if (touched) hp -= dc::game::BARRICADE_CHIP_DPS * dt;       // enemies gnaw it down
+                    else hp = std::min(dc::game::BARRICADE_MAX_HP, hp + dc::game::BARRICADE_REGEN * dt);
+                } else if (bp.piece == static_cast<uint8_t>(dc::game::BuildPiece::Landmine)) {
+                    if (piece_hp[pi] < 1.0f) {   // spent/arming: ~8s to fully re-arm, can't trip yet
+                        piece_hp[pi] = std::min(1.0f, piece_hp[pi] + dt / 8.0f);
+                        continue;
+                    }
+                    bool trip = false;
+                    for (auto& e : entities.items) {
+                        if (e.type != dc::entity::EntityType::Enemy || !e.alive) continue;
+                        const float dx = e.position[0] - bx, dz = e.position[2] - bz;
+                        if (dx*dx + dz*dz < dc::game::LANDMINE_TRIGGER_R * dc::game::LANDMINE_TRIGGER_R) { trip = true; break; }
+                    }
+                    if (trip) {
+                        piece_hp[pi] = 0.0f;
+                        const float by = terrain.height(bx, bz) + 0.4f;
+                        vec3 c = { bx, by, bz };
+                        std::vector<uint32_t> none;
+                        host_damage += dc::entity::radius_attack(entities, c, dc::game::LANDMINE_BLAST_R,
+                                                                 dc::game::LANDMINE_DAMAGE, dc::game::LANDMINE_KNOCK, none, &frame_hits);
+                        frame_booms.push_back(bx); frame_booms.push_back(by); frame_booms.push_back(bz);   // reuse the explosion FX
+                    }
+                } else if (bp.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) {
+                    // Each barracks is one MOB TYPE (stored in the piece's `rot`). It's a one-time
+                    // purchase that then spawns its mob every type.interval seconds for FREE (only
+                    // the global cap throttles it).
+                    const dc::game::MobType& mt = dc::game::mob_type(bp.rot);
+                    if (piece_hp[pi] > 0.0f) piece_hp[pi] -= dt;
+                    if (piece_hp[pi] <= 0.0f && static_cast<int>(allies.size()) < dc::game::ALLY_CAP) {
+                        piece_hp[pi] = mt.interval;
+                        ally_rng = ally_rng * 1664525u + 1013904223u;
+                        const float jx = ((ally_rng >> 9) % 100) / 100.0f - 0.5f;
+                        const float jz = ((ally_rng >> 17) % 100) / 100.0f - 0.5f;
+                        Ally a; a.pos[0] = bx + jx * 1.5f; a.pos[2] = bz + jz * 1.5f;
+                        a.pos[1] = terrain.height(a.pos[0], a.pos[2]) + dc::world::EYE_HEIGHT;
+                        a.health = mt.hp; a.attack_cd = 0.0f; a.kind = bp.rot;
+                        allies.push_back(a);
+                    }
                 }
             }
 
@@ -2879,10 +3434,15 @@ int main(int argc, char** argv) {
             // with its own wallet to credit. Ghosts (dead players) don't collect.
             struct Collector { float x, z; int* wallet; };
             std::vector<Collector> collectors;
+            // Gold is a SHARED TEAM POOL: every collector credits the same wallet (`currency`).
             if (!dead) collectors.push_back({ player.position[0], player.position[2], &currency });
             for (auto& hc : host_clients)
                 if (hc.body.health > 0.0f)
-                    collectors.push_back({ hc.body.position[0], hc.body.position[2], &hc.currency });
+                    collectors.push_back({ hc.body.position[0], hc.body.position[2], &currency });
+            // Scavenger mobs are collectors too — that's their whole job: roam + bank coins.
+            for (const auto& a : allies)
+                if (dc::game::mob_type(a.kind).scavenger)
+                    collectors.push_back({ a.pos[0], a.pos[2], &currency });
 
             for (std::size_t i = 0; i < coins.size() && !collectors.empty();) {
                 coins[i].age += dt;
@@ -2987,7 +3547,7 @@ int main(int argc, char** argv) {
                 if (ci + 1 < hits.size()) s.block_spent = hits[ci + 1].stamina_cost;
                 s.x = hc.body.position[0]; s.y = hc.body.position[1]; s.z = hc.body.position[2];
                 s.yaw = hc.body.yaw; s.pitch = hc.body.pitch; s.anim_time = hc.anim_time;
-                s.health = hc.body.health; s.moving = m ? 1 : 0; s.currency = hc.currency;
+                s.health = hc.body.health; s.moving = m ? 1 : 0; s.currency = currency;   // shared pool to every client
                 s.damage_dealt = static_cast<float>(hc.damage_dealt);
                 s.elements = elem_mask(hc.input.fire_dps, hc.input.slow_factor, hc.input.earth_knock);
                 s.minions = hc.input.minion_count; s.minion_range = hc.input.minion_range;
@@ -3070,6 +3630,24 @@ int main(int argc, char** argv) {
             { uint32_t dn = static_cast<uint32_t>(day_num); put(&dn, 4); }
             put(&core_health, 4);    // base health, for the bar on every screen
             put(&shield_health, 4);  // shield health, for the dome on every screen
+            put(&enemy_core_health, 4);   // enemy base health (the lane objective)
+            // The player-built base: buildable radius + every placed piece (so clients render
+            // the same floors/walls/stairs/doors/turrets and the same dome size).
+            put(&base.build_radius, 4);
+            { uint32_t nbp = static_cast<uint32_t>(base.pieces.size()); put(&nbp, 4); }
+            if (!base.pieces.empty()) {
+                put(base.pieces.data(), base.pieces.size() * sizeof(dc::game::BasePiece));
+                piece_hp.resize(base.pieces.size(), 0.0f);
+                put(piece_hp.data(), base.pieces.size() * sizeof(float));   // barricade HP / mine armed
+            }
+            // Friendly lane mobs, so every client renders the same army.
+            { uint32_t na = static_cast<uint32_t>(allies.size()); put(&na, 4); }
+            for (const auto& a : allies) {
+                dc::net::AllyState as{}; as.x = a.pos[0]; as.z = a.pos[2]; as.yaw = a.yaw;
+                as.health01 = a.health / dc::game::mob_type(a.kind).hp; as.kind = a.kind;
+                put(&as, sizeof as);
+            }
+            put(&barracks_unlocked, 4);   // which mob types are unlocked (for the muster menu)
             net.broadcast(buf.data(), buf.size(), false);
         }
 
@@ -3080,18 +3658,37 @@ int main(int argc, char** argv) {
         if (net.role != dc::net::Role::Client && death_flash <= 0.0f) {
             bool all_dead = player.health <= 0.0f;
             for (auto& hc : host_clients) all_dead = all_dead && hc.body.health <= 0.0f;
-            if (all_dead || core_health <= 0.0f) { reset_run(); death_flash = 1.2f; }   // wipe OR base destroyed
+            if (enemy_core_health <= 0.0f) { reset_run(); victory_flash = 2.0f; }       // WIN: enemy base destroyed
+            else if (all_dead || core_health <= 0.0f) { reset_run(); death_flash = 1.2f; }   // wipe OR base destroyed
         }
         if (death_flash > 0.0f) death_flash -= dt;
+        if (victory_flash > 0.0f) victory_flash -= dt;
 
         // Difficulty ramps with survival time: faster spawns + a higher cap.
         // (run_time resets on death, so this scales back down too.)
         const float difficulty = 1.0f + run_time / 70.0f;   // +1x base every 70s (gentle ramp)
-        const float night_mult = is_night() ? 3.0f : 1.0f;  // the horde swells after dark
+        // Night no longer swells the horde (it's cosmetic). The enemy fields FEWER units now —
+        // the player hero is meant to be individually much stronger than any single enemy.
+        const float night_mult = 1.0f;
+        // Roster ramp: the EARLY days are almost all skeletons + a few shooters. The dangerous
+        // kinds (flamethrowers, then trolls, then demons) and golden elites only phase in over
+        // later days, so a fresh run isn't immediately facing bruisers it can't beat.
+        auto ramp = [](int day, int start_day, float per_day, float cap) {
+            const float v = (day - start_day + 1) * per_day;        // 0 until `start_day`
+            return v < 0.0f ? 0.0f : (v > cap ? cap : v);
+        };
         if (net.role != dc::net::Role::Client)               // host owns enemy spawning
             for (auto& sp : spawners) {
                 sp.rate = 0.5f * difficulty * night_mult;                     // 0.5 = configured base rate
                 sp.max_alive = static_cast<int>(8 * difficulty * night_mult); // 8 = configured base cap
+                sp.ranged_fraction = ramp(day_num, 1, 0.05f, 0.32f) + 0.08f;  // shooters from the start, grow
+                sp.flying_fraction = ramp(day_num, 2, 0.04f, 0.16f);          // hovering shooters from day 2
+                sp.bat_fraction    = bat_loaded   ? ramp(day_num, 2, 0.05f, 0.20f) : 0.0f;
+                sp.flame_fraction  = ramp(day_num, 3, 0.03f, 0.09f);          // flamethrowers from day 3
+                sp.troll_fraction  = troll_loaded ? ramp(day_num, 5, 0.02f, 0.06f) : 0.0f;  // trolls from day 5
+                sp.demon_fraction  = demon_loaded ? ramp(day_num, 6, 0.015f, 0.05f) : 0.0f; // demons from day 6
+                sp.elite_fraction  = ramp(day_num, 3, 0.015f, dc::entity::ELITE_CHANCE);    // golden elites from day 3
+                sp.stat_mult = 1.0f + run_time / 120.0f;   // +1x HP & damage every 2 min (escalation)
                 sp.update(dt, entities, *map);
             }
 
@@ -3152,9 +3749,20 @@ int main(int argc, char** argv) {
         // that model's own walk/punch/block clips + bone nodes.
         dc::renderer::ModelData& pmd = class_md(my_look.weapon_class);
         const bool class_baked = class_custom(my_look.weapon_class);
-        if (moving)   layers.push_back({ &pmd.walk,  anim_time,  -1 });
-        if (punching) layers.push_back({ &pmd.punch, punch_time, pmd.arm_l_node });
-        if (blocking) layers.push_back({ &pmd.block, block_time, pmd.arm_r_node, false });  // right arm, one-shot: play to end and hold (no loop)
+        // Knight dodge-roll: a full-body roll clip (somersault + tuck) overrides everything.
+        // Pick the forward / left / right variant from roll_dir (backward dodge sets roll_t=0).
+        const dc::renderer::Animation* roll_clip =
+            (roll_dir == 1 && pmd.roll_l.valid()) ? &pmd.roll_l :
+            (roll_dir == 2 && pmd.roll_r.valid()) ? &pmd.roll_r : &pmd.roll;
+        const bool rolling = (roll_t > 0.0f && my_look.weapon_class == 0 && roll_clip->valid());
+        if (rolling) {
+            const float dur = roll_clip->duration;
+            layers.push_back({ roll_clip, (1.0f - roll_t / ROLL_DUR) * dur, -1, false });  // whole body, one-shot
+        } else {
+            if (moving)   layers.push_back({ &pmd.walk,  anim_time,  -1 });
+            if (punching) layers.push_back({ &pmd.punch, punch_time, pmd.arm_l_node });
+            if (blocking) layers.push_back({ &pmd.block, block_time, pmd.arm_r_node, false });  // right arm, one-shot: play to end and hold (no loop)
+        }
         // Pose the player, and grab the head + hand bone world matrices as gear sockets.
         dc::renderer::Mat4 head_world;
         dc::renderer::Mat4 l_hand_world;
@@ -3179,7 +3787,10 @@ int main(int argc, char** argv) {
         glm_mat4_identity(placement);
         vec3 foot = { player.position[0], feet_y, player.position[2] };
         glm_translate(placement, foot);
-        glm_rotate_y(placement, -player.yaw + MODEL_YAW_OFFSET, placement);
+        // A forward roll faces the DIRECTION of the dodge (so a diagonal W+A/W+D somersault
+        // goes where you're actually travelling); all other states face the camera yaw.
+        const float place_yaw = (rolling && roll_dir == 0) ? roll_yaw : player.yaw;
+        glm_rotate_y(placement, -place_yaw + MODEL_YAW_OFFSET, placement);
 
         int w, h; window.framebuffer_size(w, h);
         camera.third_person = tp;   // third person by default; V drops to first person
@@ -3227,15 +3838,15 @@ int main(int argc, char** argv) {
                 vec3 red = { 1.0f, 0.1f, 0.1f };
                 glm_vec3_lerp(body_color, red, player.hit_flash / dc::entity::FLASH_TIME, body_color);
             }
-            float body_alpha = dead ? GHOST_ALPHA : 1.0f;
-            // Wizard dodge: the body dissolves into mist (low alpha) and re-forms as the
-            // i-frames run out, trailing motes the whole time.
-            if (!dead && my_look.weapon_class == 1 && player.iframes > 0.0f && player.dash_iframes > 0.0f) {
-                const float t = player.iframes / player.dash_iframes;   // 1 at dash start -> 0 as it ends
-                body_alpha = 1.0f - 0.8f * t;                            // most-mist at the start, re-forms by the end
-                burst_mist(player.position[0], player.position[1] - dc::world::EYE_HEIGHT + 0.9f, player.position[2], 3);
+            // Wizard dodge: the model fully VANISHES while dodging, leaving only a mist trail,
+            // and reappears when the i-frames end.
+            bool draw_body = true;
+            if (!dead && my_look.weapon_class == 1 && player.iframes > 0.0f) {
+                draw_body = false;   // gone -> just the trailing mist marks the path
+                burst_mist(player.position[0], player.position[1] - dc::world::EYE_HEIGHT + 0.9f, player.position[2], 6);
             }
-            renderer.draw_model(class_mdl(my_look.weapon_class), part_world, placement, body_color, body_alpha);
+            if (draw_body)
+                renderer.draw_model(class_mdl(my_look.weapon_class), part_world, placement, body_color, dead ? GHOST_ALPHA : 1.0f);
             if (!dead && !class_baked) {   // only the fallback rig needs a drawn face / helmet
                 mat4 hp; glm_mat4_mul(placement, head_world.m, hp);
                 vec3 hcen = { hp[3][0], hp[3][1], hp[3][2] };
@@ -3432,7 +4043,12 @@ int main(int argc, char** argv) {
             // their attack UNMASKED; other enemies mask the punch to armL (so they swing while walking).
             const bool full_body_attack = is_troll || is_demon;
             std::vector<dc::renderer::AnimLayer> el;
-            if (en.attacking)        el.push_back({ &md.punch, en.attack_time, full_body_attack ? -1 : md.arm_l_node });
+            // Troll: its clip's slam CONTACT is the final keyframe, so sample NORMALIZED against
+            // the wind-up — the club hits exactly when the damage lands (no early/late slam).
+            float punch_sample = en.attack_time;
+            if (is_troll && md.punch.duration > 0.0f && dc::entity::TROLL_WINDUP > 0.0f)
+                punch_sample = (en.attack_time / dc::entity::TROLL_WINDUP) * md.punch.duration;
+            if (en.attacking)        el.push_back({ &md.punch, punch_sample, full_body_attack ? -1 : md.arm_l_node });
             else if (en.anim_time > 0.0f) el.push_back({ &md.walk, en.anim_time, -1 });
             dc::renderer::pose_model(md, el, 0.0f, enemy_part_world);
             mat4 eplace;
@@ -3454,6 +4070,51 @@ int main(int argc, char** argv) {
             }
             renderer.draw_model(mdl, enemy_part_world, eplace, col);
         }
+
+        // Friendly lane mobs: posed skeletons tinted ALLY BLUE, marching the lane (+ a small
+        // health bar). Host sims them; clients render the replicated set.
+        if (skeleton_loaded) {
+            const bool cl = (net.role == dc::net::Role::Client);
+            const std::size_t na = cl ? net_allies.size() : allies.size();
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            for (std::size_t i = 0; i < na; ++i) {
+                float ax, az, ayaw, hfrac; uint8_t akind = 0;
+                if (cl) { const auto& a = net_allies[i]; ax=a.x; az=a.z; ayaw=a.yaw; hfrac=a.health01; akind=a.kind; }
+                else    { const auto& a = allies[i]; ax=a.pos[0]; az=a.pos[2]; ayaw=a.yaw; hfrac=a.health/dc::game::mob_type(a.kind).hp; akind=a.kind; }
+                // Scavengers use their own dapper model (white tint -> its own materials show);
+                // the fighter types reuse the skeleton rig with a per-type tint.
+                const bool is_scav = dc::game::mob_type(akind).scavenger && scavenger_loaded;
+                dc::renderer::ModelData& amd = is_scav ? scavenger_data : skeleton_data;
+                dc::renderer::Model&     amdl = is_scav ? scavenger_model : skeleton_model;
+                std::vector<dc::renderer::AnimLayer> al;
+                al.push_back({ &amd.walk, t_now * 1.8f + static_cast<float>(i), -1 });
+                dc::renderer::pose_model(amd, al, 0.0f, enemy_part_world);
+                mat4 apl; glm_mat4_identity(apl);
+                vec3 apos = { ax, terrain.height(ax, az) + MODEL_FOOT_LIFT, az };
+                glm_translate(apl, apos);
+                glm_rotate_y(apl, -ayaw + MODEL_YAW_OFFSET, apl);
+                // Per-type tint, all biased toward a friendly CYAN-GREEN so YOUR mobs read as
+                // yours at a glance (enemies are red/warm). Scavenger stays near-white + cyan.
+                static const float ACOL[4][3] = {
+                    {0.35f,0.62f,1.0f}, {0.25f,0.85f,0.75f}, {0.5f,0.55f,1.0f}, {0.85f,0.95f,0.95f} };
+                const int ai = akind < 4 ? akind : 0;
+                vec3 acol = { ACOL[ai][0], ACOL[ai][1], ACOL[ai][2] };
+                vec3 friendly = { 0.25f, 1.0f, 0.85f };
+                glm_vec3_lerp(acol, friendly, 0.30f, acol);   // unify under a friendly hue
+                renderer.draw_model(amdl, enemy_part_world, apl, acol);
+                vec3 mid = { ax, terrain.height(ax, az) + 2.4f, az };
+                const float BW = 0.5f, BH = 0.06f;
+                const float hf = hfrac < 0.0f ? 0.0f : (hfrac > 1.0f ? 1.0f : hfrac);
+                auto bar = [&](float lx, float rx, float r, float g, float b, float aa) {
+                    auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
+                        mid[0]+R[0]*u+U[0]*v, mid[1]+R[1]*u+U[1]*v, mid[2]+R[2]*u+U[2]*v, r,g,b,aa }); };
+                    P(lx,-BH); P(rx,-BH); P(rx,BH); P(lx,-BH); P(rx,BH); P(lx,BH);
+                };
+                bar(-BW, BW, 0.1f, 0.1f, 0.12f, 0.4f);
+                bar(-BW, -BW + 2.0f*BW*hf, 0.3f, 0.7f, 1.0f, 0.85f);
+            }
+        }
+
         if (!flyer_verts.empty()) {                       // upload + draw this frame's flyer cubes
             flyer_mesh.upload(flyer_verts);
             vec3 flyer_color = { 0.85f, 0.25f, 0.30f };   // menacing red
@@ -3609,6 +4270,38 @@ int main(int argc, char** argv) {
             if (sfrac > 0.0f) bar(-BW, -BW + 2.0f*BW*sfrac, 0.35f, 0.65f, 1.0f, 0.7f);  // blue fill
         }
 
+        // The ENEMY base core (red) at the far end — the lane objective. Mirrors our pylon but
+        // tinted hostile red, with red rising motes + an always-on health bar.
+        if (enemy_core_health > 0.0f && glyph_loaded) {
+            const float frac = enemy_core_health / CORE_MAX_HEALTH;
+            static std::vector<dc::renderer::Mat4> egl_pw;
+            if (egl_pw.empty()) dc::renderer::pose_model(glyph_data, {}, 0.0f, egl_pw);
+            mat4 gpl; glm_mat4_identity(gpl);
+            vec3 gpos = { enemy_core_pos[0], enemy_core_pos[1] - 0.5f, enemy_core_pos[2] }; glm_translate(gpl, gpos);
+            vec3 gsc = { 1.3f, 1.3f, 1.3f }; glm_scale(gpl, gsc);
+            vec3 red_tint = { 0.95f, 0.16f + 0.10f*frac, 0.14f + 0.08f*frac };
+            renderer.draw_model(glyph_model, egl_pw, gpl, red_tint);
+            auto jit = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
+            for (int k = 0; k < 2 && sparks.size() < 1800; ++k) {
+                Spark s;
+                s.pos[0] = enemy_core_pos[0] + (jit()-0.5f)*2.0f; s.pos[1] = enemy_core_pos[1] + jit()*CORE_H; s.pos[2] = enemy_core_pos[2] + (jit()-0.5f)*2.0f;
+                s.vel[0] = (jit()-0.5f)*0.3f; s.vel[1] = 1.4f + jit()*1.4f; s.vel[2] = (jit()-0.5f)*0.3f;
+                s.color[0] = 1.0f; s.color[1] = 0.3f; s.color[2] = 0.2f;
+                s.age = 0.0f; s.life = 1.0f + jit()*0.6f; s.grav = -0.5f; s.size_mul = 1.3f; s.alpha_mul = 1.8f;
+                sparks.push_back(s);
+            }
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            const float BW = 2.0f, BH = 0.18f;
+            vec3 mid = { enemy_core_pos[0], enemy_core_pos[1] + CORE_H + 1.3f, enemy_core_pos[2] };
+            auto bar = [&](float lx, float rx, float r, float g, float b, float a) {
+                auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
+                    mid[0]+R[0]*u+U[0]*v, mid[1]+R[1]*u+U[1]*v, mid[2]+R[2]*u+U[2]*v, r,g,b,a }); };
+                P(lx,-BH); P(rx,-BH); P(rx,BH);  P(lx,-BH); P(rx,BH); P(lx,BH);
+            };
+            bar(-BW, BW, 0.3f, 0.05f, 0.05f, 0.18f);                       // track
+            bar(-BW, -BW + 2.0f*BW*frac, 1.0f, 0.25f, 0.15f, 0.7f);        // red fill
+        }
+
         // Solar turrets: cylinder body + a cylinder gun. By day the gun droops to the ground
         // (charging/idle, grey); at night it wakes (orange) and tracks the nearest enemy,
         // spitting red tracers. Built fresh each frame so the gun can aim.
@@ -3639,7 +4332,7 @@ int main(int argc, char** argv) {
             // last aim when idle — and fire visible tracer rounds on a per-turret timer.
             std::vector<dc::renderer::Mat4> turret_pw;
             if (turret_loaded) dc::renderer::pose_model(turret_data, {}, 0.0f, turret_pw);
-            for (int i = 0; i < TURRET_COUNT; ++i) {
+            for (int i = 0; i < static_cast<int>(turret_pos.size()); ++i) {
                 const TPos& tp = turret_pos[i];
                 vec3 pivot = { tp.x, tp.y + 1.1f, tp.z };
                 const dc::entity::Entity* tgt = turret_target(tp.x, tp.z);   // active day + night
@@ -3675,6 +4368,47 @@ int main(int argc, char** argv) {
                     turret_bullets.push_back(b);
                 }
             }
+            // ENEMY-BASE turrets: red bodies aimed at our nearest mob/player, firing red tracers.
+            {
+                // Nearest of our units to a point (allies on host, net_allies on clients, + player).
+                auto enearest = [&](float tx, float tz, float& ox, float& oy, float& oz) -> bool {
+                    float bd2 = ENEMY_TURRET_RANGE * ENEMY_TURRET_RANGE; bool found = false;
+                    auto consider = [&](float px, float pz) {
+                        const float dx = px-tx, dz = pz-tz, d2 = dx*dx+dz*dz;
+                        if (d2 < bd2) { bd2 = d2; ox = px; oz = pz; oy = terrain.height(px,pz)+0.9f; found = true; }
+                    };
+                    if (net.role == dc::net::Role::Client) { for (const auto& a : net_allies) consider(a.x, a.z); }
+                    else                                   { for (const auto& a : allies)     consider(a.pos[0], a.pos[2]); }
+                    if (player.health > 0.0f) consider(player.position[0], player.position[2]);
+                    return found;
+                };
+                for (int i = 0; i < ENEMY_TURRET_COUNT; ++i) {
+                    const TPos& tp = eturret_pos[i];
+                    vec3 pivot = { tp.x, tp.y + 1.1f, tp.z };
+                    float ox, oy, oz; const bool have = enearest(tp.x, tp.z, ox, oy, oz);
+                    if (have) { vec3 d = { ox-pivot[0], oy-pivot[1], oz-pivot[2] };
+                                float dl = std::sqrt(d[0]*d[0]+d[1]*d[1]+d[2]*d[2]);
+                                if (dl > 1e-4f) eturret_aim[i] = { d[0]/dl, d[1]/dl, d[2]/dl }; }
+                    vec3 dir = { eturret_aim[i].x, eturret_aim[i].y, eturret_aim[i].z };
+                    if (turret_loaded) {
+                        const float tyaw = std::atan2(dir[2], dir[0]);
+                        mat4 tpl; glm_mat4_identity(tpl);
+                        vec3 tpos = { tp.x, tp.y, tp.z }; glm_translate(tpl, tpos);
+                        glm_rotate_y(tpl, -tyaw + MODEL_YAW_OFFSET, tpl);
+                        vec3 red = { 1.0f, 0.30f, 0.26f };
+                        renderer.draw_model(turret_model, turret_pw, tpl, red);
+                    }
+                    vec3 muzzle = { pivot[0]+dir[0]*1.4f, pivot[1]+dir[1]*1.4f, pivot[2]+dir[2]*1.4f };
+                    if (eturret_flash[i] > 0.0f) eturret_flash[i] -= dt;
+                    if (have && eturret_flash[i] <= 0.0f) {
+                        eturret_flash[i] = ENEMY_TURRET_CD;
+                        const float spd = 48.0f;
+                        TBullet b; b.pos[0]=muzzle[0]; b.pos[1]=muzzle[1]; b.pos[2]=muzzle[2];
+                        b.vel[0]=dir[0]*spd; b.vel[1]=dir[1]*spd; b.vel[2]=dir[2]*spd; b.life = 0.7f; b.red = true;
+                        turret_bullets.push_back(b);
+                    }
+                }
+            }
             // Advance + draw turret tracer rounds: bright additive bolts with a short trail.
             for (std::size_t k = 0; k < turret_bullets.size();) {
                 TBullet& b = turret_bullets[k];
@@ -3686,8 +4420,9 @@ int main(int argc, char** argv) {
                 for (int s = 0; s < 4; ++s) {
                     const float back = -s * 0.22f, w = 0.16f - s*0.032f, bri = 1.0f - s*0.22f;
                     vec3 m = { b.pos[0]+vn[0]*back, b.pos[1]+vn[1]*back, b.pos[2]+vn[2]*back };
+                    const float cg = b.red ? 0.22f*bri : 0.82f*bri, cb = b.red ? 0.18f*bri : 0.30f*bri;
                     auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
-                        m[0]+R[0]*u+U[0]*v, m[1]+R[1]*u+U[1]*v, m[2]+R[2]*u+U[2]*v, 1.0f, 0.82f*bri, 0.30f*bri, 1.0f}); };
+                        m[0]+R[0]*u+U[0]*v, m[1]+R[1]*u+U[1]*v, m[2]+R[2]*u+U[2]*v, 1.0f, cg, cb, 1.0f}); };
                     P(-w,-w);P(w,-w);P(w,w); P(-w,-w);P(w,w);P(-w,w);
                 }
                 ++k;
@@ -3696,12 +4431,93 @@ int main(int argc, char** argv) {
             vec3 tcol = { 0.55f, 0.56f, 0.62f };   // barrel steel (the housing model carries its own colors)
             renderer.draw_terrain(turret_mesh, tcol, true);
 
+            // --- Player-placed DEFENSES: barricades (tinted by remaining HP) + landmines.
+            // Turret pieces are drawn by the turret system above (same layout). ---
+            {
+                const float T = dc::world::TILE, WH = dc::world::WALL_HEIGHT;
+                // Emit one axis box (optionally yawed about Y by ca/sa) into a 9-float-vertex buffer.
+                auto emit_box = [](std::vector<float>& v, float cx, float cy, float cz,
+                                   float hx, float hy, float hz, float ca, float sa) {
+                    auto V = [&](float lx, float ly, float lz, float nx, float ny, float nz) {
+                        const float rx = ca*lx - sa*lz, rz = sa*lx + ca*lz;
+                        const float rnx = ca*nx - sa*nz, rnz = sa*nx + ca*nz;
+                        v.insert(v.end(), { cx+rx, cy+ly, cz+rz, rnx, ny, rnz, 0.0f, 0.0f, 0.0f });
+                    };
+                    const float X0=-hx,X1=hx,Y0=-hy,Y1=hy,Z0=-hz,Z1=hz;
+                    V(X1,Y0,Z0,1,0,0);V(X1,Y1,Z0,1,0,0);V(X1,Y1,Z1,1,0,0); V(X1,Y0,Z0,1,0,0);V(X1,Y1,Z1,1,0,0);V(X1,Y0,Z1,1,0,0);
+                    V(X0,Y0,Z1,-1,0,0);V(X0,Y1,Z1,-1,0,0);V(X0,Y1,Z0,-1,0,0); V(X0,Y0,Z1,-1,0,0);V(X0,Y1,Z0,-1,0,0);V(X0,Y0,Z0,-1,0,0);
+                    V(X0,Y1,Z0,0,1,0);V(X1,Y1,Z0,0,1,0);V(X1,Y1,Z1,0,1,0); V(X0,Y1,Z0,0,1,0);V(X1,Y1,Z1,0,1,0);V(X0,Y1,Z1,0,1,0);
+                    V(X0,Y0,Z1,0,-1,0);V(X1,Y0,Z1,0,-1,0);V(X1,Y0,Z0,0,-1,0); V(X0,Y0,Z1,0,-1,0);V(X1,Y0,Z0,0,-1,0);V(X0,Y0,Z0,0,-1,0);
+                    V(X0,Y0,Z1,0,0,1);V(X1,Y0,Z1,0,0,1);V(X1,Y1,Z1,0,0,1); V(X0,Y0,Z1,0,0,1);V(X1,Y1,Z1,0,0,1);V(X0,Y1,Z1,0,0,1);
+                    V(X1,Y0,Z0,0,0,-1);V(X0,Y0,Z0,0,0,-1);V(X0,Y1,Z0,0,0,-1); V(X1,Y0,Z0,0,0,-1);V(X0,Y1,Z0,0,0,-1);V(X1,Y1,Z0,0,0,-1);
+                };
+                // Build geometry for one defensive piece into `v`; returns its draw color in col.
+                auto emit_barricade = [&](std::vector<float>& v, float cx, float cz, float h, float ca, float sa, float frac, vec3 col) {
+                    if (frac <= 0.0f) {   // broken: a low rubble heap
+                        emit_box(v, cx, h+0.22f, cz, T*0.5f, 0.22f, 0.32f, ca, sa);
+                        col[0]=0.30f; col[1]=0.27f; col[2]=0.23f; return;
+                    }
+                    // a sturdy chest-high palisade; tints from oak (full) toward charred red (low)
+                    emit_box(v, cx, h+WH*0.40f, cz, T*0.5f, WH*0.40f, 0.22f, ca, sa);
+                    col[0]=0.42f + 0.30f*(1.0f-frac); col[1]=0.30f*frac + 0.08f; col[2]=0.18f*frac + 0.05f;
+                };
+                auto emit_mine = [&](std::vector<float>& v, float cx, float cz, float h, bool armed, vec3 col) {
+                    emit_box(v, cx, h+0.10f, cz, 0.42f, 0.10f, 0.42f, 1.0f, 0.0f);   // ground pad
+                    emit_box(v, cx, h+0.26f, cz, 0.16f, 0.10f, 0.16f, 1.0f, 0.0f);   // trigger bump
+                    if (armed) { col[0]=0.80f; col[1]=0.12f; col[2]=0.10f; }         // armed: red
+                    else       { col[0]=0.22f; col[1]=0.22f; col[2]=0.24f; }         // spent: dark grey
+                };
+                // A barracks: a little hut + roof, tinted by the mob type it musters.
+                static const float TYCOL[4][3] = {
+                    {0.35f,0.62f,1.0f}, {0.25f,0.85f,0.75f}, {0.6f,0.45f,0.95f}, {0.55f,0.45f,0.20f} };
+                auto emit_barracks = [&](std::vector<float>& v, float cx, float cz, float h, int tier, vec3 col) {
+                    emit_box(v, cx, h+0.7f, cz, 0.85f, 0.7f, 0.85f, 1.0f, 0.0f);    // walls
+                    emit_box(v, cx, h+1.55f, cz, 1.0f, 0.22f, 1.0f, 1.0f, 0.0f);    // roof slab
+                    const int ti = (tier >= 0 && tier < 4) ? tier : 0;
+                    col[0]=TYCOL[ti][0]; col[1]=TYCOL[ti][1]; col[2]=TYCOL[ti][2];
+                };
+                const auto& ps = live_pieces();
+                const auto& hps = live_hp();
+                for (std::size_t i = 0; i < ps.size(); ++i) {
+                    const auto& pc = ps[i];
+                    const float cx=(pc.col+0.5f)*T, cz=(pc.row+0.5f)*T, h=terrain.height(cx,cz);
+                    const float ca=std::cos(pc.rot*1.57079633f), sa=std::sin(pc.rot*1.57079633f);
+                    const float php = (i < hps.size()) ? hps[i] : 0.0f;
+                    std::vector<float> v; vec3 col = {0.5f,0.5f,0.5f};
+                    if (pc.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barricade))
+                        emit_barricade(v, cx, cz, h, ca, sa, php / dc::game::BARRICADE_MAX_HP, col);
+                    else if (pc.piece == static_cast<uint8_t>(dc::game::BuildPiece::Landmine))
+                        emit_mine(v, cx, cz, h, php > 0.5f, col);
+                    else if (pc.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks))
+                        emit_barracks(v, cx, cz, h, pc.rot, col);
+                    else continue;   // turrets drawn by the turret system
+                    if (!v.empty()) { build_mesh[0].upload(v); renderer.draw_terrain(build_mesh[0], col, true); }
+                }
+                // Ghost preview of the piece you're about to place (green = valid, red = blocked).
+                if (building_mode && build_has_target) {
+                    std::vector<float> gv;
+                    const float cx=(build_col+0.5f)*T, cz=(build_row+0.5f)*T, h=terrain.height(cx,cz);
+                    const float ca=std::cos(build_rot*1.57079633f), sa=std::sin(build_rot*1.57079633f);
+                    vec3 dummy;
+                    if (build_sel == static_cast<int>(dc::game::BuildPiece::Barricade)) emit_barricade(gv, cx, cz, h, ca, sa, 1.0f, dummy);
+                    else if (build_sel == static_cast<int>(dc::game::BuildPiece::Landmine)) emit_mine(gv, cx, cz, h, true, dummy);
+                    else if (build_sel == static_cast<int>(dc::game::BuildPiece::Barracks)) emit_barracks(gv, cx, cz, h, build_tier, dummy);
+                    else emit_box(gv, cx, h+0.6f, cz, 0.5f, 0.6f, 0.5f, 1.0f, 0.0f);   // turret placeholder
+                    if (!gv.empty()) {
+                        build_ghost_mesh.upload(gv);
+                        vec3 gcol; if (build_valid){ gcol[0]=0.3f; gcol[1]=1.0f; gcol[2]=0.4f; }
+                                   else { gcol[0]=1.0f; gcol[1]=0.3f; gcol[2]=0.3f; }
+                        renderer.draw_terrain(build_ghost_mesh, gcol, true);
+                    }
+                }
+            }
+
             // Core shield dome enclosing the turrets. CHARGED bright blue at night (brighter
             // with more shield health), flashing RED when it absorbs a hit; DOWN/grey by day
             // (and a broken grey flicker if its health is depleted at night).
             {
                 if (shield_flash > 0.0f) shield_flash -= dt;   // host sets on absorb, client on drop
-                const float SR = SHIELD_RADIUS;
+                const float SR = shield_radius;
                 vec3 c = { core_pos[0], core_pos[1] + 2.0f, core_pos[2] };
                 const float frac = shield_max > 0.0f ? shield_health / shield_max : 0.0f;
                 const float fl = shield_flash > 0.0f ? shield_flash / 0.3f : 0.0f;
@@ -4154,10 +4970,20 @@ int main(int argc, char** argv) {
         // by the replicated punch_anim, so every peer sees it.
         {
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            std::unordered_set<uint32_t> slamming_now;
             for (const auto& en : entities.items) {
                 if (en.type != dc::entity::EntityType::Enemy || en.punch_anim <= 0.0f) continue;
+                const bool troll_en = (en.kind == dc::entity::EnemyKind::Troll);
+                const float ff_rad  = troll_en ? dc::entity::TROLL_RADIUS : dc::entity::MELEE_FORCEFIELD_RADIUS;
+                // Troll slam: kick up a wide ring of ground dust ONCE, on the rising edge of the
+                // replicated punch_anim, so every peer sees debris across the whole AoE.
+                if (troll_en) {
+                    slamming_now.insert(en.id);
+                    if (!troll_slamming.count(en.id))
+                        burst_dust(en.position[0], en.position[2], dc::entity::TROLL_RADIUS, 160);
+                }
                 const float prog = 1.0f - en.punch_anim / dc::entity::PUNCH_ANIM_TIME;   // 0..1 expand
-                const float rr   = dc::entity::MELEE_FORCEFIELD_RADIUS * prog;
+                const float rr   = ff_rad * prog;
                 const float al   = (1.0f - prog) * 0.7f;                                  // fade as it grows
                 const float sz   = 0.10f + 0.10f * prog;                                  // motes grow with the shell
                 const vec3  c    = { en.position[0], terrain.height(en.position[0], en.position[2]) + 1.0f, en.position[2] };
@@ -4179,6 +5005,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            troll_slamming.swap(slamming_now);   // remember this frame's slammers for edge detection
         }
 
         // Enemy health bars: a subtle, semi-transparent red bar over the head of any enemy
@@ -4919,6 +5746,20 @@ int main(int argc, char** argv) {
             // Death flash: full-screen red overlay that fades out.
             if (death_flash > 0.0f)
                 hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.7f, 0.0f, 0.0f, clamp01(death_flash / 1.2f) * 0.6f);
+            // Victory flash: full-screen gold overlay (enemy base destroyed).
+            if (victory_flash > 0.0f)
+                hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.9f, 0.7f, 0.1f, clamp01(victory_flash / 2.0f) * 0.5f);
+            // Muster menu panel (rects here; labels in the text pass below).
+            if (spawn_menu) {
+                hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.55f);     // dim
+                hud_rect(-0.5f, -0.42f, 0.5f, 0.46f, 0.08f, 0.09f, 0.13f, 0.95f); // panel
+                for (int k = 0; k < dc::game::MOB_TYPE_COUNT; ++k) {
+                    const float ry = 0.26f - k * 0.15f;
+                    const bool unlocked = (barracks_unlocked & (1u << k)) != 0;
+                    if (unlocked) hud_rect(-0.46f, ry - 0.055f, 0.46f, ry + 0.06f, 0.14f, 0.22f, 0.32f, 0.9f);
+                    else          hud_rect(-0.46f, ry - 0.055f, 0.46f, ry + 0.06f, 0.20f, 0.12f, 0.10f, 0.9f);
+                }
+            }
 
             // Chest purchase menu: dim + 4 cards (icon band + border); sold slots are blank.
             // Hovering a buyable card shows its description tooltip. Text drawn after draw_hud.
@@ -5038,6 +5879,44 @@ int main(int argc, char** argv) {
                 if (is_night()) { col[0] = 0.55f; col[1] = 0.7f; col[2] = 1.0f; }
                 else            { col[0] = 1.0f;  col[1] = 0.92f; col[2] = 0.6f; }
                 renderer.draw_text(clk, -w * 0.5f, 0.86f, cpx, col, 1.0f, fbw, fbh);
+            }
+            // Big centered banner on win/lose.
+            if (victory_flash > 0.0f) {
+                vec3 gold = { 1.0f, 0.85f, 0.2f };
+                const float vpx = 64.0f, w = renderer.text_width("VICTORY!", vpx, fbw);
+                renderer.draw_text("VICTORY!", -w * 0.5f, 0.05f, vpx, gold, clamp01(victory_flash / 2.0f), fbw, fbh);
+            }
+            // Muster menu labels.
+            if (spawn_menu) {
+                vec3 gold = {1.0f,0.85f,0.3f}, white = {0.95f,0.95f,0.95f}, grey = {0.6f,0.62f,0.68f};
+                renderer.draw_text("MUSTER  -  press 1-4 to unlock / select, E to close", -0.46f, 0.36f, 15.0f, gold, 1.0f, fbw, fbh);
+                for (int k = 0; k < dc::game::MOB_TYPE_COUNT; ++k) {
+                    const dc::game::MobType& mt = dc::game::mob_type(k);
+                    const bool unlocked = (barracks_unlocked & (1u << k)) != 0;
+                    const float ry = 0.26f - k * 0.15f;
+                    char line[128];
+                    if (unlocked)
+                        std::snprintf(line, sizeof line, "[%d] %-9s  buy $%d   free spawn / %.0fs   (%.0f hp, %.0f dmg)",
+                                      k+1, mt.name, mt.place_cost, mt.interval, mt.hp, mt.damage);
+                    else
+                        std::snprintf(line, sizeof line, "[%d] %-9s  LOCKED  -  unlock $%d", k+1, mt.name, mt.unlock_cost);
+                    renderer.draw_text(line, -0.44f, ry - 0.005f, 13.0f, unlocked ? white : grey, 1.0f, fbw, fbh);
+                }
+            }
+            // Build-mode palette: current piece + (for barracks) the mob type + key hints.
+            if (building_mode) {
+                vec3 c = {0.9f,0.95f,1.0f}, hint = {0.6f,0.65f,0.75f};
+                char line[128];
+                if (build_sel == static_cast<int>(dc::game::BuildPiece::Barracks)) {
+                    const dc::game::MobType& mt = dc::game::mob_type(build_tier);
+                    std::snprintf(line, sizeof line, "BUILD: Barracks [%s]  $%d   (T: type)", mt.name, mt.place_cost);
+                } else {
+                    const dc::game::BuildPiece bp = static_cast<dc::game::BuildPiece>(build_sel);
+                    std::snprintf(line, sizeof line, "BUILD: %s  $%d", dc::game::piece_name(bp), dc::game::piece_cost(bp));
+                }
+                renderer.draw_text(line, -0.32f, -0.74f, 15.0f, c, 1.0f, fbw, fbh);
+                renderer.draw_text("1-4 piece   R rotate   F +area   LMB place   RMB remove   B exit",
+                                   -0.42f, -0.80f, 11.0f, hint, 1.0f, fbw, fbh);
             }
             // Item stack counts: bottom-right of each inventory chip.
             {

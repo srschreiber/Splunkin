@@ -135,3 +135,11 @@ the melee fallback to `Skeleton`, retiring the green melee enemy).
 - [ ] Origin at waist, feet ≈ Z -1.0, Z-up.
 - [ ] `.upload()` only after the GL context exists.
 - [ ] Debug-print `nodes / parts / bone indices / walk·punch valid` once at load to verify.
+- [ ] **Reset every bone's `rotation_euler` to (0,0,0) AFTER authoring clips, BEFORE export.**
+      Keyframing leaves each object at its *last* keyframe pose; the glTF exporter bakes that
+      as the node's REST transform, so the model stands permanently tilted/posed (e.g. a
+      roll clip's lean leaks into the standing pose). Engine clips are full TRS overrides, so
+      a neutral rest pose + the stashed actions is what you want. New clip names also need
+      routing in `read_model` + a field on `ModelData` (e.g. `roll`).
+- [ ] A clip that rotates the ROOT `body` bone somersaults the whole model (children inherit) —
+      use this for rolls/flips; child-bone keys (head/arms/legs) then tuck *relative* to it.

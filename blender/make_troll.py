@@ -130,15 +130,18 @@ def main():
     # punch: a BIG overhead club smash with WEIGHT — the torso winds back then lurches into
     # the slam, the legs counterbalance, and the left arm whips the club down.
     punch = bpy.data.actions.new("punch")
-    for frame, a in [(1, 0), (8, -120), (16, 70), (26, 0)]:      # armL: raise back -> slam down
+    # The engine only plays this clip DURING the wind-up (attacking flips off at the damage
+    # frame), sampled NORMALIZED against TROLL_WINDUP — so the SLAM CONTACT must be the FINAL
+    # keyframe. That lands the club-down pose exactly on the damage moment (no early/late slam).
+    for frame, a in [(1, 0), (11, -120), (30, 85)]:              # armL: raise back -> slam CONTACT at end
         key_rot(armL, punch, frame, (a, 0, 0))
     # torso: lean back + twist on windup, then lurch forward + untwist into the slam (weight).
-    for frame, lean, twist in [(1, 0, 0), (8, -22, 14), (16, 26, -16), (26, 0, 0)]:
+    for frame, lean, twist in [(1, 0, 0), (11, -22, 14), (30, 30, -16)]:
         if not body.animation_data: body.animation_data_create()
         body.animation_data.action = punch; body.rotation_mode = 'XYZ'
         body.rotation_euler = (math.radians(lean), 0, math.radians(twist))
         body.keyframe_insert(data_path="rotation_euler", frame=frame)
-    for frame, l in [(1, 0), (8, 18), (16, -20), (26, 0)]:        # legs counterbalance the swing's weight
+    for frame, l in [(1, 0), (11, 18), (30, -22)]:                # legs counterbalance the swing's weight
         key_rot(legL, punch, frame, (l, 0, 0))
         key_rot(legR, punch, frame, (l, 0, 0))
 
@@ -151,6 +154,12 @@ def main():
     stash(legL, walk); stash(legR, walk); stash(armR, walk)
     stash(armL, walk); stash(armL, punch)
     stash(legL, punch); stash(legR, punch); stash(body, punch)   # full-body weighted swing
+
+    # The punch clip now ENDS on the slam (non-neutral). Reset every bone to neutral and park
+    # on frame 1 so the exporter bakes an UPRIGHT rest pose (not the slammed pose).
+    for obj in (legL, legR, armL, armR, body, head):
+        obj.rotation_euler = (0, 0, 0)
+    bpy.context.scene.frame_set(1)
 
     out_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "models", "troll.glb"))
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

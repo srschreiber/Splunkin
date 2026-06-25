@@ -194,6 +194,9 @@ bool read_model(const char* path, ModelData& out) {
         else if (clip.name == "block") out.block = std::move(clip);  // example of a block layer that masks no bones
         else if (clip.name == "open")  out.open = std::move(clip);
         else if (clip.name == "close") out.close = std::move(clip);
+        else if (clip.name == "roll")  out.roll = std::move(clip);
+        else if (clip.name == "rollL") out.roll_l = std::move(clip);
+        else if (clip.name == "rollR") out.roll_r = std::move(clip);
     }
 
     cgltf_free(data);

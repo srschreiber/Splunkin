@@ -58,6 +58,9 @@ struct ModelData {
     Animation           block;  // example of a block animation layer that masks no bones
     Animation            open;   // chest: lid swing (played forward to open)
     Animation            close;  // chest: closed pose (unused for now; open played in reverse closes)
+    Animation            roll;   // knight dodge-roll FORWARD (full-body somersault + tuck)
+    Animation            roll_l;  // knight dodge-roll LEFT (sideways barrel roll)
+    Animation            roll_r;  // knight dodge-roll RIGHT (sideways barrel roll)
     int head_node  = -1;   // for head-look, the "head" bone
     int body_node  = -1;   // torso bone (parents arms+head): pitch it to aim the whole upper body
     int arm_l_node = -1;

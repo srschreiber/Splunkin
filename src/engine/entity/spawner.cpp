@@ -37,7 +37,11 @@ void Spawner::update(float dt, EntityList& list, const dc::world::Map& map) {
                     : (roll < f3 + ranged_fraction + flame_fraction) ? EnemyKind::Flamethrower
                     : melee_kind;
                 const bool elite = rand01(rng) < elite_fraction;   // rare golden bruiser (any kind)
-                list.spawn_enemy(x, z, kind, elite);
+                Entity& e = list.spawn_enemy(x, z, kind, elite);
+                if (stat_mult != 1.0f) {   // escalation: tougher + hits harder as the run wears on
+                    e.stats.max_health *= stat_mult; e.health = e.stats.max_health;
+                    e.stats.attack_damage *= stat_mult;
+                }
                 break;
             }
         }

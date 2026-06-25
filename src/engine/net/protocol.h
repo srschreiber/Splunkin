@@ -24,6 +24,18 @@ enum class MsgType : uint8_t {
     StartGame = 17,     // host -> clients: leave the lobby and start playing (reliable)
     Taunt = 18,         // host -> clients: an enemy taunts [TauntState] -> floating text + TTS (reliable)
     BoltCast = 19,      // client -> host: wizard staff bolt(s) [BoltCast] (reliable)
+    BuildPlace = 20,    // client -> host: place a base piece [BuildEdit] (reliable)
+    BuildRemove = 21,   // client -> host: remove the base piece at a tile [BuildEdit] (reliable)
+    BuyBaseArea = 22,   // client -> host: buy a buildable-area expansion (reliable)
+    BuyTurret = 23,     // client -> host: buy one more perimeter turret (reliable)
+    BuyUnlock = 24,     // client -> host: unlock a barracks mob type [uint8 type] (reliable)
+};
+
+// Client -> host: place/remove a base piece at a tile. For BuildRemove only col/row matter.
+struct BuildEdit {
+    int16_t col = 0, row = 0;
+    uint8_t piece = 0;   // dc::game::BuildPiece (place only)
+    uint8_t rot = 0;     // 0..3 (place only)
 };
 
 // Client -> host: a wizard staff cast. The host spawns + simulates the bolt(s) (damage) and
@@ -137,6 +149,9 @@ struct EnemyState {
     uint8_t kind = 0;           // dc::entity::EnemyKind (0 = Melee, 1 = Ranged) -> render color
     uint8_t status = 0;         // status bitmask (1=burning, 2=slowed, 4=elite) -> particles/scale
 };
+
+// One friendly lane-mob's render state (host -> everyone): position, facing, health fraction.
+struct AllyState { float x = 0.0f, z = 0.0f, yaw = 0.0f; float health01 = 1.0f; uint8_t kind = 0; };
 
 // One dropped coin's position (render-only on clients).
 struct CoinState { float x = 0.0f, z = 0.0f; };

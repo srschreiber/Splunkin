@@ -152,9 +152,10 @@ def build(klass):
         part("shieldL", handR, (0, 0.14, -0.34), (0.30, 0.05, 0.30), steel, rot=(math.radians(0), 0, math.radians(45)))
         part("shieldBoss", handR, (0, 0.19, -0.10), (0.10, 0.05, 0.10), dark)
 
-    # --- Animations (walk / punch / block). ---
+    # --- Animations (walk / punch / block). All clips START NEUTRAL at frame 1 so the
+    # exporter's rest-pose sample (taken at frame 1) is upright. ---
     walk = bpy.data.actions.new("walk")
-    for f, a in [(1, 22), (13, -22), (25, 22)]:
+    for f, a in [(1, 0), (7, 22), (19, -22), (31, 0)]:
         key(legL, walk, f, (a, 0, 0)); key(legR, walk, f, (-a, 0, 0))
         key(armL, walk, f, (-a*0.6, 0, 0)); key(armR, walk, f, (a*0.6, 0, 0))
 
@@ -167,16 +168,66 @@ def build(klass):
     for f, a in [(1, 0), (8, -95)]:
         key(armR, block, f, (a, 0, 20))
 
-    # Stash each clip on the bones it animates so the exporter writes all three by name.
+    # roll = a STRAIGHT forward somersault (a full turn about the body's X axis, NO sideways
+    # lean/tilt). The HEAD tucks chin-to-chest; arms and legs curl into a tight ball.
+    roll = bpy.data.actions.new("roll")
+    # body: forward somersault (0 -> -360 about X), pure pitch — no Y lean, so the model never
+    # tilts (and the upright rest pose is preserved).
+    key(body, roll, 1,  (0, 0, 0))
+    key(body, roll, 9,  (-180, 0, 0))
+    key(body, roll, 18, (-360, 0, 0))
+    for f in (1, 18): key(head, roll, f, (0, 0, 0))     # head: ease the tuck in and out
+    for f in (5, 13): key(head, roll, f, (32, 0, 0))    # chin straight to chest (X only, no lean)
+    for f in (1, 18): key(armL, roll, f, (0, 0, 0))
+    for f in (1, 18): key(armR, roll, f, (0, 0, 0))
+    for f in (1, 18): key(legL, roll, f, (0, 0, 0))
+    for f in (1, 18): key(legR, roll, f, (0, 0, 0))
+    for f in (5, 13):                                   # tuck arms in + curl knees up (ball)
+        key(armL, roll, f, (78, 0, 0)); key(armR, roll, f, (78, 0, 0))
+        key(legL, roll, f, (82, 0, 0)); key(legR, roll, f, (82, 0, 0))
+
+    # rollL / rollR = SIDE rolls (barrel roll about the body's forward Y axis). A positive Y
+    # turn tips the crown toward +X (the player's right) => rollR; negative => rollL. Limbs
+    # tuck into a ball just like the forward roll; head tucks chin-to-chest. Boundary frames
+    # are neutral so the rest pose stays upright.
+    def side_roll(name, sign):
+        act = bpy.data.actions.new(name)
+        key(body, act, 1,  (0, 0, 0))
+        key(body, act, 9,  (0, sign * 180, 0))
+        key(body, act, 18, (0, sign * 360, 0))
+        for f in (1, 18): key(head, act, f, (0, 0, 0))
+        for f in (5, 13): key(head, act, f, (26, 0, 0))     # chin to chest as it goes over
+        for f in (1, 18):
+            key(armL, act, f, (0, 0, 0)); key(armR, act, f, (0, 0, 0))
+            key(legL, act, f, (0, 0, 0)); key(legR, act, f, (0, 0, 0))
+        for f in (5, 13):
+            key(armL, act, f, (70, 0, 0)); key(armR, act, f, (70, 0, 0))
+            key(legL, act, f, (80, 0, 0)); key(legR, act, f, (80, 0, 0))
+        return act
+    rollL = side_roll("rollL", -1)
+    rollR = side_roll("rollR",  1)
+
+    # Stash each clip on the bones it animates so the exporter writes them all by name.
     def stash(obj, act):
         if not obj.animation_data: obj.animation_data_create()
         obj.animation_data.action = None
         tr = obj.animation_data.nla_tracks.new(); tr.name = act.name
         tr.strips.new(act.name, int(act.frame_range[0]), act)
-    for obj in (legL, legR, armL, armR):
+    for obj in (legL, legR, armL, armR, body, head):
         if obj.animation_data: obj.animation_data.action = None
     stash(legL, walk); stash(legR, walk); stash(armR, walk); stash(armL, walk)
     stash(armL, punch); stash(armR, block)
+    stash(body, roll); stash(head, roll); stash(armL, roll); stash(armR, roll); stash(legL, roll); stash(legR, roll)
+    for act in (rollL, rollR):
+        stash(body, act); stash(head, act); stash(armL, act); stash(armR, act); stash(legL, act); stash(legR, act)
+    # IMPORTANT: authoring the clips left each bone at its last keyframe pose. Reset every
+    # bone to neutral so the EXPORTED rest pose is upright (otherwise the model stays tilted
+    # by the roll's lean even when standing).
+    for obj in (body, head, armL, armR, handL, handR, legL, legR):
+        obj.rotation_euler = (0, 0, 0)
+    # The exporter samples the node REST transform at the current frame WITH the NLA active —
+    # park on frame 1 (where every clip is neutral) so the rest pose is upright.
+    bpy.context.scene.frame_set(1)
 
     out = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "models", "%s_class.glb" % klass))
     os.makedirs(os.path.dirname(out), exist_ok=True)
