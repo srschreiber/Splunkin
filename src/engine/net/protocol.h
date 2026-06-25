@@ -23,7 +23,20 @@ enum class MsgType : uint8_t {
     Appearance = 16,    // peer -> peer: a player's look [uint32 id][dc::game::Appearance] (reliable, relayed by host)
     StartGame = 17,     // host -> clients: leave the lobby and start playing (reliable)
     Taunt = 18,         // host -> clients: an enemy taunts [TauntState] -> floating text + TTS (reliable)
+    BoltCast = 19,      // client -> host: wizard staff bolt(s) [BoltCast] (reliable)
 };
+
+// Client -> host: a wizard staff cast. The host spawns + simulates the bolt(s) (damage) and
+// broadcasts their positions in the snapshot for everyone to render.
+struct BoltCast {
+    float ox = 0.0f, oy = 0.0f, oz = 0.0f;   // origin (eye)
+    float dx = 0.0f, dy = 0.0f, dz = 0.0f;   // aim (unit)
+    float radius = 0.5f, damage = 18.0f, knockback = 6.0f;
+    uint8_t big = 0, count = 1;              // big bolt? how many (spread)
+};
+
+// One in-flight staff bolt's render state (host -> everyone).
+struct BoltState { float x = 0.0f, y = 0.0f, z = 0.0f; uint8_t big = 0; };
 
 // One enemy taunt fired this moment: where it spawns (over the enemy's head) and which
 // canned insult (index into dc::game::taunt_text). Clients float the text + speak it.

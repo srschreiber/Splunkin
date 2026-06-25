@@ -173,10 +173,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "could not load model: assets/models/sword.glb\n");
         return 1;
     }
-    // Flying enemy model (optional): falls back to the red cube if it's missing.
+    // Flying eye model (optional): the new tentacled eye.glb is preferred; fall back to the
+    // old eye_enemy.glb, then to the red cube if neither is present.
     dc::renderer::ModelData eye_data;
-    const bool eye_loaded = dc::renderer::read_model("assets/models/eye_enemy.glb", eye_data);
-    if (!eye_loaded) std::fprintf(stderr, "note: assets/models/eye_enemy.glb not found; flyers use the cube\n");
+    bool eye_loaded = dc::renderer::read_model("assets/models/eye.glb", eye_data);
+    if (!eye_loaded) eye_loaded = dc::renderer::read_model("assets/models/eye_enemy.glb", eye_data);
+    if (!eye_loaded) std::fprintf(stderr, "note: no eye model found; flyers use the cube\n");
     // Skeleton enemy model (optional; built by blender/make_skeleton.py). If absent, no
     // skeletons spawn (so they never fall back to looking like a plain melee enemy).
     dc::renderer::ModelData bat_data;
@@ -188,6 +190,19 @@ int main(int argc, char** argv) {
     const bool mage_loaded = dc::renderer::read_model("assets/models/mage.glb", mage_data);
     dc::renderer::ModelData turret_data;  // the defensive turret base/housing (barrel stays procedural)
     const bool turret_loaded = dc::renderer::read_model("assets/models/turret.glb", turret_data);
+    dc::renderer::ModelData drone_data;   // gunner-minion quadcopter
+    const bool drone_loaded = dc::renderer::read_model("assets/models/drone.glb", drone_data);
+    dc::renderer::ModelData glyph_data;   // base core glyph stone
+    const bool glyph_loaded = dc::renderer::read_model("assets/models/glyphstone.glb", glyph_data);
+    dc::renderer::ModelData troll_data;   // big melee bruiser
+    const bool troll_loaded = dc::renderer::read_model("assets/models/troll.glb", troll_data);
+    dc::renderer::ModelData demon_data;   // big fireball-lobbing demon
+    const bool demon_loaded = dc::renderer::read_model("assets/models/demon.glb", demon_data);
+    // Full per-class player models with gear baked in (helm/hat + weapon). These replace
+    // the generic player.glb for rendering a player of that class.
+    dc::renderer::ModelData knight_class_data, wizard_class_data;
+    const bool knight_class_loaded = dc::renderer::read_model("assets/models/knight_class.glb", knight_class_data);
+    const bool wizard_class_loaded = dc::renderer::read_model("assets/models/wizard_class.glb", wizard_class_data);
     dc::renderer::ModelData skeleton_data;
     const bool skeleton_loaded = dc::renderer::read_model("assets/models/skeleton.glb", skeleton_data);
     if (!skeleton_loaded) std::fprintf(stderr, "note: assets/models/skeleton.glb not found; run blender/make_skeleton.py to enable skeletons\n");
@@ -250,6 +265,24 @@ int main(int argc, char** argv) {
     if (mage_loaded) mage_model.upload(mage_data);
     dc::renderer::Model turret_model;
     if (turret_loaded) turret_model.upload(turret_data);
+    dc::renderer::Model drone_model;  if (drone_loaded) drone_model.upload(drone_data);
+    dc::renderer::Model glyph_model;  if (glyph_loaded) glyph_model.upload(glyph_data);
+    dc::renderer::Model troll_model;  if (troll_loaded) troll_model.upload(troll_data);
+    dc::renderer::Model demon_model;  if (demon_loaded) demon_model.upload(demon_data);
+    dc::renderer::Model knight_class_model; if (knight_class_loaded) knight_class_model.upload(knight_class_data);
+    dc::renderer::Model wizard_class_model; if (wizard_class_loaded) wizard_class_model.upload(wizard_class_data);
+    // Pick the player model/data for a given class (fall back to the generic player rig).
+    auto class_md = [&](int wclass) -> dc::renderer::ModelData& {
+        if (wclass == 1 && wizard_class_loaded) return wizard_class_data;
+        if (wclass == 0 && knight_class_loaded) return knight_class_data;
+        return model_data;
+    };
+    auto class_mdl = [&](int wclass) -> dc::renderer::Model& {
+        if (wclass == 1 && wizard_class_loaded) return wizard_class_model;
+        if (wclass == 0 && knight_class_loaded) return knight_class_model;
+        return player_model;
+    };
+    auto class_custom = [&](int wclass) { return (wclass == 1 && wizard_class_loaded) || (wclass == 0 && knight_class_loaded); };
 
     dc::renderer::Model torch_model;
     torch_model.upload(torch_data);
@@ -385,12 +418,7 @@ int main(int argc, char** argv) {
             auto V=[&](float x,float y,float z){ pv.insert(pv.end(), {x,y,z,nx,ny,nz,0.f,0.f,0.f}); };
             V(ax,ay,az);V(bx,by,bz);V(cx,cy,cz); V(ax,ay,az);V(cx,cy,cz);V(dx,dy,dz);
         };
-        auto column = [&](float cx,float cz,float y0,float y1,float hw) {   // box from y0..y1
-            const float x0=cx-hw,x1=cx+hw,z0=cz-hw,z1=cz+hw;
-            face(x0,y0,z1,x1,y0,z1,x1,y1,z1,x0,y1,z1, 0,0,1);  face(x1,y0,z0,x0,y0,z0,x0,y1,z0,x1,y1,z0, 0,0,-1);
-            face(x1,y0,z1,x1,y0,z0,x1,y1,z0,x1,y1,z1, 1,0,0);  face(x0,y0,z0,x0,y0,z1,x0,y1,z1,x0,y1,z0, -1,0,0);
-            face(x0,y1,z1,x1,y1,z1,x1,y1,z0,x0,y1,z0, 0,1,0);
-        };
+        (void)face;   // pillar columns removed — torches now stand free on the ground
         uint32_t s = 0x5707E11u + static_cast<uint32_t>(map->width * 2246822519u);
         auto nf = [&](float lo, float hi) { s = s * 1664525u + 1013904223u; return lo + (hi - lo) * ((s >> 8) * (1.0f / 16777216.0f)); };
         const float worldW = map->width * dc::world::TILE, worldH = map->height * dc::world::TILE;
@@ -402,17 +430,55 @@ int main(int argc, char** argv) {
             // Keep pillars clear of the spawn point.
             if (std::fabs(px - spawnX) < 8.0f && std::fabs(pz - spawnZ) < 8.0f) continue;
             const float base = terrain.height(px, pz);
-            const float top  = base + PILLAR_H;
-            column(px, pz, base - 0.5f, top, PILLAR_HW);   // sink the base a bit so it sits flush
-            // Torch on top: place the model at the column top, derive its flame point.
+            // A tall free-standing torch (no stone pillar): stand the torch model on the
+            // ground and scale it up so it reads as a long torch, light pooling from its top.
+            (void)PILLAR_H; (void)PILLAR_HW;   // (pillar columns removed)
             Torch t;
             glm_mat4_identity(t.placement);
-            vec3 tp = { px, top, pz }; glm_translate(t.placement, tp);
+            vec3 tp = { px, base, pz }; glm_translate(t.placement, tp);
+            vec3 ts = { 1.3f, 2.6f, 1.3f }; glm_scale(t.placement, ts);
             glm_mat4_mulv3(t.placement, flame_anchor, 1.0f, t.flame_pos);
             torches.push_back(std::move(t));
         }
         pillar_mesh.upload(pv);
     }
+
+    // Grass tufts: little green blades scattered on open floor for ground decoration.
+    // Static, deterministic (seeded from the map), built once and drawn flat-green.
+    dc::renderer::Mesh grass_mesh;
+    const vec3 grass_color = { 0.30f, 0.55f, 0.22f };
+    {
+        std::vector<float> gv;
+        uint32_t gs = 0x9E3779B9u ^ static_cast<uint32_t>(map->width * 2654435761u + map->height);
+        auto gf = [&]() { gs = gs * 1664525u + 1013904223u; return (gs >> 8) * (1.0f / 16777216.0f); };
+        // One upright blade, built CROSSED (two perpendicular quads) so it has volume from
+        // every angle — reads like a 3D tuft of hair/grass, not a flat card that vanishes edge-on.
+        auto blade = [&](float x, float z, float y, float w, float h, float lx, float lz) {
+            auto V = [&](float vx, float vy, float vz) { gv.insert(gv.end(), { vx, vy, vz, 0.0f, 1.0f, 0.0f, 0.f, 0.f, 0.f }); };
+            // Quad A: spans X. Quad B: spans Z (perpendicular). Both taper to a leaning tip.
+            const float tx = x + lx, tz = z + lz, ty = y + h;
+            V(x - w, y, z); V(x + w, y, z); V(tx, ty, tz);          // X-plane blade
+            V(x + w, y, z); V(x - w, y, z); V(tx, ty, tz);          // back face (double-sided)
+            V(x, y, z - w); V(x, y, z + w); V(tx, ty, tz);          // Z-plane blade
+            V(x, y, z + w); V(x, y, z - w); V(tx, ty, tz);          // back face
+        };
+        const int TUFTS = 1400;
+        for (int i = 0; i < TUFTS; ++i) {
+            const float x = gf() * (map->width * dc::world::TILE);
+            const float z = gf() * (map->height * dc::world::TILE);
+            const int c = static_cast<int>(x / dc::world::TILE), r = static_cast<int>(z / dc::world::TILE);
+            if (map->at(c, r) != dc::world::Cell::Open) continue;
+            const float y = terrain.height(x, z);
+            const int n = 3 + static_cast<int>(gf() * 3);   // a few blades per tuft
+            for (int b = 0; b < n; ++b) {
+                const float bx = x + (gf() - 0.5f) * 0.35f, bz = z + (gf() - 0.5f) * 0.35f;
+                const float h = 0.22f + gf() * 0.22f, lean = (gf() - 0.5f) * 0.18f, lean2 = (gf() - 0.5f) * 0.18f;
+                blade(bx, bz, y, 0.03f, h, lean, lean2);
+            }
+        }
+        grass_mesh.upload(gv);
+    }
+
     std::vector<float> particle_verts;   // rebuilt each frame for draw_particles
 
     // Dynamic entities (enemies for now). Spawn one per 'X' tile in the map.
@@ -436,6 +502,8 @@ int main(int argc, char** argv) {
         sp.flame_fraction  = 0.07f;   // ~7% rare flamethrower bruisers
         sp.skeleton_fraction = skeleton_loaded ? 0.5f : 0.0f;   // ~half of spawns are skeletons (if the model exists)
         sp.bat_fraction = bat_loaded ? 0.18f : 0.0f;            // some flyers are bats (if the model exists)
+        sp.troll_fraction = troll_loaded ? 0.05f : 0.0f;        // rare big troll
+        sp.demon_fraction = demon_loaded ? 0.05f : 0.0f;        // rare big demon
         sp.elite_fraction  = dc::entity::ELITE_CHANCE;   // ~6% roll into a rare golden elite
         spawners.push_back(sp);
     }
@@ -446,6 +514,7 @@ int main(int argc, char** argv) {
     uint32_t levelup_rng = 0x1EEDBEEFu;      // draws the eligible upgrade cards per level-up
     std::vector<float> frame_deaths;         // enemy death positions this frame (xyz triples)
     std::vector<float> frame_death_xp;       // XP per death this frame (parallel to frame_deaths/3)
+    std::vector<float> frame_booms;          // demon fireball explosion positions this frame (xyz triples)
     std::vector<dc::entity::HitNumber> frame_hits;   // damage events this frame (host-computed)
     // Floating damage numbers: rise + fade over their life. Spawned from frame_hits
     // (host/standalone) or the snapshot (client). Rendered as billboarded 7-seg digits.
@@ -477,6 +546,39 @@ int main(int argc, char** argv) {
             s.color[0] = t + 0.18f; s.color[1] = t; s.color[2] = t * 0.7f;
             s.age = 0.0f; s.life = 0.8f + frand() * 0.6f;
             s.grav = 5.5f; s.size_mul = 1.5f; s.alpha_mul = 2.4f;
+            sparks.push_back(s);
+        }
+    };
+    // Fiery explosion burst (demon fireball detonation): a fast outward pop of orange/red
+    // embers + a bright flash. Shared by host (off frame_booms) and clients (off the snapshot).
+    auto burst_fire = [&](float x, float y, float z) {
+        auto frand = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
+        const int N = 90;
+        for (int g = 0; g < N && sparks.size() < 2200; ++g) {
+            Spark s;
+            s.pos[0] = x + (frand()-0.5f)*0.5f; s.pos[1] = y + 0.4f + (frand()-0.5f)*0.5f; s.pos[2] = z + (frand()-0.5f)*0.5f;
+            const float ang = frand()*6.2831853f, pit = frand()*1.2f, spd = 3.0f + frand()*7.0f;
+            s.vel[0] = std::cos(ang)*std::cos(pit)*spd; s.vel[1] = std::sin(pit)*spd + 1.5f; s.vel[2] = std::sin(ang)*std::cos(pit)*spd;
+            const float h = frand();
+            s.color[0] = 1.0f; s.color[1] = 0.35f + h*0.45f; s.color[2] = 0.08f + h*0.12f;   // orange->yellow
+            s.age = 0.0f; s.life = 0.45f + frand()*0.45f;
+            s.grav = 4.0f; s.size_mul = 2.4f; s.alpha_mul = 3.0f;
+            sparks.push_back(s);
+        }
+    };
+    // Wizard dodge mist: a puff of soft blue-violet motes that drift up + outward as the
+    // wizard dissolves into mist (and again as it re-forms). `intensity` scales the count.
+    auto burst_mist = [&](float x, float y, float z, int count) {
+        auto frand = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
+        for (int g = 0; g < count && sparks.size() < 2200; ++g) {
+            Spark s;
+            s.pos[0] = x + (frand()-0.5f)*0.5f; s.pos[1] = y + frand()*1.7f; s.pos[2] = z + (frand()-0.5f)*0.5f;
+            const float ang = frand()*6.2831853f, spd = 0.4f + frand()*1.6f;
+            s.vel[0] = std::cos(ang)*spd; s.vel[1] = 0.4f + frand()*1.0f; s.vel[2] = std::sin(ang)*spd;
+            const float h = frand();
+            s.color[0] = 0.45f + h*0.2f; s.color[1] = 0.6f + h*0.2f; s.color[2] = 1.0f;   // blue-violet
+            s.age = 0.0f; s.life = 0.5f + frand()*0.5f;
+            s.grav = -0.8f; s.size_mul = 2.0f; s.alpha_mul = 1.6f;   // float gently upward
             sparks.push_back(s);
         }
     };
@@ -557,12 +659,20 @@ int main(int argc, char** argv) {
     const float TURRET_RING = 8.0f, TURRET_RANGE = 18.0f, TURRET_DAMAGE = 16.0f, TURRET_FIRE_INTERVAL = 0.55f;
     struct TPos { float x, y, z; };
     std::vector<TPos>  turret_pos(TURRET_COUNT);
+    std::vector<TPos>  turret_aim(TURRET_COUNT);        // last-known aim dir (3D, unit); frozen when no target
     std::vector<float> turret_cd(TURRET_COUNT, 0.0f);   // host per-turret fire timers
+    std::vector<float> turret_flash(TURRET_COUNT, 0.0f);// per-turret tracer-fire timer
     for (int i = 0; i < TURRET_COUNT; ++i) {
         const float a = 6.2831853f * i / TURRET_COUNT;
         const float x = core_pos[0] + std::cos(a) * TURRET_RING, z = core_pos[2] + std::sin(a) * TURRET_RING;
         turret_pos[i] = { x, terrain.height(x, z), z };
+        turret_aim[i] = { std::cos(a), 0.0f, std::sin(a) };   // start aimed outward
+        turret_flash[i] = i * 0.07f;                          // stagger so they don't all fire in unison
     }
+    // Travelling turret tracer rounds (cosmetic; the damage is instant at fire time). Each
+    // peer spawns them from the synced phase pulse so everyone sees the same fire.
+    struct TBullet { vec3 pos, vel; float life; };
+    std::vector<TBullet> turret_bullets;
     // Nearest live enemy to a turret within range (xz). Shared by host damage + render aim.
     auto turret_target = [&](float tx, float tz) -> const dc::entity::Entity* {
         const dc::entity::Entity* best = nullptr; float bd2 = TURRET_RANGE * TURRET_RANGE;
@@ -679,6 +789,16 @@ int main(int argc, char** argv) {
         std::vector<uint32_t> hit_ids;   // enemies hit this pass (cleared on the return leg)
     };
     std::vector<ThrownSword> throwns;
+    // Wizard staff bolts. On host/standalone, `bolts` holds every in-flight bolt (host +
+    // clients), simulated + damaging here. Clients send a BoltCast and render `render_bolts`
+    // mirrored from the snapshot (they don't sim damage locally).
+    struct Bolt { vec3 pos, dir; float traveled = 0.0f, radius = 0.5f, damage = 18.0f, knockback = 6.0f;
+                  bool big = false; uint32_t owner = 0; std::vector<uint32_t> hit_ids; };
+    std::vector<Bolt> bolts;
+    struct BoltVis { vec3 pos; bool big; };
+    std::vector<BoltVis> render_bolts;   // client: bolts to draw, from the snapshot
+    float bolt_cd = 0.0f;                // small-bolt (LMB) cooldown
+    constexpr float BOLT_SPEED = 32.0f, BOLT_RANGE = 32.0f;
     // Orbit special (2): spinning swords circling the player for a short time.
     struct Orbit {
         bool  active = false;
@@ -739,6 +859,7 @@ int main(int argc, char** argv) {
         player.hit_flash = 0.0f;
         player.burn_time = 0.0f; player.burn_dps = 0.0f;
         throwns.clear();
+        bolts.clear(); render_bolts.clear();
         orbit.active = false;
         bash.active = false;
         if (menu_chest >= 0) { menu_chest = -1; window.set_relative_mouse(true); }
@@ -1024,15 +1145,11 @@ int main(int argc, char** argv) {
     {
         bool started = false;
         bool sent_look = false;                 // client: have we sent our look to the host yet
-        int  pen_color = 1, pen_radius = 1;     // current ink + brush size
-        int  skin_idx  = 0;
         float preview_yaw = 0.0f;               // drag to spin the character
         bool  drag_rot = false, paint_prev = false;
         int   active_box = -1;                  // which custom-insult box is focused (-1 = none)
         window.set_relative_mouse(false);       // free cursor for the UI
         window.set_text_input(true);            // enable typing for the custom-insult boxes
-        // Face canvas panel (NDC): a square on the right; skin/pen pickers below it.
-        const float CAN_X0 = 0.30f, CAN_X1 = 0.86f, CAN_Y0 = -0.20f, CAN_Y1 = 0.62f;
         uint64_t lprev = SDL_GetTicksNS();
         while (running && !started) {
             running = window.pump_events(input);
@@ -1096,64 +1213,24 @@ int main(int argc, char** argv) {
             const float nx = ww > 0 ? (mx / ww) * 2.0f - 1.0f : 0.0f;
             const float ny = wh > 0 ? 1.0f - (my / wh) * 2.0f : 0.0f;
             const bool lmb = input.mouse_down(SDL_BUTTON_LEFT);
-            const float aspect = (wh > 0) ? static_cast<float>(ww) / wh : 1.0f;
             bool dirty = false;
 
-            const bool in_canvas = nx >= CAN_X0 && nx <= CAN_X1 && ny >= CAN_Y0 && ny <= CAN_Y1;
-            // Paint the face canvas (drag with the pen). Map cursor -> cell, splat the brush.
-            if (lmb && in_canvas) {
-                const float u = (nx - CAN_X0) / (CAN_X1 - CAN_X0);
-                const float v = (ny - CAN_Y1) / (CAN_Y0 - CAN_Y1);   // top->0
-                const int cc = static_cast<int>(u * dc::game::FACE_W);
-                const int cr = static_cast<int>(v * dc::game::FACE_H);
-                for (int dy = -(pen_radius - 1); dy <= pen_radius - 1; ++dy)
-                    for (int dx = -(pen_radius - 1); dx <= pen_radius - 1; ++dx) {
-                        const int px = cc + dx, py = cr + dy;
-                        if (px < 0 || px >= dc::game::FACE_W || py < 0 || py >= dc::game::FACE_H) continue;
-                        my_look.face[py * dc::game::FACE_W + px] = static_cast<uint8_t>(pen_color);
-                    }
-                dirty = true;
-            }
-            // Drag outside the canvas (on the preview) spins the character.
-            if (lmb && !in_canvas && (drag_rot || !paint_prev)) { drag_rot = true; preview_yaw += input.mouse_dx * 0.01f; }
-            if (!lmb) drag_rot = false;
-
-            // Clickable widgets (edge-triggered on press).
             const bool click = lmb && !paint_prev;
             auto hit = [&](float x0, float y0, float x1, float y1) { return nx >= x0 && nx <= x1 && ny >= y0 && ny <= y1; };
-            // Skin swatches (row), pen colors (row), pen radii, bone +/- , clear, START.
-            // Layout is built in the draw pass below; here we just test the same rects.
-            const float sw = 0.05f, sgap = 0.065f;
-            // Skin row at y ~ -0.40
-            for (int i = 0; i < dc::game::SKIN_N; ++i) {
-                const float x0 = -0.92f + i * sgap;
-                if (click && hit(x0, -0.45f, x0 + sw, -0.45f + sw * aspect)) { skin_idx = i; dc::game::skin_rgb(i, my_look.skin[0], my_look.skin[1], my_look.skin[2]); dirty = true; }
-            }
-            // Pen color row at y ~ -0.58
-            for (int i = 1; i < dc::game::PALETTE_N; ++i) {
-                const float x0 = -0.92f + (i - 1) * sgap;
-                if (click && hit(x0, -0.63f, x0 + sw, -0.63f + sw * aspect)) pen_color = i;
-            }
-            if (click && hit(-0.92f + (dc::game::PALETTE_N - 1) * sgap, -0.63f, -0.92f + (dc::game::PALETTE_N - 1) * sgap + sw, -0.63f + sw * aspect)) pen_color = 0;  // eraser
-            // Pen radius buttons (1..3) at y ~ -0.76
-            for (int r = 1; r <= 3; ++r) {
-                const float x0 = -0.92f + (r - 1) * sgap;
-                if (click && hit(x0, -0.80f, x0 + sw, -0.80f + sw * aspect)) pen_radius = r;
-            }
-            // Bone scale -/+ for head/arms/hands/torso (two columns of buttons), y from -0.05 down.
-            float* bones[4] = { &my_look.bone_head, &my_look.bone_arms, &my_look.bone_hands, &my_look.bone_torso };
-            for (int b = 0; b < 4; ++b) {
-                const float by = 0.30f - b * 0.10f;
-                if (click && hit(-0.55f, by, -0.51f, by + 0.06f)) { *bones[b] = std::max(0.4f, *bones[b] - 0.15f); dirty = true; }
-                if (click && hit(-0.30f, by, -0.26f, by + 0.06f)) { *bones[b] = std::min(2.5f, *bones[b] + 0.15f); dirty = true; }
-            }
-            // Clear face
-            if (click && hit(-0.92f, -0.92f, -0.74f, -0.86f)) { std::memset(my_look.face, 0, sizeof my_look.face); dirty = true; }
 
             // Custom insult boxes (two): click to focus + type; a Play button speaks it.
             char* boxes[2] = { my_look.custom1, my_look.custom2 };
-            const float BOX_X0 = -0.15f, BOX_X1 = 0.40f, PLAY_X0 = 0.43f, PLAY_X1 = 0.53f;
-            const float box_y[2] = { -0.45f, -0.57f };
+            const float BOX_X0 = -0.28f, BOX_X1 = 0.30f, PLAY_X0 = 0.33f, PLAY_X1 = 0.45f;
+            const float box_y[2] = { -0.52f, -0.64f };
+            const bool on_box = hit(BOX_X0, box_y[1], PLAY_X1, box_y[0] + 0.085f);
+
+            // Drag (anywhere but the insult boxes) spins the character preview.
+            if (lmb && !on_box && (drag_rot || !paint_prev)) { drag_rot = true; preview_yaw += input.mouse_dx * 0.01f; }
+            if (!lmb) drag_rot = false;
+
+            // Class selection: two big buttons — Knight (Sword) / Wizard (Staff).
+            if (click && hit(-0.62f, 0.06f, -0.10f, 0.40f)) { my_look.weapon_class = 0; dirty = true; }   // Knight
+            if (click && hit( 0.10f, 0.06f,  0.62f, 0.40f)) { my_look.weapon_class = 1; dirty = true; }   // Wizard
             for (int bi = 0; bi < 2; ++bi) {
                 if (click && hit(BOX_X0, box_y[bi], BOX_X1, box_y[bi] + 0.085f)) active_box = bi;
                 if (click && hit(PLAY_X0, box_y[bi], PLAY_X1, box_y[bi] + 0.085f) && boxes[bi][0]) speak_async(boxes[bi]);
@@ -1193,12 +1270,11 @@ int main(int argc, char** argv) {
             renderer.begin_frame(*map, camera, player, dt, fbw, fbh);
             renderer.set_ambient(2.6f);                                 // bright fill so the preview is lit
             { float lp[3] = {0,0,0}, lc[3] = {0,0,0}, lr[1] = {1}; renderer.set_lights(0, lp, lc, lr); }
-            // Pose the model at rest, scaled by the silly bones, in front of the camera.
+            // Pose the chosen CLASS MODEL (gear baked in) at rest, in front of the camera.
             {
-                std::vector<float> bscale = bone_scale_for(my_look);
+                dc::renderer::ModelData& pmd = class_md(my_look.weapon_class);
                 std::vector<dc::renderer::AnimLayer> el;
-                dc::renderer::Mat4 prev_head;
-                dc::renderer::pose_model(model_data, el, 0.0f, part_world, { model_data.head_node }, { &prev_head }, 0.0f, &bscale);
+                dc::renderer::pose_model(pmd, el, 0.0f, part_world);
                 vec3 fwd; player.front(fwd); fwd[1] = 0.0f;
                 float fl = std::sqrt(fwd[0]*fwd[0] + fwd[2]*fwd[2]); if (fl > 1e-4f) { fwd[0] /= fl; fwd[2] /= fl; }
                 const float feet = player.position[1] - dc::world::EYE_HEIGHT;
@@ -1208,123 +1284,49 @@ int main(int argc, char** argv) {
                 mat4 place; glm_mat4_identity(place);
                 glm_translate(place, ppos);
                 glm_rotate_y(place, ang + glm_rad(-90.0f), place);   // MODEL_YAW_OFFSET
-                vec3 skin = { my_look.skin[0], my_look.skin[1], my_look.skin[2] };
-                renderer.draw_model(player_model, part_world, place, skin);
-                // Exact head-bone world position (so the face sits ON the head, not floating).
-                mat4 hpm; glm_mat4_mul(place, prev_head.m, hpm);
-                vec3 headpos = { hpm[3][0], hpm[3][1], hpm[3][2] };
-                // Face plate on the head front, facing the camera (so you see it as you draw),
-                // tracking the spin. Small + close so it reads as the face, not a billboard.
-                vec3 facing = { -fwd[0], 0.0f, -fwd[2] };
-                const float cs = std::cos(preview_yaw), sn = std::sin(preview_yaw);
-                vec3 fr = { facing[0]*cs - facing[2]*sn, 0.0f, facing[0]*sn + facing[2]*cs };
-                vec3 up = { 0.0f, 1.0f, 0.0f };
-                vec3 right = { fr[2], 0.0f, -fr[0] };
-                vec3 hc = { headpos[0] + fr[0]*0.24f, headpos[1] + 0.08f, headpos[2] + fr[2]*0.24f };
-                std::vector<float> fcol[dc::game::PALETTE_N];
-                append_face(fcol, hc, fr, right, up, 0.018f * my_look.bone_head, my_look);
-                draw_faces(fcol);
+                vec3 white = { 1.0f, 1.0f, 1.0f };   // baked material colors carry the class look
+                renderer.draw_model(class_mdl(my_look.weapon_class), part_world, place, white);
             }
 
-            // 2D UI overlay.
+            // 2D UI overlay: two big class buttons, custom-insult boxes, START.
             std::vector<float> hud;
             auto rect = [&](float x0,float y0,float x1,float y1,float r,float g,float b,float a){
                 hud.insert(hud.end(), { x0,y0,0,r,g,b,a, x1,y0,0,r,g,b,a, x1,y1,0,r,g,b,a,
                                         x0,y0,0,r,g,b,a, x1,y1,0,r,g,b,a, x0,y1,0,r,g,b,a }); };
-            rect(-0.98f, -0.98f, -0.20f, 0.66f, 0.06f, 0.07f, 0.10f, 0.55f);   // left panel backing
-            // Face canvas: dim board + painted cells.
-            rect(CAN_X0 - 0.012f, CAN_Y0 - 0.012f, CAN_X1 + 0.012f, CAN_Y1 + 0.012f, 0.9f, 0.9f, 0.95f, 0.9f);
-            rect(CAN_X0, CAN_Y0, CAN_X1, CAN_Y1, 0.16f, 0.16f, 0.2f, 1.0f);
-            {
-                const float cw = (CAN_X1 - CAN_X0) / dc::game::FACE_W, ch = (CAN_Y1 - CAN_Y0) / dc::game::FACE_H;
-                for (int row = 0; row < dc::game::FACE_H; ++row)
-                    for (int col = 0; col < dc::game::FACE_W; ++col) {
-                        const int idx = my_look.face[row * dc::game::FACE_W + col];
-                        if (idx <= 0) continue;
-                        float r,g,b; dc::game::palette_rgb(idx, r, g, b);
-                        const float x0 = CAN_X0 + col * cw, y1c = CAN_Y1 - row * ch;
-                        rect(x0, y1c - ch, x0 + cw, y1c, r, g, b, 1.0f);
-                    }
-            }
-            // Skin swatches.
-            for (int i = 0; i < dc::game::SKIN_N; ++i) {
-                float r,g,b; dc::game::skin_rgb(i, r, g, b);
-                const float x0 = -0.92f + i * sgap;
-                if (i == skin_idx) rect(x0 - 0.006f, -0.456f, x0 + sw + 0.006f, -0.45f + sw*aspect + 0.006f, 1,1,1,1);
-                rect(x0, -0.45f, x0 + sw, -0.45f + sw*aspect, r, g, b, 1.0f);
-            }
-            // Pen colors + eraser.
-            for (int i = 1; i < dc::game::PALETTE_N; ++i) {
-                float r,g,b; dc::game::palette_rgb(i, r, g, b);
-                const float x0 = -0.92f + (i - 1) * sgap;
-                if (i == pen_color) rect(x0 - 0.006f, -0.636f, x0 + sw + 0.006f, -0.63f + sw*aspect + 0.006f, 1,1,1,1);
-                rect(x0, -0.63f, x0 + sw, -0.63f + sw*aspect, r, g, b, 1.0f);
-            }
-            { const float x0 = -0.92f + (dc::game::PALETTE_N - 1) * sgap;   // eraser
-              if (pen_color == 0) rect(x0 - 0.006f, -0.636f, x0 + sw + 0.006f, -0.63f + sw*aspect + 0.006f, 1,1,1,1);
-              rect(x0, -0.63f, x0 + sw, -0.63f + sw*aspect, 0.3f, 0.3f, 0.34f, 1.0f); }
-            // Pen radius.
-            for (int r = 1; r <= 3; ++r) {
-                const float x0 = -0.92f + (r - 1) * sgap;
-                if (r == pen_radius) rect(x0 - 0.006f, -0.806f, x0 + sw + 0.006f, -0.80f + sw*aspect + 0.006f, 1,1,1,1);
-                rect(x0, -0.80f, x0 + sw, -0.80f + sw*aspect, 0.5f, 0.5f, 0.55f, 1.0f);
-                const float d = 0.006f * r;   // dot grows with radius
-                rect((x0 + x0 + sw)*0.5f - d, (-0.80f + (-0.80f + sw*aspect))*0.5f - d*aspect,
-                     (x0 + x0 + sw)*0.5f + d, (-0.80f + (-0.80f + sw*aspect))*0.5f + d*aspect, 0.1f,0.1f,0.1f,1.0f);
-            }
-            // Bone scale -/+ buttons.
-            for (int b = 0; b < 4; ++b) {
-                const float by = 0.30f - b * 0.10f;
-                rect(-0.55f, by, -0.51f, by + 0.06f, 0.7f, 0.3f, 0.3f, 1.0f);    // -
-                rect(-0.30f, by, -0.26f, by + 0.06f, 0.3f, 0.7f, 0.3f, 1.0f);    // +
-            }
-            // Clear + START buttons.
-            rect(-0.92f, -0.92f, -0.74f, -0.86f, 0.5f, 0.3f, 0.3f, 1.0f);
+            { const bool kn = my_look.weapon_class == 0, wz = my_look.weapon_class == 1;
+              rect(-0.66f, 0.02f, -0.06f, 0.44f, kn ? 0.18f : 0.10f, kn ? 0.18f : 0.10f, kn ? 0.22f : 0.13f, 0.95f);  // knight backing
+              rect(-0.62f, 0.06f, -0.10f, 0.40f, kn ? 0.62f : 0.30f, kn ? 0.64f : 0.32f, kn ? 0.72f : 0.36f, 1.0f);   // knight
+              rect( 0.06f, 0.02f,  0.66f, 0.44f, wz ? 0.10f : 0.10f, wz ? 0.10f : 0.10f, wz ? 0.22f : 0.13f, 0.95f);   // wizard backing
+              rect( 0.10f, 0.06f,  0.62f, 0.40f, wz ? 0.32f : 0.22f, wz ? 0.30f : 0.22f, wz ? 0.85f : 0.36f, 1.0f); }  // wizard
             const bool can_start2 = (net.role != dc::net::Role::Client);
-            rect(0.55f, -0.92f, 0.90f, -0.80f, can_start2 ? 0.2f : 0.3f, can_start2 ? 0.7f : 0.3f, 0.3f, 1.0f);
-            // Custom insult boxes + Play buttons.
-            {
-                const float bx0 = -0.15f, bx1 = 0.40f, px0 = 0.43f, px1 = 0.53f, byy[2] = { -0.45f, -0.57f };
-                for (int bi = 0; bi < 2; ++bi) {
-                    const bool act = (active_box == bi);
-                    rect(bx0 - 0.006f, byy[bi] - 0.006f, bx1 + 0.006f, byy[bi] + 0.091f, act ? 0.95f : 0.6f, act ? 0.85f : 0.6f, act ? 0.3f : 0.65f, 1.0f);  // border (gold when focused)
-                    rect(bx0, byy[bi], bx1, byy[bi] + 0.085f, 0.12f, 0.12f, 0.15f, 1.0f);   // field
-                    rect(px0, byy[bi], px1, byy[bi] + 0.085f, 0.2f, 0.55f, 0.85f, 1.0f);    // play button
-                }
+            rect(0.55f, -0.92f, 0.90f, -0.80f, can_start2 ? 0.2f : 0.3f, can_start2 ? 0.7f : 0.3f, 0.3f, 1.0f);  // START
+            for (int bi = 0; bi < 2; ++bi) {   // custom insult fields + play
+                const bool act = (active_box == bi);
+                rect(BOX_X0 - 0.006f, box_y[bi] - 0.006f, BOX_X1 + 0.006f, box_y[bi] + 0.091f, act ? 0.95f : 0.6f, act ? 0.85f : 0.6f, act ? 0.3f : 0.65f, 1.0f);  // border
+                rect(BOX_X0, box_y[bi], BOX_X1, box_y[bi] + 0.085f, 0.12f, 0.12f, 0.15f, 1.0f);   // field
+                rect(PLAY_X0, box_y[bi], PLAY_X1, box_y[bi] + 0.085f, 0.2f, 0.55f, 0.85f, 1.0f);  // play
             }
             renderer.draw_hud(hud);
 
             // Text labels.
             vec3 white = {0.95f,0.95f,1.0f}, gold = {1.0f,0.85f,0.3f};
-            renderer.draw_text("CUSTOMIZE", -0.92f, 0.6f, 26.0f, gold, 1.0f, fbw, fbh);
-            renderer.draw_text("Skin", -0.92f, -0.37f, 16.0f, white, 1.0f, fbw, fbh);
-            renderer.draw_text("Pen", -0.92f, -0.55f, 16.0f, white, 1.0f, fbw, fbh);
-            renderer.draw_text("Size", -0.92f, -0.72f, 16.0f, white, 1.0f, fbw, fbh);
-            renderer.draw_text("Clear", -0.90f, -0.845f, 14.0f, white, 1.0f, fbw, fbh);
-            const char* bn[4] = { "Head", "Arms", "Hands", "Torso" };
-            float* bvals[4] = { &my_look.bone_head, &my_look.bone_arms, &my_look.bone_hands, &my_look.bone_torso };
-            for (int b = 0; b < 4; ++b) {
-                const float by = 0.30f - b * 0.10f;
-                renderer.draw_text("-", -0.537f, by + 0.004f, 20.0f, white, 1.0f, fbw, fbh);   // red box
-                renderer.draw_text("+", -0.288f, by + 0.004f, 20.0f, white, 1.0f, fbw, fbh);   // green box
-                renderer.draw_text(bn[b], -0.495f, by + 0.012f, 12.0f, white, 1.0f, fbw, fbh);
-                char vv[8]; std::snprintf(vv, sizeof vv, "%.1fx", *bvals[b]);
-                renderer.draw_text(vv, -0.41f, by + 0.012f, 12.0f, gold, 1.0f, fbw, fbh);
-            }
-            renderer.draw_text("Silly Bones  (tap - / +)", -0.55f, 0.42f, 15.0f, gold, 1.0f, fbw, fbh);
-            renderer.draw_text("Drag the character to spin it", -0.18f, 0.66f, 13.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("CHOOSE YOUR CLASS", -0.45f, 0.74f, 24.0f, gold, 1.0f, fbw, fbh);
+            renderer.draw_text("KNIGHT", -0.50f, 0.30f, 26.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("sword + shield", -0.50f, 0.15f, 13.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("WIZARD", 0.22f, 0.30f, 26.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("staff bolts", 0.22f, 0.15f, 13.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("drag to spin", -0.12f, -0.30f, 13.0f, white, 1.0f, fbw, fbh);
             // Custom insult fields.
-            renderer.draw_text("Custom insults (enemies say these)", -0.15f, -0.345f, 13.0f, gold, 1.0f, fbw, fbh);
+            renderer.draw_text("Custom insults (enemies say these)", -0.28f, -0.42f, 13.0f, gold, 1.0f, fbw, fbh);
             {
                 char* boxes[2] = { my_look.custom1, my_look.custom2 };
-                const float byy[2] = { -0.45f, -0.57f };
                 vec3 grey = { 0.5f, 0.5f, 0.55f };
                 for (int bi = 0; bi < 2; ++bi) {
                     char shown[64]; std::snprintf(shown, sizeof shown, "%s%s", boxes[bi], (active_box == bi) ? "_" : "");
                     const char* disp = boxes[bi][0] ? shown : (active_box == bi ? "_" : "type here...");
                     const bool lit = boxes[bi][0] || active_box == bi;
-                    renderer.draw_text(disp, -0.135f, byy[bi] + 0.022f, 14.0f, lit ? white : grey, 1.0f, fbw, fbh);
-                    renderer.draw_text("Play", 0.435f, byy[bi] + 0.022f, 12.0f, white, 1.0f, fbw, fbh);
+                    renderer.draw_text(disp, BOX_X0 + 0.015f, box_y[bi] + 0.022f, 14.0f, lit ? white : grey, 1.0f, fbw, fbh);
+                    renderer.draw_text("Play", PLAY_X0 + 0.005f, box_y[bi] + 0.022f, 11.0f, white, 1.0f, fbw, fbh);
                 }
             }
             if (net.role == dc::net::Role::Client) {
@@ -1341,6 +1343,25 @@ int main(int argc, char** argv) {
         window.set_relative_mouse(true);   // back to mouselook for the game
         look_for(my_id) = my_look;         // keep peer looks gathered in the lobby; refresh mine
     }
+
+    // Class identity drives a play-style split: the KNIGHT tanks (more HP, cheap efficient
+    // blocking), the WIZARD evades (less HP, costly blocking, but a longer, farther dodge
+    // with more i-frames). Applied once here and re-applied on each respawn.
+    const bool is_wizard_class = (my_look.weapon_class == 1);
+    auto apply_class = [&]() {
+        if (is_wizard_class) {
+            player.stats.max_health = 65.0f;                 // glass cannon
+            player.dash_speed += 12.0f;                      // dodge goes farther
+            player.dash_iframes += 0.28f;                    // invincible noticeably longer
+            player.dash_cooldown = std::max(0.4f, player.dash_cooldown - 0.15f);
+            if (player.shield) { player.shield->block_rate *= 2.4f; player.shield->stamina_per_sec *= 1.9f; }  // blocking is expensive
+        } else {
+            player.stats.max_health = 135.0f;                // tanky
+            if (player.shield) player.shield->block_rate *= 0.65f;   // efficient blocking
+        }
+        player.health = player.stats.max_health;
+    };
+    apply_class();
 
     uint64_t prev = SDL_GetTicksNS();
     while (running) {
@@ -1418,6 +1439,13 @@ int main(int argc, char** argv) {
                         hc.throwns.push_back(std::move(t));
                         break;
                     }
+                } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::BoltCast
+                           && ev.data.size() >= 1 + sizeof(dc::net::BoltCast)) {
+                    dc::net::BoltCast bc; std::memcpy(&bc, ev.data.data() + 1, sizeof bc);
+                    uint32_t oid = 0; for (auto& hc : host_clients) if (hc.peer == ev.peer) { oid = hc.id; break; }
+                    Bolt b; b.pos[0]=bc.ox; b.pos[1]=bc.oy; b.pos[2]=bc.oz; b.dir[0]=bc.dx; b.dir[1]=bc.dy; b.dir[2]=bc.dz;
+                    b.radius=bc.radius; b.damage=bc.damage; b.knockback=bc.knockback; b.big=bc.big!=0; b.owner=oid;
+                    bolts.push_back(std::move(b));   // host sims + damages it like its own bolts
                 } else if (net.role == dc::net::Role::Host && mt == dc::net::MsgType::DashCast
                            && ev.data.size() >= 1 + sizeof(dc::net::DashCast)) {
                     dc::net::DashCast dc; std::memcpy(&dc, ev.data.data() + 1, sizeof dc);
@@ -1643,6 +1671,17 @@ int main(int argc, char** argv) {
                         float dxyz[3]; std::memcpy(dxyz, p, sizeof dxyz); p += sizeof dxyz;
                         burst_sand(dxyz[0], dxyz[1], dxyz[2]);
                     }
+                    uint32_t nboom = read_u32();              // demon explosions this tick
+                    for (uint32_t k = 0; k < nboom; ++k) {
+                        float bxyz[3]; std::memcpy(bxyz, p, sizeof bxyz); p += sizeof bxyz;
+                        burst_fire(bxyz[0], bxyz[1], bxyz[2]);
+                    }
+                    uint32_t nbolt = read_u32();              // wizard staff bolts (render-only)
+                    render_bolts.clear();
+                    for (uint32_t k = 0; k < nbolt; ++k) {
+                        dc::net::BoltState bs; std::memcpy(&bs, p, sizeof bs); p += sizeof bs;
+                        render_bolts.push_back({ { bs.x, bs.y, bs.z }, bs.big != 0 });
+                    }
                     std::memcpy(&tod, p, 4); p += 4;          // shared day/night clock
                     { uint32_t dn; std::memcpy(&dn, p, 4); p += 4; day_num = static_cast<int>(dn); }
                     std::memcpy(&core_health, p, 4); p += 4;  // base health for the bar
@@ -1734,6 +1773,8 @@ int main(int argc, char** argv) {
             player.iframes = player.dash_iframes;
             player.dash_cd = player.dash_cooldown * player.cooldown_mult;
             player.stamina -= player.dash_cost * player.stamina_mult;
+            if (my_look.weapon_class == 1)   // wizard: dissolve into a mist of motes
+                burst_mist(player.position[0], player.position[1] - dc::world::EYE_HEIGHT + 0.9f, player.position[2], 70);
             if (player.supersonic_damage > 0.0f) {   // spiral-gust visual on every peer; host queues the damage
                 ss_anim = SS_ANIM_TIME; glm_vec3_copy(player.position, ss_pos);
                 if (net.role != dc::net::Role::Client)
@@ -1875,9 +1916,47 @@ int main(int argc, char** argv) {
                 net.send_to_host(buf, sizeof buf, true);
             }
         }
-        // Start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
+        if (bolt_cd > 0.0f) bolt_cd -= dt;
+        const bool wizard = (my_look.weapon_class == 1);
+        // Wizard staff: LMB = quick bolt, MMB = bigger bolt(s) (MultiThrow adds more). The
+        // bolt damages enemies as it flies. Host/standalone sims it; a client casts to the host.
+        auto fire_bolts = [&](bool big) {
+            vec3 f; player.front(f);
+            const int n = big ? std::max(1, player.throw_count) : 1;
+            const float spread = 0.13f;
+            const float rad = (big ? 1.0f : 0.5f) * player.sword_scale;
+            const float dmg = (big ? 46.0f : 18.0f) * player.damage_mult;
+            const float kb  = big ? 14.0f : 5.0f;
+            for (int t = 0; t < n; ++t) {
+                const float off = (n > 1) ? (t - (n - 1) * 0.5f) * spread : 0.0f;
+                const float ca = std::cos(off), sa = std::sin(off);
+                vec3 d = { f[0]*ca - f[2]*sa, f[1], f[0]*sa + f[2]*ca };
+                if (net.role == dc::net::Role::Client) {
+                    dc::net::BoltCast bc;
+                    bc.ox = player.position[0]; bc.oy = player.position[1]; bc.oz = player.position[2];
+                    bc.dx = d[0]; bc.dy = d[1]; bc.dz = d[2];
+                    bc.radius = rad; bc.damage = dmg; bc.knockback = kb; bc.big = big ? 1 : 0; bc.count = 1;
+                    unsigned char buf[1 + sizeof bc]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::BoltCast);
+                    std::memcpy(buf + 1, &bc, sizeof bc); net.send_to_host(buf, sizeof buf, true);
+                } else {
+                    Bolt b; glm_vec3_copy(player.position, b.pos); glm_vec3_copy(d, b.dir);
+                    b.radius = rad; b.damage = dmg; b.knockback = kb; b.big = big; b.owner = my_id;
+                    bolts.push_back(std::move(b));
+                }
+            }
+        };
+        // Wizard fires staff bolts (half the knight's swing rate by default). While the fire
+        // button is held the staff is held OUT in a steady cast pose (set after the punch
+        // update below) — it doesn't re-swing the arm each shot.
+        const bool wiz_firing = wizard && !ui_open && !dead
+                              && (input.mouse_down(SDL_BUTTON_LEFT) || input.mouse_down(SDL_BUTTON_MIDDLE));
+        if (wizard && !ui_open && !dead) {
+            if (input.mouse_down(SDL_BUTTON_MIDDLE) && throw_cd <= 0.0f) { fire_bolts(true);  throw_cd = 1.7f * player.cooldown_mult; }
+            else if (input.mouse_down(SDL_BUTTON_LEFT) && bolt_cd <= 0.0f) { fire_bolts(false); bolt_cd = 0.44f * player.cooldown_mult; }
+        }
+        // Knight: start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
         // the difference is resolved at the strike frame below.
-        if (!punching && throwns.empty() && !ui_open && !dead) {
+        if (!wizard && !punching && throwns.empty() && !ui_open && !dead) {
             if (player.weapon && input.mouse_down(SDL_BUTTON_MIDDLE)
                 && throw_cd <= 0.0f && player.stamina >= throw_cost) {
                 punching = true; punch_time = 0.0f; punch_struck = false; punch_is_throw = true;
@@ -1958,6 +2037,9 @@ int main(int argc, char** argv) {
                 if (!punch_is_throw) attack_cd = atk_cd_dur * player.cooldown_mult;
             }
         }
+        // Wizard: while firing, hold the staff OUT in a steady cast pose (freeze the punch
+        // clip at its extended frame) instead of re-swinging. Overrides the punch update above.
+        if (wiz_firing) { punching = true; punch_struck = true; punch_is_throw = false; punch_time = 0.34f; }
 
         // Block animation: raise the shield while held (right arm — independent of the
         // left-arm swing, so you can block and swing together). It only actually mitigates
@@ -2235,6 +2317,24 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Wizard staff bolts: fly straight, piercing enemies (each hit once via hit_ids), and
+        // despawn at max range. Host/standalone owns the motion + damage; clients render the
+        // replicated positions instead. Bolts credit their owner's damage.
+        if (net.role != dc::net::Role::Client && !bolts.empty()) {
+            const float step = BOLT_SPEED * dt;
+            for (auto& b : bolts) {
+                b.pos[0] += b.dir[0]*step; b.pos[1] += b.dir[1]*step; b.pos[2] += b.dir[2]*step;
+                b.traveled += step;
+                const float dealt = dc::entity::radius_attack(entities, b.pos, b.radius, b.damage, b.knockback, b.hit_ids, &frame_hits);
+                if (b.owner == my_id) host_damage += dealt;
+                else for (auto& hc : host_clients) if (hc.id == b.owner) { hc.damage_dealt += dealt; break; }
+            }
+            for (std::size_t i = 0; i < bolts.size();) {
+                if (bolts[i].traveled > BOLT_RANGE) { bolts[i] = bolts.back(); bolts.pop_back(); }
+                else ++i;
+            }
+        }
+
         // Orbit special: revolve + spin the swords; damage on periodic ticks (each
         // tick all swords share one hit set, so an enemy takes one hit per tick).
         if (orbit.active && player.weapon) {
@@ -2488,11 +2588,12 @@ int main(int argc, char** argv) {
         // Enemy sim is host-authoritative; clients render replicated enemies instead.
         frame_deaths.clear();
         frame_death_xp.clear();
+        frame_booms.clear();
         std::vector<dc::entity::EnemyHitPlayer> hits;
         if (net.role != dc::net::Role::Client) {
             dc::entity::update_enemies(entities, *map, flows, players, hits, dt, &frame_deaths, &frame_hits, &tile_heights, &frame_death_xp);
             // Advance ranged enemies' shots; their hits add into the same `hits`.
-            dc::entity::update_projectiles(entities, *map, players, hits, dt);
+            dc::entity::update_projectiles(entities, *map, players, hits, dt, &frame_booms);
             // When a player gets hit, the nearest enemy gloats with a reactive line (the
             // enemy "that dealt it"). Per-player cooldown + the global cap keep it sane.
             auto react_for = [&](int pi, uint32_t attacker_id, float px, float pz) {
@@ -2574,11 +2675,11 @@ int main(int argc, char** argv) {
             if (!is_night())   // daytime: solar recharge back to full
                 shield_health = std::min(shield_max, shield_health + SHIELD_RECHARGE * dt);
 
-            // Solar turrets: only fire at NIGHT (charging/idle by day). Each on its own
-            // cooldown, hits the nearest enemy in range. Host-authoritative damage.
+            // Solar turrets: ALWAYS active (day + night) — they never power down, just hold
+            // their last aim when nothing's in range. Each on its own cooldown, hits the
+            // nearest enemy in range. Host-authoritative damage.
             for (int i = 0; i < TURRET_COUNT; ++i) {
                 if (turret_cd[i] > 0.0f) turret_cd[i] -= dt;
-                if (!is_night()) continue;
                 const dc::entity::Entity* tgt = turret_target(turret_pos[i].x, turret_pos[i].z);
                 if (tgt && turret_cd[i] <= 0.0f) {
                     vec3 c = { tgt->position[0], tgt->position[1], tgt->position[2] };
@@ -2739,6 +2840,9 @@ int main(int argc, char** argv) {
                 o.bob = frand() * 6.2831853f;
                 xp_orbs.push_back(o);
             }
+            // Demon fireball explosions this frame (host/standalone; clients do it off the snapshot).
+            for (std::size_t i = 0; i + 2 < frame_booms.size(); i += 3)
+                burst_fire(frame_booms[i], frame_booms[i + 1], frame_booms[i + 2]);
         }
 
         // Loot repulsion: coins + XP orbs gently shove each other apart (like magnets)
@@ -2956,6 +3060,12 @@ int main(int argc, char** argv) {
             // Enemy deaths this tick (xyz triples) so clients play the same sand-crumble.
             uint32_t ndeath = static_cast<uint32_t>(frame_deaths.size() / 3); put(&ndeath, 4);
             put(frame_deaths.data(), frame_deaths.size() * sizeof(float));
+            // Demon fireball explosions this tick (xyz triples) -> same fire burst everywhere.
+            uint32_t nboom = static_cast<uint32_t>(frame_booms.size() / 3); put(&nboom, 4);
+            put(frame_booms.data(), frame_booms.size() * sizeof(float));
+            // Wizard staff bolts in flight (host owns them) -> everyone renders them.
+            uint32_t nbolt = static_cast<uint32_t>(bolts.size()); put(&nbolt, 4);
+            for (auto& b : bolts) { dc::net::BoltState bs{}; bs.x=b.pos[0]; bs.y=b.pos[1]; bs.z=b.pos[2]; bs.big=b.big?1:0; put(&bs, sizeof bs); }
             put(&tod, 4);          // day/night clock, so clients share the cycle
             { uint32_t dn = static_cast<uint32_t>(day_num); put(&dn, 4); }
             put(&core_health, 4);    // base health, for the bar on every screen
@@ -3030,16 +3140,22 @@ int main(int argc, char** argv) {
         // Local player's hand-bone world position this frame (set at the sword render
         // below), so elemental sparks emit right off the blade.
         vec3 blade_pos = {0.0f, 0.0f, 0.0f}; bool blade_ok = false;
+        // Wizard magic shields raised this frame (local + remotes), drawn in the particle pass.
+        struct MagicShield { float x, y, z, yaw; };
+        std::vector<MagicShield> magic_shields;
 
         // Build the animation layers for this frame: walk drives the body, punch
         // is masked to the armL bone so you can punch while walking. (No layers
         // when idle -> rest pose.)
         layers.clear();
-        if (moving)   layers.push_back({ &model_data.walk,  anim_time,  -1 });
-        if (punching) layers.push_back({ &model_data.punch, punch_time, model_data.arm_l_node });
-        if (blocking) layers.push_back({ &model_data.block, block_time, model_data.arm_r_node, false });  // right arm, one-shot: play to end and hold (no loop)
-        // Pose the player, and also grab the head bone's world matrix as a socket
-        // for the helmet.
+        // The player renders as its CLASS MODEL (knight/wizard, gear baked in). Pose with
+        // that model's own walk/punch/block clips + bone nodes.
+        dc::renderer::ModelData& pmd = class_md(my_look.weapon_class);
+        const bool class_baked = class_custom(my_look.weapon_class);
+        if (moving)   layers.push_back({ &pmd.walk,  anim_time,  -1 });
+        if (punching) layers.push_back({ &pmd.punch, punch_time, pmd.arm_l_node });
+        if (blocking) layers.push_back({ &pmd.block, block_time, pmd.arm_r_node, false });  // right arm, one-shot: play to end and hold (no loop)
+        // Pose the player, and grab the head + hand bone world matrices as gear sockets.
         dc::renderer::Mat4 head_world;
         dc::renderer::Mat4 l_hand_world;
         dc::renderer::Mat4 r_hand_world;
@@ -3047,8 +3163,8 @@ int main(int argc, char** argv) {
         // First person (V): head-look only (body undrawn; gear aims via the viewmodel tilt).
         const bool tp = !first_person;
         std::vector<float> my_bscale = bone_scale_for(my_look);   // silly proportions (gear follows the scaled hands)
-        dc::renderer::pose_model(model_data, layers, tp ? 0.0f : player.pitch, part_world,
-                                 { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
+        dc::renderer::pose_model(pmd, layers, tp ? 0.0f : player.pitch, part_world,
+                                 { pmd.head_node, pmd.hand_l_node, pmd.hand_r_node },
                                  { &head_world, &l_hand_world, &r_hand_world },
                                  tp ? player.pitch : 0.0f, &my_bscale);
 
@@ -3102,20 +3218,28 @@ int main(int argc, char** argv) {
         mat4 gear_place;
         glm_mat4_copy(tp ? placement : vm_place, gear_place);
 
-        if (tp) {   // third-person: draw the body + helmet
-            vec3 body_color = { my_look.skin[0], my_look.skin[1], my_look.skin[2] };   // chosen skin tone
+        if (tp) {   // third-person: draw the class body (gear baked in)
+            vec3 body_color = { 1.0f, 1.0f, 1.0f };   // white -> baked class colors show
+            if (!class_baked) { body_color[0] = 0.52f; body_color[1] = 0.55f; body_color[2] = 0.62f;   // generic fallback tint
+                                if (my_look.weapon_class == 1) { body_color[0] = 0.22f; body_color[1] = 0.26f; body_color[2] = 0.62f; } }
             if (dead) { vec3 pale = { 0.55f, 0.65f, 0.95f }; glm_vec3_copy(pale, body_color); }
             else if (player.hit_flash > 0.0f) {
                 vec3 red = { 1.0f, 0.1f, 0.1f };
                 glm_vec3_lerp(body_color, red, player.hit_flash / dc::entity::FLASH_TIME, body_color);
             }
-            renderer.draw_model(player_model, part_world, placement, body_color, dead ? GHOST_ALPHA : 1.0f);
-            if (!dead) {   // your drawn face on the front of the head
+            float body_alpha = dead ? GHOST_ALPHA : 1.0f;
+            // Wizard dodge: the body dissolves into mist (low alpha) and re-forms as the
+            // i-frames run out, trailing motes the whole time.
+            if (!dead && my_look.weapon_class == 1 && player.iframes > 0.0f && player.dash_iframes > 0.0f) {
+                const float t = player.iframes / player.dash_iframes;   // 1 at dash start -> 0 as it ends
+                body_alpha = 1.0f - 0.8f * t;                            // most-mist at the start, re-forms by the end
+                burst_mist(player.position[0], player.position[1] - dc::world::EYE_HEIGHT + 0.9f, player.position[2], 3);
+            }
+            renderer.draw_model(class_mdl(my_look.weapon_class), part_world, placement, body_color, body_alpha);
+            if (!dead && !class_baked) {   // only the fallback rig needs a drawn face / helmet
                 mat4 hp; glm_mat4_mul(placement, head_world.m, hp);
                 vec3 hcen = { hp[3][0], hp[3][1], hp[3][2] };
                 draw_face_at(hcen, player.yaw, my_look);
-            }
-            if (!dead) {
                 mat4 helmet_place; glm_mat4_mul(placement, head_world.m, helmet_place);
                 vec3 helmet_color = { 1.0f, 1.0f, 1.0f };
                 renderer.draw_model(helmet_model, helmet_offset, helmet_place, helmet_color);
@@ -3124,16 +3248,20 @@ int main(int argc, char** argv) {
 
         // Gear hidden while a ghost (dead = no weapon).
         if (!dead) {
-        // Sword in hand: only when equipped AND no sword is currently in flight.
-        if (player.weapon && throwns.empty()) {
+        // Mark the hand bone for elemental sparks (the weapon itself is baked into the class
+        // model). The fallback rig still draws a separate sword/staff.
+        const bool is_wiz = (my_look.weapon_class == 1);
+        if (player.weapon && (throwns.empty() || is_wiz)) {
             mat4 sword_place;
             glm_mat4_mul(gear_place, l_hand_world.m, sword_place);
             blade_pos[0] = sword_place[3][0]; blade_pos[1] = sword_place[3][1]; blade_pos[2] = sword_place[3][2];
             blade_ok = true;   // emit sparks from the hand bone
-            vec3 sws = { player.sword_scale, player.sword_scale, player.sword_scale };
-            glm_scale(sword_place, sws);   // blue upgrade grows the blade
-            vec3 sword_color = { 0.8f, 0.8f, 0.9f };
-            renderer.draw_model(sword_model, sword_offset, sword_place, sword_color);
+            if (!class_baked) {
+                vec3 sws = { player.sword_scale, player.sword_scale, player.sword_scale };
+                glm_scale(sword_place, sws);
+                vec3 sword_color = { 0.8f, 0.8f, 0.9f };
+                renderer.draw_model(sword_model, sword_offset, sword_place, sword_color);
+            }
         }
         // Thrown sword: spinning in flight. Match the in-hand size by reusing the
         // hand bone's world scale (the player rig is ~0.22x), times the throw_size
@@ -3178,12 +3306,20 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Shield: drawn only when a shield is equipped, attached to the right hand bone.
-        if (player.shield) {
+        // Shield: the knight's is baked into the class model; the wizard raises a translucent
+        // magic barrier (drawn in the particle pass below). The fallback rig uses the prop.
+        if (player.shield && !class_baked) {
             mat4 shield_place;
             glm_mat4_mul(gear_place, r_hand_world.m, shield_place);
             vec3 shield_color = { 0.5f, 0.5f, 0.8f };
             renderer.draw_model(shield_model, shield_offset, shield_place, shield_color);
+        }
+        // Wizard magic shield: a glowing translucent hex barrier off the right hand while
+        // blocking (rendered in the particle pass). Position from the posed hand bone.
+        if (player.shield && my_look.weapon_class == 1 && blocking) {
+            mat4 mw; glm_mat4_mul(gear_place, r_hand_world.m, mw);
+            vec3 f; player.front(f);
+            magic_shields.push_back({ mw[3][0] + f[0]*0.35f, mw[3][1], mw[3][2] + f[2]*0.35f, player.yaw });
         }
         }   // end if (!dead)
 
@@ -3244,13 +3380,11 @@ int main(int argc, char** argv) {
                 const float gx = en.position[0], gz = en.position[2];
                 const float cy = terrain.height(gx, gz) + dc::entity::FLY_HOVER;
                 if (eye_loaded) {
-                    // Face the target: en.yaw tracks it horizontally in the sim; the pitch
-                    // is computed toward the nearest player, so the eye peers down at floor
-                    // targets and tilts UP when a player launches above it. Gentle hover bob.
-                    const float EYE_YAW_OFFSET = MODEL_YAW_OFFSET + glm_rad(90.0f);   // eye's forward is +90 from the player rig's
+                    // Face the target: en.yaw tracks it horizontally; pitch toward the nearest
+                    // player so the eye peers down/up. The tentacles undulate via the looping
+                    // "walk" clip. Gentle hover bob.
                     const float bob = 0.12f * std::sin(t_now * 2.0f + gx);
                     const float eye_y = cy + bob;
-                    // Nearest player's eye height, for the vertical look angle.
                     float best = 1e30f, ty = eye_y;
                     auto consider = [&](float px, float py, float pz) {
                         const float dx = px - gx, dz = pz - gz, d2 = dx*dx + dz*dz;
@@ -3259,15 +3393,17 @@ int main(int argc, char** argv) {
                     if (!dead) consider(player.position[0], player.position[1], player.position[2]);
                     for (const auto& rp : remotes) if (!rp.ghost) consider(rp.pos[0], rp.pos[1], rp.pos[2]);
                     const float horiz = std::sqrt(best) > 0.3f ? std::sqrt(best) : 0.3f;
-                    float eye_pitch = std::atan2(ty - eye_y, horiz);          // + = look up, - = look down
-                    if (eye_pitch >  1.3f) eye_pitch =  1.3f;                 // clamp near-vertical
+                    float eye_pitch = std::atan2(ty - eye_y, horiz);          // + = look up
+                    if (eye_pitch >  1.3f) eye_pitch =  1.3f;
                     if (eye_pitch < -1.3f) eye_pitch = -1.3f;
-                    dc::renderer::pose_model(eye_data, {}, 0.0f, enemy_part_world);   // static (rest pose)
+                    std::vector<dc::renderer::AnimLayer> evl;
+                    if (eye_data.walk.valid()) evl.push_back({ &eye_data.walk, t_now * 1.0f, -1 });   // tentacle wave
+                    dc::renderer::pose_model(eye_data, evl, 0.0f, enemy_part_world);
                     mat4 eplace; glm_mat4_identity(eplace);
                     vec3 epos = { gx, eye_y, gz };
                     glm_translate(eplace, epos);
-                    glm_rotate_y(eplace, -en.yaw + EYE_YAW_OFFSET, eplace);   // look toward the target
-                    glm_rotate_z(eplace, eye_pitch, eplace);                  // pitch about the eye's right axis (Z) -> no roll
+                    glm_rotate_y(eplace, -en.yaw + MODEL_YAW_OFFSET, eplace);   // yaw toward target (+Y model, like the bat)
+                    glm_rotate_x(eplace, eye_pitch, eplace);                    // pitch up/down about the local right axis
                     if (en.elite) { vec3 es = {dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE}; glm_scale(eplace, es); }
                     vec3 col = { 1.0f, 1.0f, 1.0f };
                     if (en.elite) { vec3 gold = {1.0f, 0.82f, 0.25f}; glm_vec3_copy(gold, col); }
@@ -3285,11 +3421,18 @@ int main(int argc, char** argv) {
             const bool is_skel  = (en.kind == dc::entity::EnemyKind::Skeleton) && skeleton_loaded;
             const bool is_gnome = (en.kind == dc::entity::EnemyKind::Flamethrower) && gnome_loaded;
             const bool is_mage  = (en.kind == dc::entity::EnemyKind::Ranged) && mage_loaded;
-            const bool custom   = is_skel || is_gnome || is_mage;
-            const dc::renderer::ModelData& md = is_skel ? skeleton_data : is_gnome ? gnome_data : is_mage ? mage_data : model_data;
-            dc::renderer::Model& mdl = is_skel ? skeleton_model : is_gnome ? gnome_model : is_mage ? mage_model : player_model;
+            const bool is_troll = (en.kind == dc::entity::EnemyKind::Troll) && troll_loaded;
+            const bool is_demon = (en.kind == dc::entity::EnemyKind::Demon) && demon_loaded;
+            const bool custom   = is_skel || is_gnome || is_mage || is_troll || is_demon;
+            const dc::renderer::ModelData& md = is_skel ? skeleton_data : is_gnome ? gnome_data : is_mage ? mage_data
+                                              : is_troll ? troll_data : is_demon ? demon_data : model_data;
+            dc::renderer::Model& mdl = is_skel ? skeleton_model : is_gnome ? gnome_model : is_mage ? mage_model
+                                     : is_troll ? troll_model : is_demon ? demon_model : player_model;
+            // The troll's weighted swing and the demon's yell animate the whole body, so play
+            // their attack UNMASKED; other enemies mask the punch to armL (so they swing while walking).
+            const bool full_body_attack = is_troll || is_demon;
             std::vector<dc::renderer::AnimLayer> el;
-            if (en.attacking)        el.push_back({ &md.punch, en.attack_time, md.arm_l_node });
+            if (en.attacking)        el.push_back({ &md.punch, en.attack_time, full_body_attack ? -1 : md.arm_l_node });
             else if (en.anim_time > 0.0f) el.push_back({ &md.walk, en.anim_time, -1 });
             dc::renderer::pose_model(md, el, 0.0f, enemy_part_world);
             mat4 eplace;
@@ -3297,6 +3440,8 @@ int main(int argc, char** argv) {
             vec3 epos = { en.position[0], terrain.height(en.position[0], en.position[2]) + MODEL_FOOT_LIFT, en.position[2] };
             glm_translate(eplace, epos);
             glm_rotate_y(eplace, -en.yaw + MODEL_YAW_OFFSET, eplace);
+            const float big = (is_troll || is_demon) ? 1.9f : 1.0f;   // trolls + demons are huge
+            if (big != 1.0f) { vec3 bs = { big, big, big }; glm_scale(eplace, bs); }
             if (en.elite) { vec3 es = {dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE, dc::entity::ELITE_SCALE}; glm_scale(eplace, es); }
             vec3 col;
             if (custom) { vec3 white = { 1.0f, 1.0f, 1.0f }; glm_vec3_copy(white, col); }   // white tint -> the model's own material colors show
@@ -3319,17 +3464,19 @@ int main(int argc, char** argv) {
         // replicated walk clock + head pitch.
         for (const auto& rp : remotes) {
             // Same layered pose as the local avatar: walk + masked punch + masked block.
+            const dc::game::Appearance& rlook = look_for(rp.id);   // this player's custom look + class
+            dc::renderer::ModelData& rmd = class_md(rlook.weapon_class);
+            const bool r_baked = class_custom(rlook.weapon_class);
             std::vector<dc::renderer::AnimLayer> rl;
-            if (rp.moving)   rl.push_back({ &model_data.walk,  rp.anim_time,  -1 });
-            if (rp.punching) rl.push_back({ &model_data.punch, rp.punch_time, model_data.arm_l_node });
-            if (rp.blocking) rl.push_back({ &model_data.block, rp.block_time, model_data.arm_r_node, false });
+            if (rp.moving)   rl.push_back({ &rmd.walk,  rp.anim_time,  -1 });
+            if (rp.punching) rl.push_back({ &rmd.punch, rp.punch_time, rmd.arm_l_node });
+            if (rp.blocking) rl.push_back({ &rmd.block, rp.block_time, rmd.arm_r_node, false });
             dc::renderer::Mat4 r_head, r_lhand, r_rhand;
-            const dc::game::Appearance& rlook = look_for(rp.id);   // this player's custom look
             // Pitch the body (not the head) so the arms + held gear aim with the look;
             // the head tilts too since it's a child of the body bone.
             std::vector<float> r_bscale = bone_scale_for(rlook);   // their silly proportions (networked via Appearance)
-            dc::renderer::pose_model(model_data, rl, 0.0f, remote_part_world,
-                                     { model_data.head_node, model_data.hand_l_node, model_data.hand_r_node },
+            dc::renderer::pose_model(rmd, rl, 0.0f, remote_part_world,
+                                     { rmd.head_node, rmd.hand_l_node, rmd.hand_r_node },
                                      { &r_head, &r_lhand, &r_rhand }, rp.pitch, &r_bscale);
             float rfeet = (rp.pos[1] - dc::world::EYE_HEIGHT) + MODEL_FOOT_LIFT;
             mat4 rplace;
@@ -3338,7 +3485,9 @@ int main(int argc, char** argv) {
             glm_translate(rplace, rpos);
             glm_rotate_y(rplace, -rp.yaw + MODEL_YAW_OFFSET, rplace);
 
-            vec3 remote_color = { rlook.skin[0], rlook.skin[1], rlook.skin[2] };   // their chosen skin
+            vec3 remote_color = { 1.0f, 1.0f, 1.0f };   // white -> baked class colors
+            if (!r_baked) { remote_color[0] = 0.52f; remote_color[1] = 0.55f; remote_color[2] = 0.62f;
+                            if (rlook.weapon_class == 1) { remote_color[0] = 0.22f; remote_color[1] = 0.26f; remote_color[2] = 0.62f; } }
             if (rp.ghost) {
                 vec3 pale = { 0.55f, 0.65f, 0.95f };   // dead teammate: faint wisp
                 glm_vec3_copy(pale, remote_color);
@@ -3346,28 +3495,35 @@ int main(int argc, char** argv) {
                 vec3 red = { 1.0f, 0.1f, 0.1f };
                 glm_vec3_lerp(remote_color, red, rp.hit_flash / dc::entity::FLASH_TIME, remote_color);
             }
-            renderer.draw_model(player_model, remote_part_world, rplace, remote_color, rp.ghost ? GHOST_ALPHA : 1.0f);
+            renderer.draw_model(class_mdl(rlook.weapon_class), remote_part_world, rplace, remote_color, rp.ghost ? GHOST_ALPHA : 1.0f);
 
             if (!rp.ghost) {   // a ghost teammate shows only its faint body, no gear/effects
-            { mat4 hp; glm_mat4_mul(rplace, r_head.m, hp);   // their drawn face
-              vec3 hcen = { hp[3][0], hp[3][1], hp[3][2] };
-              draw_face_at(hcen, rp.yaw, rlook); }
-            // Helmet on the head socket.
-            mat4 r_helmet; glm_mat4_mul(rplace, r_head.m, r_helmet);
-            vec3 helmet_white = { 1.0f, 1.0f, 1.0f };
-            renderer.draw_model(helmet_model, helmet_offset, r_helmet, helmet_white);
+            if (!r_baked) {   // fallback rig: separate face/helmet/weapon
+                { mat4 hp; glm_mat4_mul(rplace, r_head.m, hp);
+                  vec3 hcen = { hp[3][0], hp[3][1], hp[3][2] };
+                  draw_face_at(hcen, rp.yaw, rlook); }
+                mat4 r_helmet; glm_mat4_mul(rplace, r_head.m, r_helmet);
+                vec3 helmet_white = { 1.0f, 1.0f, 1.0f };
+                renderer.draw_model(helmet_model, helmet_offset, r_helmet, helmet_white);
+                mat4 r_sword; glm_mat4_mul(rplace, r_lhand.m, r_sword);
+                vec3 rsws = { rp.sword_scale, rp.sword_scale, rp.sword_scale };
+                glm_scale(r_sword, rsws);
+                vec3 sword_color = { 0.8f, 0.8f, 0.9f };
+                renderer.draw_model(sword_model, sword_offset, r_sword, sword_color);
+            }
 
-            // Sword in the left hand (scaled by the remote's blade-size upgrade).
-            mat4 r_sword; glm_mat4_mul(rplace, r_lhand.m, r_sword);
-            vec3 rsws = { rp.sword_scale, rp.sword_scale, rp.sword_scale };
-            glm_scale(r_sword, rsws);
-            vec3 sword_color = { 0.8f, 0.8f, 0.9f };
-            renderer.draw_model(sword_model, sword_offset, r_sword, sword_color);
-
-            // Shield on the right hand.
-            mat4 r_shield; glm_mat4_mul(rplace, r_rhand.m, r_shield);
-            vec3 shield_color = { 0.5f, 0.5f, 0.8f };
-            renderer.draw_model(shield_model, shield_offset, r_shield, shield_color);
+            // Shield: knight's is baked; the fallback rig uses the prop. Wizard raises a
+            // magic barrier (particle pass) while blocking.
+            if (!r_baked) {
+                mat4 r_shield; glm_mat4_mul(rplace, r_rhand.m, r_shield);
+                vec3 shield_color = { 0.5f, 0.5f, 0.8f };
+                renderer.draw_model(shield_model, shield_offset, r_shield, shield_color);
+            }
+            if (rlook.weapon_class == 1 && rp.blocking) {
+                mat4 mw; glm_mat4_mul(rplace, r_rhand.m, mw);
+                const float fwx = std::cos(rp.yaw), fwz = std::sin(rp.yaw);
+                magic_shields.push_back({ mw[3][0] + fwx*0.35f, mw[3][1], mw[3][2] + fwz*0.35f, rp.yaw });
+            }
 
             // Remote specials: match the local render. rig_scale (the rig's hand-bone
             // scale, ~0.22) comes from the posed hand matrix, same as the local avatar.
@@ -3405,6 +3561,7 @@ int main(int argc, char** argv) {
 
         // Stone pillars (static, flat-shaded so they read as grey stone, not terrain).
         renderer.draw_terrain(pillar_mesh, pillar_color, true);
+        renderer.draw_terrain(grass_mesh, grass_color, true);   // scattered grass tufts
 
         // The core pylon: a bright cyan column (flat-shaded so it self-glows). Brightens
         // while healthy, dims toward red as it's destroyed.
@@ -3412,7 +3569,17 @@ int main(int argc, char** argv) {
             const float frac = core_health / CORE_MAX_HEALTH;
             const float pulse = 0.8f + 0.2f * dc::fx::flicker(t_now * 0.9f);
             vec3 ccol = { (1.0f - frac) * 1.0f * pulse, (0.5f + 0.5f*frac) * pulse, (0.4f + 0.6f*frac) * pulse };
-            renderer.draw_terrain(core_mesh, ccol, true);
+            if (glyph_loaded) {   // detailed runed monolith (emissive glyphs stay lit; stone tinted by health)
+                static std::vector<dc::renderer::Mat4> glyph_pw;
+                if (glyph_pw.empty()) dc::renderer::pose_model(glyph_data, {}, 0.0f, glyph_pw);
+                mat4 gpl; glm_mat4_identity(gpl);
+                vec3 gpos = { core_pos[0], core_pos[1] - 0.5f, core_pos[2] }; glm_translate(gpl, gpos);
+                vec3 gsc = { 1.3f, 1.3f, 1.3f }; glm_scale(gpl, gsc);   // large
+                vec3 stone_tint = { 0.6f + 0.4f*frac, 0.7f + 0.3f*frac, 0.8f + 0.2f*frac };  // reddens as it's destroyed
+                renderer.draw_model(glyph_model, glyph_pw, gpl, stone_tint);
+            } else {
+                renderer.draw_terrain(core_mesh, ccol, true);
+            }
 
             // Rising energy motes off the pylon (the "producing particles").
             auto jit = [&]() { spark_rng = spark_rng * 1664525u + 1013904223u; return (spark_rng >> 8) * (1.0f / 16777216.0f); };
@@ -3467,56 +3634,66 @@ int main(int argc, char** argv) {
             };
             const bool night = is_night();
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
-            // Static turret housing model is posed once (no animation); each turret draws it
-            // yawed toward its target. The barrel + tracer stay procedural so they aim in 3D.
+            // Turret housing model posed once (static); each turret draws it yawed to its
+            // HELD aim. Barrel is procedural (3D). Turrets never power down — they hold the
+            // last aim when idle — and fire visible tracer rounds on a per-turret timer.
             std::vector<dc::renderer::Mat4> turret_pw;
             if (turret_loaded) dc::renderer::pose_model(turret_data, {}, 0.0f, turret_pw);
             for (int i = 0; i < TURRET_COUNT; ++i) {
                 const TPos& tp = turret_pos[i];
                 vec3 pivot = { tp.x, tp.y + 1.1f, tp.z };
-                // Aim: at night toward the nearest enemy (tilts in 3D); by day straight down.
-                vec3 dir = { 0.0f, -1.0f, 0.0f };
-                const dc::entity::Entity* tgt = night ? turret_target(tp.x, tp.z) : nullptr;
-                // Body: the armored model (yawed to face the target) if available, else a cylinder.
+                const dc::entity::Entity* tgt = turret_target(tp.x, tp.z);   // active day + night
+                if (tgt) {   // update the held aim toward the target (else keep last)
+                    vec3 d = { tgt->position[0] - pivot[0],
+                               (terrain.height(tgt->position[0], tgt->position[2]) + 0.8f) - pivot[1],
+                               tgt->position[2] - pivot[2] };
+                    float dl = std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                    if (dl > 1e-4f) turret_aim[i] = { d[0]/dl, d[1]/dl, d[2]/dl };
+                }
+                vec3 dir = { turret_aim[i].x, turret_aim[i].y, turret_aim[i].z };
+                // Body model (yawed to the held aim) at full color — never droops/dims.
                 if (turret_loaded) {
-                    const float tyaw = tgt ? std::atan2(tgt->position[2] - tp.z, tgt->position[0] - tp.x) : 0.0f;
+                    const float tyaw = std::atan2(dir[2], dir[0]);
                     mat4 tpl; glm_mat4_identity(tpl);
                     vec3 tpos = { tp.x, tp.y, tp.z }; glm_translate(tpl, tpos);
                     glm_rotate_y(tpl, -tyaw + MODEL_YAW_OFFSET, tpl);
-                    vec3 tmc = { 0.62f, 0.63f, 0.70f };                       // dim + cool by day
-                    if (night) { tmc[0] = 1.0f; tmc[1] = 1.0f; tmc[2] = 1.0f; }   // full color at night (active)
+                    vec3 tmc = { 1.0f, 1.0f, 1.0f };
                     renderer.draw_model(turret_model, turret_pw, tpl, tmc);
                 } else {
                     vec3 base = { tp.x, tp.y, tp.z }, top = { tp.x, tp.y + 1.3f, tp.z };
                     add_cyl(base, top, 0.5f, 10);
                 }
-                if (tgt) {
-                    dir[0] = tgt->position[0] - pivot[0];
-                    dir[1] = (terrain.height(tgt->position[0], tgt->position[2]) + 0.8f) - pivot[1];
-                    dir[2] = tgt->position[2] - pivot[2];
-                    float dl = std::sqrt(dir[0]*dir[0]+dir[1]*dir[1]+dir[2]*dir[2]);
-                    if (dl > 1e-4f) { dir[0]/=dl; dir[1]/=dl; dir[2]/=dl; } else { dir[1] = -1.0f; }
-                }
                 vec3 muzzle = { pivot[0] + dir[0]*1.4f, pivot[1] + dir[1]*1.4f, pivot[2] + dir[2]*1.4f };
-                add_cyl(pivot, muzzle, 0.18f, 8);             // gun barrel
-                // Tracer: when firing (a phase pulse), draw a red beam from muzzle to target.
-                if (tgt && std::fmod(run_time * 1.9f + i * 0.37f, TURRET_FIRE_INTERVAL) < 0.10f) {
-                    vec3 a = { muzzle[0], muzzle[1], muzzle[2] };
-                    vec3 b = { tgt->position[0], terrain.height(tgt->position[0],tgt->position[2]) + 0.9f, tgt->position[2] };
-                    const int SEG = 6;
-                    for (int s = 0; s < SEG; ++s) {
-                        float f0 = static_cast<float>(s)/SEG, f1 = static_cast<float>(s+1)/SEG;
-                        vec3 m = { a[0]+(b[0]-a[0])*0.5f*(f0+f1), a[1]+(b[1]-a[1])*0.5f*(f0+f1), a[2]+(b[2]-a[2])*0.5f*(f0+f1) };
-                        const float w = 0.06f;
-                        auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
-                            m[0]+R[0]*u+U[0]*v, m[1]+R[1]*u+U[1]*v, m[2]+R[2]*u+U[2]*v, 1.0f,0.3f,0.15f,0.9f}); };
-                        // small camera-facing segment quad
-                        P(-w,-w);P(w,-w);P(w,w); P(-w,-w);P(w,w);P(-w,w);
-                    }
+                add_cyl(pivot, muzzle, 0.18f, 8);             // gun barrel along the held aim
+                // Fire a visible tracer round on the per-turret timer (same on every peer).
+                if (turret_flash[i] > 0.0f) turret_flash[i] -= dt;
+                if (tgt && turret_flash[i] <= 0.0f) {
+                    turret_flash[i] = TURRET_FIRE_INTERVAL;
+                    const float spd = 50.0f;
+                    TBullet b; b.pos[0]=muzzle[0]; b.pos[1]=muzzle[1]; b.pos[2]=muzzle[2];
+                    b.vel[0]=dir[0]*spd; b.vel[1]=dir[1]*spd; b.vel[2]=dir[2]*spd; b.life = 0.7f;
+                    turret_bullets.push_back(b);
                 }
             }
+            // Advance + draw turret tracer rounds: bright additive bolts with a short trail.
+            for (std::size_t k = 0; k < turret_bullets.size();) {
+                TBullet& b = turret_bullets[k];
+                b.life -= dt;
+                b.pos[0]+=b.vel[0]*dt; b.pos[1]+=b.vel[1]*dt; b.pos[2]+=b.vel[2]*dt;
+                if (b.life <= 0.0f) { turret_bullets[k]=turret_bullets.back(); turret_bullets.pop_back(); continue; }
+                float vl = std::sqrt(b.vel[0]*b.vel[0]+b.vel[1]*b.vel[1]+b.vel[2]*b.vel[2]); if (vl<1e-4f) vl=1.0f;
+                vec3 vn = { b.vel[0]/vl, b.vel[1]/vl, b.vel[2]/vl };
+                for (int s = 0; s < 4; ++s) {
+                    const float back = -s * 0.22f, w = 0.16f - s*0.032f, bri = 1.0f - s*0.22f;
+                    vec3 m = { b.pos[0]+vn[0]*back, b.pos[1]+vn[1]*back, b.pos[2]+vn[2]*back };
+                    auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
+                        m[0]+R[0]*u+U[0]*v, m[1]+R[1]*u+U[1]*v, m[2]+R[2]*u+U[2]*v, 1.0f, 0.82f*bri, 0.30f*bri, 1.0f}); };
+                    P(-w,-w);P(w,-w);P(w,w); P(-w,-w);P(w,w);P(-w,w);
+                }
+                ++k;
+            }
             turret_mesh.upload(tv);
-            vec3 tcol; if (night) { tcol[0]=0.8f; tcol[1]=0.45f; tcol[2]=0.2f; } else { tcol[0]=0.35f; tcol[1]=0.36f; tcol[2]=0.4f; }
+            vec3 tcol = { 0.55f, 0.56f, 0.62f };   // barrel steel (the housing model carries its own colors)
             renderer.draw_terrain(turret_mesh, tcol, true);
 
             // Core shield dome enclosing the turrets. CHARGED bright blue at night (brighter
@@ -3586,6 +3763,53 @@ int main(int argc, char** argv) {
                 };
                 P(-1,-1); P(1,-1); P(1,1);
                 P(-1,-1); P(1,1); P(-1,1);
+            }
+        }
+
+        // Wizard staff bolts: bright cyan energy orbs (host/standalone draws `bolts`,
+        // clients draw the replicated `render_bolts`).
+        {
+            const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            auto draw_bolt = [&](float x, float y, float z, bool big) {
+                const float core = big ? 0.34f : 0.18f, glow = big ? 0.62f : 0.34f;
+                auto Q = [&](float sz, float r, float g, float b, float a) {
+                    vec3 c = { x, y, z };
+                    auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
+                        c[0]+R[0]*u+U[0]*v, c[1]+R[1]*u+U[1]*v, c[2]+R[2]*u+U[2]*v, r, g, b, a }); };
+                    P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
+                };
+                Q(glow, 0.25f, 0.6f, 1.0f, 0.7f);   // soft outer glow
+                Q(core, 0.7f, 0.92f, 1.0f, 1.0f);   // bright core
+            };
+            if (net.role == dc::net::Role::Client) for (const auto& b : render_bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big);
+            else for (const auto& b : bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big);
+        }
+
+        // Wizard magic shields: a glowing translucent hexagon barrier facing the block dir.
+        for (const auto& ms : magic_shields) {
+            const float fwx = std::cos(ms.yaw), fwz = std::sin(ms.yaw);
+            const float rx = fwz, rz = -fwx;            // right = perp to forward in xz
+            const float shimmer = 0.85f + 0.15f * std::sin(t_now * 8.0f);
+            auto hexpt = [&](float ang, float rad, float& ox, float& oy, float& oz) {
+                ox = ms.x + rx * std::cos(ang) * rad;
+                oy = ms.y + std::sin(ang) * rad;
+                oz = ms.z + rz * std::cos(ang) * rad;
+            };
+            const float RAD = 0.95f;
+            for (int k = 0; k < 6; ++k) {
+                const float a0 = 6.2831853f * k / 6, a1 = 6.2831853f * (k + 1) / 6;
+                float x0,y0,z0,x1,y1,z1;
+                hexpt(a0, RAD, x0, y0, z0); hexpt(a1, RAD, x1, y1, z1);
+                // filled translucent face (center + two rim points)
+                particle_verts.insert(particle_verts.end(), {
+                    ms.x, ms.y, ms.z, 0.35f, 0.65f, 1.0f, 0.16f * shimmer,
+                    x0, y0, z0, 0.35f, 0.65f, 1.0f, 0.10f * shimmer,
+                    x1, y1, z1, 0.35f, 0.65f, 1.0f, 0.10f * shimmer });
+                // brighter rim band (a thin quad along the edge)
+                float x0i,y0i,z0i,x1i,y1i,z1i; hexpt(a0, RAD*0.82f, x0i,y0i,z0i); hexpt(a1, RAD*0.82f, x1i,y1i,z1i);
+                particle_verts.insert(particle_verts.end(), {
+                    x0i,y0i,z0i, 0.6f,0.85f,1.0f,0.5f*shimmer,  x0,y0,z0, 0.6f,0.85f,1.0f,0.6f*shimmer,  x1,y1,z1, 0.6f,0.85f,1.0f,0.6f*shimmer,
+                    x0i,y0i,z0i, 0.6f,0.85f,1.0f,0.5f*shimmer,  x1,y1,z1, 0.6f,0.85f,1.0f,0.6f*shimmer,  x1i,y1i,z1i, 0.6f,0.85f,1.0f,0.5f*shimmer });
             }
         }
 
@@ -3780,16 +4004,28 @@ int main(int argc, char** argv) {
             for (const auto& dv : drone_vendors) {
                 if (dv.bought) continue;
                 const float gy = terrain.height(dv.x, dv.z);
-                // The drone: a glowing circle hovering just above the ground, gentle bob.
-                const float by = gy + 0.35f + std::sin(t_now * 2.0f + dv.x) * 0.06f;
-                const int N = 14; const float s = 0.33f;
-                for (int k = 0; k < N; ++k) {
-                    const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
-                    auto P = [&](float u, float v) {
-                        particle_verts.insert(particle_verts.end(), {
-                            dv.x + (R[0]*u + U[0]*v), by + (R[1]*u + U[1]*v), dv.z + (R[2]*u + U[2]*v), 0.55f, 0.7f, 0.95f, 0.95f });
-                    };
-                    P(0, 0); P(s*std::cos(a0), s*std::sin(a0)); P(s*std::cos(a1), s*std::sin(a1));
+                // The drone for sale: the actual drone model sitting on the ground (props at
+                // rest, not animating), with a gentle bob. Falls back to a glowing disc.
+                const float by = gy + 0.30f + std::sin(t_now * 2.0f + dv.x) * 0.05f;
+                if (drone_loaded) {
+                    static std::vector<dc::renderer::Mat4> dvend_pw;
+                    if (dvend_pw.empty()) dc::renderer::pose_model(drone_data, {}, 0.0f, dvend_pw);  // rest pose (static)
+                    mat4 dvm; glm_mat4_identity(dvm);
+                    vec3 dp = { dv.x, by, dv.z }; glm_translate(dvm, dp);
+                    glm_rotate_y(dvm, t_now * 0.4f + dv.x, dvm);   // slow idle turn
+                    vec3 dsc = { 0.8f, 0.8f, 0.8f }; glm_scale(dvm, dsc);
+                    vec3 white = { 1.0f, 1.0f, 1.0f };
+                    renderer.draw_model(drone_model, dvend_pw, dvm, white);
+                } else {
+                    const int N = 14; const float s = 0.33f;
+                    for (int k = 0; k < N; ++k) {
+                        const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                        auto P = [&](float u, float v) {
+                            particle_verts.insert(particle_verts.end(), {
+                                dv.x + (R[0]*u + U[0]*v), by + (R[1]*u + U[1]*v), dv.z + (R[2]*u + U[2]*v), 0.55f, 0.7f, 0.95f, 0.95f });
+                        };
+                        P(0, 0); P(s*std::cos(a0), s*std::sin(a0)); P(s*std::cos(a1), s*std::sin(a1));
+                    }
                 }
                 // Floating price (gold), like a chest tag.
                 auto pquad = [&](const vec3 base, float u0, float v0, float u1, float v1, float sc) {
@@ -4208,14 +4444,26 @@ int main(int argc, char** argv) {
                     sw->pos[i][1] += (ty - sw->pos[i][1]) * ease;
                     sw->pos[i][2] += (tz - sw->pos[i][2]) * ease;
                     const float mx = sw->pos[i][0], my = sw->pos[i][1] + std::sin(run_time*3.0f + i) * 0.06f, mz = sw->pos[i][2];
-                    const float s = 0.17f; const int N = 12;
-                    for (int k = 0; k < N; ++k) {
-                        const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
-                        auto P = [&](float u, float v) {
-                            particle_verts.insert(particle_verts.end(), {
-                                mx + (R[0]*u + U[0]*v), my + (R[1]*u + U[1]*v), mz + (R[2]*u + U[2]*v), 0.55f, 0.7f, 0.95f, 0.9f });
-                        };
-                        P(0, 0); P(s*std::cos(a0), s*std::sin(a0)); P(s*std::cos(a1), s*std::sin(a1));
+                    if (drone_loaded) {   // flying-robot quadcopter with spinning rotors
+                        std::vector<dc::renderer::AnimLayer> dl;
+                        dl.push_back({ &drone_data.walk, run_time * 4.0f + i, -1 });   // spin the props
+                        dc::renderer::pose_model(drone_data, dl, 0.0f, enemy_part_world);
+                        mat4 dpl; glm_mat4_identity(dpl);
+                        vec3 dpos = { mx, my, mz }; glm_translate(dpl, dpos);
+                        glm_rotate_y(dpl, run_time * 0.6f + i, dpl);            // slow idle yaw
+                        vec3 dsc = { 0.7f, 0.7f, 0.7f }; glm_scale(dpl, dsc);   // small
+                        vec3 white = { 1.0f, 1.0f, 1.0f };
+                        renderer.draw_model(drone_model, enemy_part_world, dpl, white);
+                    } else {
+                        const float s = 0.17f; const int N = 12;
+                        for (int k = 0; k < N; ++k) {
+                            const float a0 = 6.2831853f * k / N, a1 = 6.2831853f * (k + 1) / N;
+                            auto P = [&](float u, float v) {
+                                particle_verts.insert(particle_verts.end(), {
+                                    mx + (R[0]*u + U[0]*v), my + (R[1]*u + U[1]*v), mz + (R[2]*u + U[2]*v), 0.55f, 0.7f, 0.95f, 0.9f });
+                            };
+                            P(0, 0); P(s*std::cos(a0), s*std::sin(a0)); P(s*std::cos(a1), s*std::sin(a1));
+                        }
                     }
                     // Fire a red laser at the nearest enemy in range, in brief bursts.
                     const bool firing = std::fmod(run_time * 1.6f + i * 0.31f, MINION_FIRE_INTERVAL) < 0.12f;

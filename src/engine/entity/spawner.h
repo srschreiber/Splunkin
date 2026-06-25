@@ -18,6 +18,8 @@ struct Spawner {
     float    flame_fraction  = 0.0f;          // chance each spawn is a (rare) flamethrower enemy
     float    skeleton_fraction = 0.0f;        // chance each spawn is a (melee-style) skeleton
     float    bat_fraction      = 0.0f;        // chance each spawn is a (flying) bat
+    float    troll_fraction    = 0.0f;        // chance each spawn is a (rare) big troll
+    float    demon_fraction    = 0.0f;        // chance each spawn is a (rare) big demon
     float    elite_fraction  = 0.0f;          // chance each spawn rolls into a rare elite (any kind)
     float    accum     = 0.0f;                // fractional spawns owed
     uint32_t rng       = 0x2545f491u;

@@ -22,6 +22,12 @@ Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind, bool elite) {
     } else if (kind == EnemyKind::Flamethrower) {
         e.stats.max_health = FLAME_MAX_HEALTH;   // tanky bruiser
         e.health = e.stats.max_health;
+    } else if (kind == EnemyKind::Troll) {
+        e.stats = { TROLL_MAX_HEALTH, TROLL_DAMAGE, TROLL_KNOCKBACK, TROLL_WEIGHT };
+        e.health = e.stats.max_health;
+    } else if (kind == EnemyKind::Demon) {
+        e.stats = { DEMON_MAX_HEALTH, DEMON_DAMAGE, DEMON_KNOCKBACK, DEMON_WEIGHT };
+        e.health = e.stats.max_health;
     }
     if (elite) {
         e.elite = true;
@@ -221,7 +227,8 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         // target leaving does. ti indexes both players[] and flows[]. ---
         // Ranged enemies give up a target that flees past their leash; melee chase
         // forever (huge cap). -1 = nobody valid in range -> idle.
-        const bool ranged = (e.kind == EnemyKind::Ranged || e.kind == EnemyKind::Flying || e.kind == EnemyKind::Bat);
+        const bool demon  = (e.kind == EnemyKind::Demon);   // big caster: slow exploding fireballs
+        const bool ranged = (e.kind == EnemyKind::Ranged || e.kind == EnemyKind::Flying || e.kind == EnemyKind::Bat || demon);
         const bool flying = (e.kind == EnemyKind::Flying || e.kind == EnemyKind::Bat);   // bats hover + flap like the eye
         const float leash = !ranged ? 1e30f : (flying ? FLY_LEASH : RANGED_LEASH);
         const int ti = pick_target(e, players, leash);
@@ -237,10 +244,10 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         if (ranged) {
             // Flying is a ranged variant: longer range, hovers (position[1] untouched
             // by the xz-only movement below), and shoots a differently-colored bolt.
-            const float standoff = flying ? FLY_STANDOFF      : RANGED_STANDOFF;
-            const float fire_int = flying ? FLY_FIRE_INTERVAL : RANGED_FIRE_INTERVAL;
-            const float dmg      = flying ? FLY_DAMAGE        : RANGED_DAMAGE;
-            const float shot_spd = flying ? FLY_SHOT_SPEED    : RANGED_SHOT_SPEED;
+            const float standoff = demon ? 9.0f : flying ? FLY_STANDOFF      : RANGED_STANDOFF;
+            const float fire_int = demon ? DEMON_FIRE_INTERVAL : flying ? FLY_FIRE_INTERVAL : RANGED_FIRE_INTERVAL;
+            const float dmg      = demon ? DEMON_DAMAGE : flying ? FLY_DAMAGE : RANGED_DAMAGE;
+            const float shot_spd = demon ? DEMON_SHOT_SPEED : flying ? FLY_SHOT_SPEED : RANGED_SHOT_SPEED;
             // Shoot a sphere on a cooldown — even while repositioning.
             if (e.attack_cd <= 0.0f && dist > 1e-4f) {
                 e.attack_cd = fire_int;
@@ -254,12 +261,27 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 pr.radius = RANGED_SHOT_RADIUS; pr.owner_id = e.id;   // so its hits can taunt
                 if (flying) { pr.color[0] = 1.0f; pr.color[1] = 0.12f; pr.color[2] = 0.08f; pr.beam = true; }   // red glowing laser
                 if (e.kind == EnemyKind::Bat) { pr.color[0] = 0.7f; pr.color[1] = 0.25f; pr.color[2] = 0.95f; }   // purple screech bolt
+                if (demon) {   // fast, big fireball that explodes on impact (splash)
+                    pr.pos[1] = 1.6f;                       // hurled from chest height
+                    pr.radius = DEMON_SHOT_RADIUS; pr.knockback = DEMON_KNOCKBACK; pr.life = 4.0f;
+                    pr.explodes = true; pr.blast = DEMON_BLAST_RADIUS;
+                    pr.color[0] = 1.0f; pr.color[1] = 0.45f; pr.color[2] = 0.1f;   // fiery orange
+                    // Aim straight at the player's body from chest height (no lob), so it
+                    // flies AT you, not into the sky.
+                    pr.vel[1] = (dist > 0.1f) ? ((tgt.pos[1] - 0.4f) - pr.pos[1]) * shot_spd / dist : 0.0f;
+                }
                 if (e.elite) {                          // bigger, harder-hitting elite shot
                     pr.damage *= ELITE_DAMAGE_MULT; pr.knockback *= ELITE_KNOCKBACK_MULT;
                     pr.radius *= ELITE_PROJ_MULT;
                     pr.color[0] = std::min(1.0f, pr.color[0] + 0.3f); pr.color[1] = std::min(1.0f, pr.color[1] + 0.25f); pr.color[2] *= 0.4f;  // golden tint
                 }
                 list.projectiles.push_back(pr);
+            }
+            // Demon: play the open-mouth "yell" cast for ~0.7s after each shot (drives the
+            // punch clip on every peer). Other ranged enemies don't body-animate their shots.
+            if (demon) {
+                e.attacking = (e.attack_cd > fire_int - 0.7f);
+                if (e.attacking) e.attack_time += dt; else e.attack_time = 0.0f;
             }
             // Keep its distance: close to the standoff band, back straight off if the
             // target crowds it (still firing the whole time).
@@ -331,22 +353,30 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         // they're heading (not where they were). The enemy keeps closing through the whole
         // wind-up and commits the swing while still a bit outside range — by the time the
         // punch lands it has closed the gap and the player has walked into the blast. ---
+        // The TROLL is a melee variant: slow, long telegraphed wind-up, huge reach/damage/knock.
+        const bool  troll      = (e.kind == EnemyKind::Troll);
+        const float windup     = troll ? TROLL_WINDUP    : ENEMY_ATTACK_WINDUP;
+        const float ff_radius  = troll ? TROLL_RADIUS    : MELEE_FORCEFIELD_RADIUS;
+        const float ff_damage  = troll ? TROLL_DAMAGE    : MELEE_FORCEFIELD_DAMAGE;
+        const float ff_knock   = troll ? TROLL_KNOCKBACK : MELEE_FORCEFIELD_KNOCKBACK;
+        const float spd_mult   = troll ? TROLL_SPEED_MULT: MELEE_SPEED_MULT;
+        const float melee_cd   = troll ? TROLL_ATTACK_CD : ENEMY_ATTACK_INTERVAL;
         // Predict the player's position at the moment a punch would land (windup remaining).
-        const float tland = e.attacking ? (ENEMY_ATTACK_WINDUP - e.attack_time) : ENEMY_ATTACK_WINDUP;
+        const float tland = e.attacking ? (windup - e.attack_time) : windup;
         const float lead_x = tgt.pos[0] + tgt.vel[0] * tland;
         const float lead_z = tgt.pos[2] + tgt.vel[2] * tland;
         const float ldx = lead_x - e.position[0], ldz = lead_z - e.position[2];
         const float lead_dist = std::sqrt(ldx * ldx + ldz * ldz);
         if (lead_dist > 1e-4f) { e.yaw = std::atan2(ldz, ldx); e.attack_yaw = e.yaw; }  // face/track the intercept point
         // How far the enemy will still close before the punch lands (it never stops moving).
-        const float closing = ENEMY_SPEED * MELEE_SPEED_MULT * move_mult * tland;
+        const float closing = ENEMY_SPEED * spd_mult * move_mult * tland;
         if (!e.attacking && e.attack_cd <= 0.0f &&
-            lead_dist - closing <= MELEE_FORCEFIELD_RADIUS - 0.5f) {   // will be in range when it lands
+            lead_dist - closing <= ff_radius - 0.5f) {   // will be in range when it lands
             e.attacking = true; e.attack_time = 0.0f;
         }
         if (e.attacking) {
             e.attack_time += dt;
-            if (e.attack_time >= ENEMY_ATTACK_WINDUP) {
+            if (e.attack_time >= windup) {
                 // Punch: slam out a spherical forcefield. Every living, non-dodging player
                 // within MELEE_FORCEFIELD_RADIUS takes substantial damage and a hard radial
                 // shove. A frontal shield blocks it like anything else (spends stamina to
@@ -357,10 +387,10 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     if (!pc.alive || pc.invincible) continue;
                     const float dx = pc.pos[0] - e.position[0], dz = pc.pos[2] - e.position[2];
                     const float d2 = dx * dx + dz * dz;
-                    if (d2 > MELEE_FORCEFIELD_RADIUS * MELEE_FORCEFIELD_RADIUS) continue;
+                    if (d2 > ff_radius * ff_radius) continue;
                     const float d = std::sqrt(d2);
-                    float dmg = MELEE_FORCEFIELD_DAMAGE * (e.elite ? ELITE_DAMAGE_MULT : 1.0f);
-                    const float kb = MELEE_FORCEFIELD_KNOCKBACK * (e.elite ? ELITE_KNOCKBACK_MULT : 1.0f);   // shove always lands (block stops damage, not the blast)
+                    float dmg = ff_damage * (e.elite ? ELITE_DAMAGE_MULT : 1.0f);
+                    const float kb = ff_knock * (e.elite ? ELITE_KNOCKBACK_MULT : 1.0f);   // shove always lands (block stops damage, not the blast)
                     // Frontal shield negates the DAMAGE (spends block_rate stamina per point).
                     if (pc.blocking && pc.block_rate > 0.0f && d > 1e-4f) {
                         const float front = (-dx / d) * std::cos(pc.yaw) + (-dz / d) * std::sin(pc.yaw);
@@ -386,13 +416,13 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 }
                 e.punch_anim = PUNCH_ANIM_TIME;   // forcefield-sphere visual (replicated)
                 e.attacking = false;
-                e.attack_cd = ENEMY_ATTACK_INTERVAL;
+                e.attack_cd = melee_cd;
             }
         }
         // Never pause to swing: keep chasing the LEAD point (even mid-wind-up) until
         // essentially on top of it. This is what makes the timed punch actually connect.
         if (lead_dist > ENEMY_RADIUS + 0.3f)
-            flow_advance(e, map, flow, list.rng, lead_x, lead_z, dt, move_mult * MELEE_SPEED_MULT, tile_heights, ENEMY_MAX_CLIMB);
+            flow_advance(e, map, flow, list.rng, lead_x, lead_z, dt, move_mult * spd_mult, tile_heights, ENEMY_MAX_CLIMB);
         else e.anim_time = 0.0f;   // on top of the target: hold, keep swinging
     }
 
@@ -436,7 +466,8 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
 
 void update_projectiles(EntityList& list, const dc::world::Map& map,
                         const std::vector<PlayerCombat>& players,
-                        std::vector<EnemyHitPlayer>& out, float dt) {
+                        std::vector<EnemyHitPlayer>& out, float dt,
+                        std::vector<float>* booms) {
     if (out.size() < players.size()) out.resize(players.size());   // usually pre-sized by update_enemies
     // Block stamina pool (same model as melee): a frontal shield negates damage by
     // spending block_rate stamina per point. Drawn down across multiple shots this tick.
@@ -491,7 +522,22 @@ void update_projectiles(EntityList& list, const dc::world::Map& map,
                 }
             }
         }
-        if (gone) { list.projectiles[i] = list.projectiles.back(); list.projectiles.pop_back(); }
+        if (gone) {
+            if (p.explodes) {   // demon fireball detonates: splash all living players in range
+                for (std::size_t pi = 0; pi < players.size(); ++pi) {
+                    if (!players[pi].alive || players[pi].invincible) continue;
+                    const float dx = players[pi].pos[0] - p.pos[0], dz = players[pi].pos[2] - p.pos[2];
+                    const float d = std::sqrt(dx*dx + dz*dz);
+                    if (d > p.blast) continue;
+                    const float falloff = 1.0f - d / p.blast;        // full at center, 0 at the edge
+                    out[pi].damage += DEMON_BLAST_DAMAGE * falloff;
+                    out[pi].hit = true; out[pi].attacker_id = p.owner_id;
+                    if (d > 1e-4f) { out[pi].knock[0] += (dx/d) * p.knockback; out[pi].knock[2] += (dz/d) * p.knockback; }
+                }
+                if (booms) { booms->push_back(p.pos[0]); booms->push_back(p.pos[1]); booms->push_back(p.pos[2]); }
+            }
+            list.projectiles[i] = list.projectiles.back(); list.projectiles.pop_back();
+        }
         else ++i;
     }
 }

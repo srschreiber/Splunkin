@@ -19,6 +19,29 @@ inline constexpr float ELITE_WEIGHT_MULT     = 2.0f;   // harder to shove around
 inline constexpr float ELITE_PROJ_MULT       = 1.9f;   // bigger, harder-hitting bolts
 inline constexpr float ELITE_FLYER_BASE_HP   = 42.0f;  // elite flyers aren't one-shot fragile
 
+// Troll: a big, slow, very tanky melee bruiser. Lumbers in and swings a stone pillar with
+// a long telegraphed wind-up — huge damage + knockback, but easy to read and dodge.
+inline constexpr float TROLL_MAX_HEALTH   = 520.0f;
+inline constexpr float TROLL_SPEED_MULT   = 0.55f;   // slow (fraction of ENEMY_SPEED)
+inline constexpr float TROLL_WINDUP       = 1.1f;    // long, readable wind-up before the slam
+inline constexpr float TROLL_RADIUS       = 6.0f;    // slam reach
+inline constexpr float TROLL_DAMAGE       = 60.0f;   // massive
+inline constexpr float TROLL_KNOCKBACK    = 70.0f;   // sends you flying
+inline constexpr float TROLL_ATTACK_CD    = 2.6f;    // slow between slams
+inline constexpr float TROLL_WEIGHT       = 30.0f;   // barely flinches
+
+// Demon: a big caster that lobs slow fireballs which EXPLODE on impact (rocket-launcher
+// splash). Tanky; keeps its distance like a ranged enemy.
+inline constexpr float DEMON_MAX_HEALTH   = 2600.0f; // a wall — no starting player kills this un-upgraded
+inline constexpr float DEMON_FIRE_INTERVAL = 2.4f;
+inline constexpr float DEMON_SHOT_SPEED   = 24.0f;   // fast, hard to sidestep
+inline constexpr float DEMON_SHOT_RADIUS  = 0.55f;   // big fireball
+inline constexpr float DEMON_DAMAGE       = 26.0f;   // direct hit
+inline constexpr float DEMON_BLAST_RADIUS = 4.0f;    // explosion splash
+inline constexpr float DEMON_BLAST_DAMAGE = 34.0f;   // splash damage at the center
+inline constexpr float DEMON_KNOCKBACK    = 30.0f;
+inline constexpr float DEMON_WEIGHT       = 16.0f;
+
 inline float enemy_xp(EnemyKind kind) {
     switch (kind) {
         case EnemyKind::Ranged:       return 12.0f;
@@ -26,6 +49,8 @@ inline float enemy_xp(EnemyKind kind) {
         case EnemyKind::Flamethrower: return 25.0f;
         case EnemyKind::Skeleton:     return 13.0f;   // melee-style, a touch more XP
         case EnemyKind::Bat:          return 14.0f;   // flying nuisance
+        case EnemyKind::Troll:        return 60.0f;   // big tanky bruiser
+        case EnemyKind::Demon:        return 70.0f;   // big fireball caster
         case EnemyKind::Melee:
         default:                      return 10.0f;
     }
@@ -195,9 +220,12 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
 // on walls, and on reaching a LIVING player deal damage + knockback into out[i]
 // (parallel to `players`, same convention as update_enemies). Pure over
 // (list.projectiles, map, players). Spent shots are removed.
+// `booms` (optional): each exploding projectile (demon fireball) that detonates appends
+// its position as 3 floats (x,y,z) so the caller can spawn an explosion + replicate it.
 void update_projectiles(EntityList& list, const dc::world::Map& map,
                         const std::vector<PlayerCombat>& players,
-                        std::vector<EnemyHitPlayer>& out, float dt);
+                        std::vector<EnemyHitPlayer>& out, float dt,
+                        std::vector<float>* booms = nullptr);
 
 // Damage + knock every enemy within `radius` (xz) of `center`, skipping ids already
 // in `already_hit` (so a moving hazard hits each enemy once per pass). Marks the

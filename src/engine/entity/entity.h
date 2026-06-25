@@ -12,7 +12,7 @@ enum class EntityType : uint8_t { Enemy };
 // Enemy behavior archetype. Targeting is shared (pick_target); the per-kind action
 // (melee swing vs. ranged standoff + projectile) branches in update_enemies. Flying
 // is a ranged variant that hovers above the ground (only reachable by jumping).
-enum class EnemyKind : uint8_t { Melee, Ranged, Flying, Flamethrower, Skeleton, Bat };
+enum class EnemyKind : uint8_t { Melee, Ranged, Flying, Flamethrower, Skeleton, Bat, Troll, Demon };
 
 inline constexpr float FLASH_TIME = 0.15f;   // red hit-flash duration (seconds)
 inline constexpr float KNOCK_DAMP = 9.0f;    // knockback velocity decay rate (1/s)
@@ -81,6 +81,8 @@ struct Projectile {
     float radius    = 0.35f;  // sphere size + hit radius (bigger for elite shots)
     bool  beam      = false;  // render as a stretched glowing laser (eye), not a sphere
     uint32_t owner_id = 0;    // the enemy that fired it (so its hits can be attributed -> taunts)
+    bool  explodes  = false;  // demon fireball: bursts on impact/expire for splash damage
+    float blast     = 0.0f;   // explosion radius (when explodes)
 };
 
 // The world's dynamic entities plus the sim's RNG seed. The RNG lives here (in

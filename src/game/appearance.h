@@ -54,6 +54,7 @@ struct Appearance {
     float   bone_torso = 1.0f;
     char    custom1[48] = {0};                   // player-written insults enemies occasionally use
     char    custom2[48] = {0};
+    uint8_t weapon_class = 0;                     // 0 = Sword (Knight), 1 = Staff (Wizard)
 };
 
 inline constexpr uint32_t APPEARANCE_MAGIC = 0xC0DEFACEu;
@@ -69,6 +70,7 @@ inline bool save_appearance(const Appearance& a, const char* path) {
     std::fwrite(bs, sizeof bs, 1, f);
     std::fwrite(a.custom1, sizeof a.custom1, 1, f);
     std::fwrite(a.custom2, sizeof a.custom2, 1, f);
+    std::fwrite(&a.weapon_class, 1, 1, f);
     std::fclose(f);
     return true;
 }
@@ -86,6 +88,7 @@ inline bool load_appearance(Appearance& a, const char* path) {
     std::fread(a.custom1, sizeof a.custom1, 1, f);   // custom insults are optional/newer
     std::fread(a.custom2, sizeof a.custom2, 1, f);
     a.custom1[sizeof a.custom1 - 1] = 0; a.custom2[sizeof a.custom2 - 1] = 0;   // ensure null-terminated
+    std::fread(&a.weapon_class, 1, 1, f);            // weapon class is optional/newer (default 0 = sword)
     std::fclose(f);
     return ok;
 }
