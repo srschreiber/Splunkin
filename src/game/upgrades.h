@@ -42,5 +42,8 @@ void apply_upgrade(dc::entity::Player& p, Upgrade u);
 // upgrades (autocast/orbit/nova/drone) only become eligible once their prerequisite
 // (an unlocked autocast, a free spell slot, an owned drone) is met.
 bool upgrade_eligible(const dc::entity::Player& p, Upgrade u);
+// Whether `u` is thematically appropriate for a class (weapon_class: 0=Knight/sword,
+// 1=Wizard/staff). Wizards don't roll sword-swing / melee-brand / sword-throw upgrades.
+bool upgrade_for_class(Upgrade u, uint8_t weapon_class);
 // Equipped elemental-brand bitmask (1=fire, 2=ice, 4=earth) — drives the sword particles.
 uint8_t elem_mask(float fire_dps, float ice_slow, float earth_knock);

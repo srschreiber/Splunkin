@@ -25,15 +25,21 @@ struct FlowField {
 // and enemies route around to a ramp to get up. With `heights == nullptr` the field is a
 // plain terrain-agnostic BFS (the original behavior).
 
-// BFS from (goal_col, goal_row) across Open cells.
-FlowField compute_flow(const Map& map, int goal_col, int goal_row,
-                       const std::vector<float>* heights = nullptr, float max_climb = 1e9f);
+// Optional per-tile EXTRA traversal cost (row-major width*height), added when an actor STANDS
+// on that tile — so high-cost tiles (e.g. river water) are routed around when a comparable dry
+// path exists, but still crossed when necessary. nullptr => uniform BFS; a grid => Dijkstra
+// over (1 + cost) weights, and `dist` then holds accumulated cost (flow_step follows either).
 
-// Multi-source BFS from several goal tiles at once (e.g. all players). Each cell's
-// distance is to the NEAREST goal, so enemies descending the gradient head for the
-// closest player automatically. `cols`/`rows` are parallel arrays of goal tiles.
+// BFS/Dijkstra from (goal_col, goal_row) across Open cells.
+FlowField compute_flow(const Map& map, int goal_col, int goal_row,
+                       const std::vector<float>* heights = nullptr, float max_climb = 1e9f,
+                       const std::vector<int>* cost = nullptr);
+
+// Multi-source from several goal tiles at once (e.g. all players). Each cell's distance is the
+// least cost to the NEAREST goal. `cols`/`rows` are parallel arrays of goal tiles.
 FlowField compute_flow_multi(const Map& map, const std::vector<int>& cols, const std::vector<int>& rows,
-                             const std::vector<float>* heights = nullptr, float max_climb = 1e9f);
+                             const std::vector<float>* heights = nullptr, float max_climb = 1e9f,
+                             const std::vector<int>* cost = nullptr);
 
 // Picks one neighbor of (col,row) whose distance is strictly lower (a step that
 // gets closer to the goal), chosen at RANDOM among the tied-best options so a

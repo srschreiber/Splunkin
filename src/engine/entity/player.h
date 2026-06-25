@@ -90,7 +90,9 @@ inline constexpr int ORBIT_COUNT_MAX = 8;   // max swords in the orbit ring
 // level costs progressively more kills. Base is ~3 early kills (a melee enemy is worth
 // ~10 XP), so the first level-up isn't instant.
 inline float xp_for_level(int level) {
-    return std::round(28.0f * std::pow(1.25f, static_cast<float>(level - 1)));
+    // Leveling is deliberately SLOW (you're already strong) — a higher base + steeper curve so
+    // level-ups feel earned, not constant.
+    return std::round(90.0f * std::pow(1.35f, static_cast<float>(level - 1)));
 }
 
 struct Player {

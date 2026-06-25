@@ -4,7 +4,7 @@ const UpgradeDef& upgrade_def(Upgrade u) {
     static const UpgradeDef defs[UPGRADE_COUNT] = {
         { "Conditioning", "Stamina costs -15% per stack.",                    IconShape::Boot,     0.20f, 0.85f, 0.30f },  // green
         { "Heavy Hitter", "+4 knockback per stack.",                          IconShape::Hammer,   0.90f, 0.80f, 0.15f },  // yellow
-        { "Whetstone",    "+25% melee damage per stack.",                     IconShape::Sword,    0.85f, 0.20f, 0.20f },  // red
+        { "Whetstone",    "+25% attack damage per stack.",                    IconShape::Sword,    0.85f, 0.20f, 0.20f },  // red
         { "Long Reach",   "Longer, wider swing and a bigger blade per stack.", IconShape::Crescent,0.25f, 0.50f, 1.00f },  // blue
         { "Adrenaline",   "All ability cooldowns -15% per stack.",            IconShape::Clock,    0.20f, 0.85f, 0.90f },  // cyan
         { "Lunge",        "Dodge dashes farther per stack.",                  IconShape::Arrow,    1.00f, 0.55f, 0.15f },  // orange
@@ -93,6 +93,27 @@ bool upgrade_eligible(const dc::entity::Player& p, Upgrade u) {
         case Upgrade::DroneRange:       return p.minion_count > 0;
         // Everything else (core melee/dodge/elemental) is always eligible.
         default:                        return true;
+    }
+}
+
+bool upgrade_for_class(Upgrade u, uint8_t weapon_class) {
+    if (weapon_class != 1) return true;   // Knight (sword): everything is fair game
+    // Wizard (staff): exclude the sword-swing / melee-on-hit / sword-throw upgrades. Its
+    // offense comes from staff bolts (scaled by Whetstone damage + Adrenaline cooldown +
+    // crit), plus the reskinned autocasts (orbiting orbs + a magic knockback wave).
+    switch (u) {
+        case Upgrade::SwingArc:    // Long Reach (sword swing arc/blade)
+        case Upgrade::Knockback:   // Heavy Hitter (melee shove)
+        case Upgrade::Fire:        // Ember Brand (melee-strike brand)
+        case Upgrade::Ice:         // Frost Brand
+        case Upgrade::Earth:       // Stone Brand
+        case Upgrade::OrbitSword:  // More Blades (+1 SWORD in the orbit)
+        case Upgrade::MultiThrow:  // Swordstorm (extra thrown SWORD)
+        case Upgrade::CritChance:  // Keen Edge — melee crit only (bolts don't crit)
+        case Upgrade::CritDamage:  // Deathblow — melee crit only
+            return false;
+        default:
+            return true;
     }
 }
 

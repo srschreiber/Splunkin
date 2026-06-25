@@ -81,17 +81,22 @@ float knock_amount(float attacker_kb, float target_weight) {
 // valid target. target_id is rewritten elsewhere (on hit / when a target leaves).
 int pick_target(const Entity& e, const std::vector<PlayerCombat>& players, float max_dist) {
     const float max_d2 = max_dist * max_dist;
-    int nearest = -1, committed = -1;
+    constexpr float BASE_LOCK_R2 = 9.0f * 9.0f;   // once INSIDE the base, commit to the core
+    int nearest = -1, committed = -1, base_lock = -1;
     float best = 1e30f;
     for (std::size_t i = 0; i < players.size(); ++i) {
         if (!players[i].alive) continue;
         const float dx = players[i].pos[0] - e.position[0];
         const float dz = players[i].pos[2] - e.position[2];
         const float d2 = dx * dx + dz * dz;
+        // The base CORE is the lone immovable (huge-weight) target. If we've reached it, lock
+        // on and ignore skirmishing mobs — a breached base gets wrecked, not defended around.
+        if (players[i].weight > 1e8f && d2 <= BASE_LOCK_R2) base_lock = static_cast<int>(i);
         if (d2 > max_d2) continue;                       // out of range -> unavailable
         if (players[i].id == e.target_id) committed = static_cast<int>(i);
         if (d2 < best) { best = d2; nearest = static_cast<int>(i); }
     }
+    if (base_lock >= 0) return base_lock;                // inside the base -> attack the core
     return committed >= 0 ? committed : nearest;
 }
 // Step one tick toward the target along its flow field (committing to a next cell so

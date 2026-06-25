@@ -29,6 +29,7 @@ enum class MsgType : uint8_t {
     BuyBaseArea = 22,   // client -> host: buy a buildable-area expansion (reliable)
     BuyTurret = 23,     // client -> host: buy one more perimeter turret (reliable)
     BuyUnlock = 24,     // client -> host: unlock a barracks mob type [uint8 type] (reliable)
+    RallyCmd = 25,      // client -> host: set/clear the mob rally point [uint8 active][float x][float z] (reliable)
 };
 
 // Client -> host: place/remove a base piece at a tile. For BuildRemove only col/row matter.
@@ -151,7 +152,7 @@ struct EnemyState {
 };
 
 // One friendly lane-mob's render state (host -> everyone): position, facing, health fraction.
-struct AllyState { float x = 0.0f, z = 0.0f, yaw = 0.0f; float health01 = 1.0f; uint8_t kind = 0; };
+struct AllyState { float x = 0.0f, z = 0.0f, yaw = 0.0f; float health01 = 1.0f; float size = 1.0f; uint8_t kind = 0; };
 
 // One dropped coin's position (render-only on clients).
 struct CoinState { float x = 0.0f, z = 0.0f; };

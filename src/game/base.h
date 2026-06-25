@@ -18,7 +18,7 @@ namespace dc::game {
 //  - Barracks:  periodically spawns a FRIENDLY mob (each spawn costs gold) that marches the
 //               lane to fight the enemy and attack their base.
 // Keep Count last.
-enum class BuildPiece : uint8_t { Barricade = 0, Landmine = 1, Turret = 2, Barracks = 3, Count = 4 };
+enum class BuildPiece : uint8_t { Barricade = 0, Landmine = 1, Turret = 2, Barracks = 3, Water = 4, Vacuum = 5, Count = 6 };
 
 // Gold cost of PLACING one piece (refund is half on removal).
 inline int piece_cost(BuildPiece p) {
@@ -27,6 +27,8 @@ inline int piece_cost(BuildPiece p) {
         case BuildPiece::Landmine:  return 20;
         case BuildPiece::Turret:    return 50;
         case BuildPiece::Barracks:  return 80;
+        case BuildPiece::Water:     return 25;
+        case BuildPiece::Vacuum:    return 120;
         default:                    return 15;
     }
 }
@@ -37,9 +39,16 @@ inline const char* piece_name(BuildPiece p) {
         case BuildPiece::Landmine:  return "Landmine";
         case BuildPiece::Turret:    return "Turret";
         case BuildPiece::Barracks:  return "Barracks";
+        case BuildPiece::Water:     return "Water";
+        case BuildPiece::Vacuum:    return "Vacuum";
         default:                    return "?";
     }
 }
+
+// Water pool slow: anyone standing in a water tile moves at this fraction of speed (and can't jump).
+inline constexpr float WATER_SLOW = 0.45f;
+// Vacuum: slowly drags coins + XP orbs toward the base core within its range.
+inline constexpr float VACUUM_PULL_SPEED = 5.5f;   // world units/sec the loot drifts toward the core
 
 // Friendly-mob (lane unit) shared tuning.
 inline constexpr int   ALLY_CAP       = 24;    // max friendly mobs alive at once (all barracks)
@@ -69,7 +78,7 @@ inline const MobType& mob_type(int i) {
         { "Grunt",     0,    100,  0, 3.0f,  90.0f, 18.0f, false },
         { "Soldier",   180,  250,  0, 4.0f, 190.0f, 34.0f, false },
         { "Brute",     450,  500,  0, 6.0f, 430.0f, 62.0f, false },
-        { "Scavenger", 250,  200,  0, 4.5f, 150.0f, 12.0f, true  },
+        { "Scavenger", 50,   100,  0, 4.5f, 150.0f, 12.0f, true  },
     };
     return T[(i < 0 || i >= MOB_TYPE_COUNT) ? 0 : i];
 }
