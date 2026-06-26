@@ -38,7 +38,7 @@ inline const char* const INSULT[] = {
     "asshole", "worm", "maggot", "coward", "fool", "peasant", "weakling", "idiot", "dog",
     "rat", "swine", "wretch", "halfwit", "milkdrinker", "bootlicker", "mouthbreather", "clown",
     "buffoon", "imbecile", "cretin", "louse", "toad", "gremlin", "knave", "dimwit", "nincompoop",
-    "dunce", "pissant", "scoundrel", "ninny", "lummox", "oaf", "frank stallone",
+    "dunce", "pissant", "scoundrel", "ninny", "lummox", "oaf", "frank stallone", "retard",
 };
 // Adjectives.
 inline const char* const ADJ[] = {
@@ -70,12 +70,15 @@ inline const char* const THREAT[] = {
 // Generate one randomized AMBIENT taunt, threading `seed`. Returns a fresh std::string.
 inline std::string taunt_generate(uint32_t& seed) {
     using namespace detail;
-    const int form = taunt_next(seed) % 17;
+    const int form = taunt_next(seed) % 19;
     const std::string V = taunt_pick(seed, VERB),  O = taunt_pick(seed, OBJECT);
+    const std::string V2 = taunt_pick(seed, VERB), O2 = taunt_pick(seed, OBJECT);
     const std::string I = taunt_pick(seed, INSULT), A = taunt_pick(seed, ADJ);
     const std::string A2 = taunt_pick(seed, ADJ),  C = taunt_pick(seed, CREATURE);
     const std::string T = taunt_pick(seed, THING), H = taunt_pick(seed, THREAT);
     switch (form) {
+        case 17: return V + " " + O + " and " + V2 + " " + O2 + "!";        // compound: "eat shit and choke on dirt!"
+        case 18: return V + " " + O + ", " + I + ", and " + V2 + " " + O2 + "!";
         case 0:  return V + " " + O + ", " + I + "!";
         case 1:  return "your mother is a " + C + "!";
         case 2:  return "you " + A + " " + I + "!";

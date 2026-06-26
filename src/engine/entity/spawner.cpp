@@ -28,13 +28,17 @@ void Spawner::update(float dt, EntityList& list, const dc::world::Map& map) {
                 // The leftover share becomes the melee role: a Skeleton if that model is
                 // enabled (skeleton_fraction > 0), otherwise the plain Melee enemy.
                 const EnemyKind melee_kind = skeleton_fraction > 0.0f ? EnemyKind::Skeleton : EnemyKind::Melee;
+                const float f4 = f3 + ranged_fraction + flame_fraction;
+                const float f5 = f4 + insulter_fraction;
                 const EnemyKind kind =
                       (roll < flying_fraction) ? EnemyKind::Flying
                     : (roll < f2) ? EnemyKind::Bat
                     : (roll < f2 + troll_fraction) ? EnemyKind::Troll
                     : (roll < f3) ? EnemyKind::Demon
                     : (roll < f3 + ranged_fraction) ? EnemyKind::Ranged
-                    : (roll < f3 + ranged_fraction + flame_fraction) ? EnemyKind::Flamethrower
+                    : (roll < f4) ? EnemyKind::Flamethrower
+                    : (roll < f5) ? EnemyKind::Insulter
+                    : (roll < f5 + slime_fraction) ? EnemyKind::Slime
                     : melee_kind;
                 const bool elite = rand01(rng) < elite_fraction;   // rare golden bruiser (any kind)
                 Entity& e = list.spawn_enemy(x, z, kind, elite);

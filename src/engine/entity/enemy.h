@@ -51,8 +51,27 @@ inline float enemy_xp(EnemyKind kind) {
         case EnemyKind::Bat:          return 14.0f;   // flying nuisance
         case EnemyKind::Troll:        return 60.0f;   // big tanky bruiser
         case EnemyKind::Demon:        return 70.0f;   // big fireball caster
+        case EnemyKind::Insulter:     return 35.0f;   // support: weakens your attacks
+        case EnemyKind::Slime:        return 30.0f;   // tanky support: leaves slowing slime
         case EnemyKind::Melee:
         default:                      return 10.0f;
+    }
+}
+
+// Gold dropped (total coin value) per enemy by RANK — tougher/higher units pay out more.
+// Minimum drop is 5 (the basic grunt). Elites multiply this in update_enemies.
+inline float enemy_gold(EnemyKind kind) {
+    switch (kind) {
+        case EnemyKind::Ranged:       return 9.0f;    // wizard
+        case EnemyKind::Flying:       return 8.0f;
+        case EnemyKind::Bat:          return 6.0f;
+        case EnemyKind::Flamethrower: return 14.0f;   // gnome bruiser
+        case EnemyKind::Insulter:     return 16.0f;   // support pest
+        case EnemyKind::Troll:        return 35.0f;
+        case EnemyKind::Demon:        return 45.0f;
+        case EnemyKind::Skeleton:
+        case EnemyKind::Melee:
+        default:                      return 5.0f;    // grunt: the floor
     }
 }
 
@@ -165,6 +184,7 @@ struct PlayerCombat {
     float slow_factor   = 1.0f;  // ice: movement multiplier applied on hit (1 = no ice)
     float slow_duration = 0.0f;
     float earth_knock   = 0.0f;  // earth: extra knockback added on hit
+    bool  taunt = false;         // a Bill/insulter: nearby enemies are goaded into attacking THIS target
 };
 
 inline constexpr float BURN_INTERVAL = 0.5f;   // burn deals damage (+ a number) this often
@@ -214,7 +234,9 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     std::vector<float>* deaths = nullptr,
                     std::vector<HitNumber>* hits = nullptr,
                     const std::vector<float>* tile_heights = nullptr,
-                    std::vector<float>* death_xp = nullptr);   // parallel to `deaths`: XP per kill
+                    std::vector<float>* death_xp = nullptr,    // parallel to `deaths`: XP per kill
+                    std::vector<float>* death_gold = nullptr, // parallel to `deaths`: gold per kill
+                    float global_speed_mult = 1.0f);           // enemy CAVALRY: speeds the whole ground horde
 
 // Advance in-flight projectiles (host-authoritative): move, expire by lifetime, die
 // on walls, and on reaching a LIVING player deal damage + knockback into out[i]

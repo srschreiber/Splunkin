@@ -28,6 +28,14 @@ Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind, bool elite) {
     } else if (kind == EnemyKind::Demon) {
         e.stats = { DEMON_MAX_HEALTH, DEMON_DAMAGE, DEMON_KNOCKBACK, DEMON_WEIGHT };
         e.health = e.stats.max_health;
+    } else if (kind == EnemyKind::Insulter) {
+        // A support unit: tanky-ish, barely hits, but its AURA weakens your team's attacks.
+        e.stats = { 220.0f, 4.0f, 6.0f, ENEMY_WEIGHT };
+        e.health = e.stats.max_health;
+    } else if (kind == EnemyKind::Slime) {
+        // Very tanky, deals NO damage; its threat is the slowing slime it leaves behind.
+        e.stats = { 600.0f, 0.0f, 2.0f, ENEMY_WEIGHT * 2.0f };
+        e.health = e.stats.max_health;
     }
     if (elite) {
         e.elite = true;
@@ -82,8 +90,8 @@ float knock_amount(float attacker_kb, float target_weight) {
 int pick_target(const Entity& e, const std::vector<PlayerCombat>& players, float max_dist) {
     const float max_d2 = max_dist * max_dist;
     constexpr float BASE_LOCK_R2 = 9.0f * 9.0f;   // once INSIDE the base, commit to the core
-    int nearest = -1, committed = -1, base_lock = -1;
-    float best = 1e30f;
+    int nearest = -1, committed = -1, base_lock = -1, taunter = -1;
+    float best = 1e30f, best_taunt = 1e30f;
     for (std::size_t i = 0; i < players.size(); ++i) {
         if (!players[i].alive) continue;
         const float dx = players[i].pos[0] - e.position[0];
@@ -95,8 +103,11 @@ int pick_target(const Entity& e, const std::vector<PlayerCombat>& players, float
         if (d2 > max_d2) continue;                       // out of range -> unavailable
         if (players[i].id == e.target_id) committed = static_cast<int>(i);
         if (d2 < best) { best = d2; nearest = static_cast<int>(i); }
+        // A taunting Bill in range yanks aggro off everything else (it's just THAT insulting).
+        if (players[i].taunt && d2 < best_taunt) { best_taunt = d2; taunter = static_cast<int>(i); }
     }
     if (base_lock >= 0) return base_lock;                // inside the base -> attack the core
+    if (taunter >= 0)   return taunter;                  // goaded into chasing the nearest insulter
     return committed >= 0 ? committed : nearest;
 }
 // Step one tick toward the target along its flow field (committing to a next cell so
@@ -133,7 +144,8 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                     const std::vector<dc::world::FlowField>& flows, const std::vector<PlayerCombat>& players,
                     std::vector<EnemyHitPlayer>& out, float dt,
                     std::vector<float>* deaths, std::vector<HitNumber>* hits,
-                    const std::vector<float>* tile_heights, std::vector<float>* death_xp) {
+                    const std::vector<float>* tile_heights, std::vector<float>* death_xp,
+                    std::vector<float>* death_gold, float global_speed_mult) {
     out.assign(players.size(), EnemyHitPlayer{});
     // Frontal-shield block pool (same model as projectiles): a blocking player spends
     // block_rate stamina per point of melee-forcefield damage to negate it, drawn down
@@ -244,7 +256,21 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
         const float dist = std::sqrt(tdx * tdx + tdz * tdz);
         if (!e.attacking && dist > 1e-4f) e.yaw = std::atan2(tdz, tdx);   // track, commit during a melee swing
         const dc::world::FlowField& flow = flows[ti];
-        const float move_mult = (e.slow_time > 0.0f) ? e.slow_factor : 1.0f;   // ice slow
+        const float move_mult = ((e.slow_time > 0.0f) ? e.slow_factor : 1.0f) * global_speed_mult;   // ice slow × enemy cavalry
+
+        // --- SLIME: deals NO damage; oozes toward the target while STRAFING side to side
+        // (left for a bit, right for a bit) so it smears a wide slime trail. ---
+        if (e.kind == EnemyKind::Slime) {
+            e.attack_time += dt;                                  // strafe phase clock
+            flow_advance(e, map, flow, list.rng, tgt.pos[0], tgt.pos[2], dt, move_mult * 0.65f, tile_heights, ENEMY_MAX_CLIMB);
+            const float sweep = std::sin(e.attack_time * 1.1f);   // -1..1
+            const float perpx = -std::sin(e.yaw), perpz = std::cos(e.yaw);
+            const float sstep = sweep * 1.6f * dt;
+            const float npx = e.position[0] + perpx * sstep, npz = e.position[2] + perpz * sstep;
+            if (!dc::world::circle_hits_solid(map, npx, e.position[2], ENEMY_RADIUS)) e.position[0] = npx;
+            if (!dc::world::circle_hits_solid(map, e.position[0], npz, ENEMY_RADIUS)) e.position[2] = npz;
+            continue;
+        }
 
         if (ranged) {
             // Flying is a ranged variant: longer range, hovers (position[1] untouched
@@ -463,6 +489,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 deaths->push_back(list.items[i].position[2]);
             }
             if (death_xp) death_xp->push_back(enemy_xp(list.items[i].kind) * (list.items[i].elite ? 4.0f : 1.0f));
+            if (death_gold) death_gold->push_back(enemy_gold(list.items[i].kind) * (list.items[i].elite ? 3.0f : 1.0f));
             list.items[i] = list.items.back();
             list.items.pop_back();
         } else ++i;

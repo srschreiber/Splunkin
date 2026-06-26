@@ -1,0 +1,28 @@
+# dungeoncrawl session log. SNAP every 5s; BUY = enemy AI purchase.
+# our$ = our shared gold; ourRate = gold/s we DROP on the ground; eGold/eRate = enemy bank/income.
+# eBoat/eSub/eMine/eTurret/eSpd = enemy forces; pBoat/pSub/pMount = ours the AI sees; core/eCore = base HP.
+[t=   0.0 d=1] BUY Ranged   $35   (score 3.1, $55 left)  pSub=0 pBoat=0 front=0.00
+[t=   0.0 d=1] SNAP our$=400 ourRate=1.0/s | eGold=55 eRate=2.7/s troops=0/7 eBoat=0 eSub=0 eMine=0 eTurret=1 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=0 front=0.00 core=2000 eCore=2000 want=-
+[t=   5.0 d=1] SNAP our$=400 ourRate=0.1/s | eGold=65 eRate=1.7/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=1 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=4 front=0.09 core=2000 eCore=2000 want=Cavalry
+[t=  10.0 d=1] SNAP our$=400 ourRate=0.0/s | eGold=73 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=1 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=8 front=0.19 core=2000 eCore=2000 want=Cavalry
+[t=  15.0 d=1] SNAP our$=400 ourRate=0.0/s | eGold=80 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=1 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=10 front=0.28 core=2000 eCore=2000 want=Cavalry
+[t=  20.0 d=1] SNAP our$=400 ourRate=0.0/s | eGold=88 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=1 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=14 front=0.38 core=2000 eCore=2000 want=Cavalry
+[t=  25.0 d=1] SNAP our$=400 ourRate=0.0/s | eGold=95 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=1 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=16 front=0.43 core=2000 eCore=2000 want=Cavalry
+[t=  30.1 d=1] SNAP our$=400 ourRate=0.0/s | eGold=103 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=1 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=20 front=0.40 core=2000 eCore=2000 want=Cavalry
+[t=  35.1 d=1] SNAP our$=400 ourRate=0.0/s | eGold=110 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=2 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.40 core=2000 eCore=2000 want=Cavalry
+[t=  40.1 d=1] SNAP our$=400 ourRate=0.0/s | eGold=118 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=2 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.40 core=2000 eCore=2000 want=Cavalry
+[t=  45.1 d=1] SNAP our$=0 ourRate=0.0/s | eGold=125 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=2 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.40 core=2000 eCore=2000 want=Cavalry
+[t=  50.1 d=1] SNAP our$=0 ourRate=0.0/s | eGold=133 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=2 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.40 core=2000 eCore=2000 want=Cavalry
+[t=  55.2 d=1] SNAP our$=0 ourRate=0.0/s | eGold=140 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=2 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.35 core=2000 eCore=2000 want=Cavalry
+[t=  60.2 d=1] SNAP our$=0 ourRate=0.0/s | eGold=148 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=2 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.27 core=2000 eCore=2000 want=Cavalry
+[t=  65.2 d=1] SNAP our$=0 ourRate=0.0/s | eGold=155 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=2 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.25 core=2000 eCore=2000 want=Cavalry
+[t=  70.2 d=1] SNAP our$=0 ourRate=0.0/s | eGold=163 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=3 eSpd=1.00 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.35 core=2000 eCore=2000 want=Cavalry
+[t=  74.4 d=1] BUY Cavalry  $170  (score 6.9, $0 left)  pSub=0 pBoat=0 front=0.34
+[t=  75.2 d=1] SNAP our$=9 ourRate=2.2/s | eGold=5 eRate=4.1/s troops=0/7 eBoat=0 eSub=0 eMine=0 eTurret=3 eSpd=1.18 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.35 core=2000 eCore=2000 want=Grunt
+[t=  80.1 d=1] BUY Grunt    $18   (score 3.6, $0 left)  pSub=0 pBoat=0 front=0.63
+[t=  80.3 d=1] SNAP our$=9 ourRate=0.3/s | eGold=0 eRate=1.8/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=3 eSpd=1.18 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.64 core=2000 eCore=2000 want=-
+[t=  85.3 d=1] SNAP our$=9 ourRate=0.0/s | eGold=8 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=3 eSpd=1.18 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.81 core=2000 eCore=2000 want=Grunt
+[t=  90.3 d=1] SNAP our$=9 ourRate=0.0/s | eGold=16 eRate=1.5/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=3 eSpd=1.18 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.82 core=2000 eCore=2000 want=Grunt
+[t=  91.4 d=1] BUY Grunt    $18   (score 3.1, $0 left)  pSub=0 pBoat=0 front=0.82
+[t=  95.3 d=1] SNAP our$=13 ourRate=1.2/s | eGold=9 eRate=2.9/s troops=1/7 eBoat=0 eSub=0 eMine=0 eTurret=3 eSpd=1.18 | pBoat=0 pSub=0 ourSpd=1.00 allies=24 front=0.93 core=2000 eCore=2000 want=Ranged
+[t=  96.7 d=1] >>> LOSS: party wiped <<<

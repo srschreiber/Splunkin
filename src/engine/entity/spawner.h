@@ -20,6 +20,8 @@ struct Spawner {
     float    bat_fraction      = 0.0f;        // chance each spawn is a (flying) bat
     float    troll_fraction    = 0.0f;        // chance each spawn is a (rare) big troll
     float    demon_fraction    = 0.0f;        // chance each spawn is a (rare) big demon
+    float    insulter_fraction = 0.0f;        // chance each spawn is an Insulter (attack-weakening aura)
+    float    slime_fraction    = 0.0f;        // chance each spawn is a Slime (leaves slowing trails)
     float    elite_fraction  = 0.0f;          // chance each spawn rolls into a rare elite (any kind)
     float    stat_mult = 1.0f;                // escalation: scales each spawn's HP + damage over time
     float    accum     = 0.0f;                // fractional spawns owed

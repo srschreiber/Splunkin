@@ -18,7 +18,7 @@ namespace dc::game {
 //  - Barracks:  periodically spawns a FRIENDLY mob (each spawn costs gold) that marches the
 //               lane to fight the enemy and attack their base.
 // Keep Count last.
-enum class BuildPiece : uint8_t { Barricade = 0, Landmine = 1, Turret = 2, Barracks = 3, Water = 4, Vacuum = 5, Count = 6 };
+enum class BuildPiece : uint8_t { Barricade = 0, Landmine = 1, Turret = 2, Barracks = 3, Water = 4, Vacuum = 5, SubPen = 6, Shipyard = 7, Count = 8 };
 
 // Gold cost of PLACING one piece (refund is half on removal).
 inline int piece_cost(BuildPiece p) {
@@ -29,6 +29,8 @@ inline int piece_cost(BuildPiece p) {
         case BuildPiece::Barracks:  return 80;
         case BuildPiece::Water:     return 25;
         case BuildPiece::Vacuum:    return 120;
+        case BuildPiece::SubPen:    return 200;
+        case BuildPiece::Shipyard:  return 220;
         default:                    return 15;
     }
 }
@@ -41,9 +43,22 @@ inline const char* piece_name(BuildPiece p) {
         case BuildPiece::Barracks:  return "Barracks";
         case BuildPiece::Water:     return "Water";
         case BuildPiece::Vacuum:    return "Vacuum";
+        case BuildPiece::SubPen:    return "Sub Pen";
+        case BuildPiece::Shipyard:  return "Shipyard";
         default:                    return "?";
     }
 }
+
+// Submarine tuning. A friendly sub hunts enemy boats: it travels SUBMERGED (a periscope —
+// invulnerable, can't be targeted) until in range, then SURFACES briefly to fire, then dives.
+// The only counter to a sub is a landmine (or, conceptually, an enemy sub).
+inline constexpr float SUBPEN_INTERVAL = 18.0f;   // seconds between sub launches per pen
+inline constexpr int   SUB_CAP         = 6;       // max friendly subs at once
+inline constexpr float SUB_SPEED       = 3.0f;
+inline constexpr float SUB_RANGE       = 14.0f;   // surfaces + fires within this of a boat
+inline constexpr float SUB_FIRE_CD     = 2.2f;
+inline constexpr float SUB_DAMAGE      = 90.0f;
+inline constexpr float SUB_MAX_HP      = 320.0f;  // a sub is only vulnerable while SURFACED (submerged = untouchable)
 
 // Water pool slow: anyone standing in a water tile moves at this fraction of speed (and can't jump).
 inline constexpr float WATER_SLOW = 0.45f;
@@ -61,24 +76,37 @@ inline constexpr float ALLY_AGGRO     = 16.0f; // engages enemies within this ra
 // type once (unlock_cost), pay place_cost to build a barracks of it, and it then spawns its mob
 // every `interval` seconds for `spawn_cost` gold each. The Scavenger doesn't fight the lane —
 // it roams collecting dropped coins into the shared pool (with decent HP for self-defense).
+// Visual/behaviour class of a friendly mob — mirrors the enemy roster.
+enum class MobVisual : uint8_t { Ground = 0, Scavenger = 1, Flier = 2, Bat = 3, Demon = 4, Mage = 5, Insulter = 6, Knight = 7 };
 struct MobType {
     const char* name;
     int   unlock_cost;   // one-time gold to unlock this barracks type (0 = free from the start)
     int   place_cost;    // gold to build one barracks of this type
-    int   spawn_cost;    // gold per mob spawned
+    int   spawn_cost;    // gold per mob spawned (0 now — barracks spawn free)
     float interval;      // seconds between spawns
     float hp, damage;
+    float reach;         // engage/strike range (big for ranged mage/flier so they zap from afar)
     bool  scavenger;     // true: collects coins instead of pushing the lane
+    MobVisual visual;    // which model + behaviour
+    bool  flies;         // hovers + ignores ground (fliers, bats)
+    float speed;         // movement multiplier vs ALLY_SPEED (the Mounted Knight is heavy + slow)
 };
-inline constexpr int MOB_TYPE_COUNT = 4;
+inline constexpr int MOB_TYPE_COUNT = 9;
 inline const MobType& mob_type(int i) {
     // Barracks are a one-time PURCHASE (place_cost) that then spawn their mob for FREE on a
-    // timer — so spawn_cost is 0 and stronger types cost more to buy.
+    // timer. The roster MIRRORS the enemy types (grunt=skeleton, mage=ranged caster, bat,
+    // flier=eye, demon, bill=insulter with a friendly attack-weakening aura), plus the top-tier
+    // MOUNTED KNIGHT (a single horse+rider model: very tanky, hits hard, but heavy and slow).
     static const MobType T[MOB_TYPE_COUNT] = {
-        { "Grunt",     0,    100,  0, 3.0f,  90.0f, 18.0f, false },
-        { "Soldier",   180,  250,  0, 4.0f, 190.0f, 34.0f, false },
-        { "Brute",     450,  500,  0, 6.0f, 430.0f, 62.0f, false },
-        { "Scavenger", 50,   100,  0, 4.5f, 150.0f, 12.0f, true  },
+        { "Grunt",     0,    100,  0, 3.0f,  90.0f, 18.0f, 2.0f, false, MobVisual::Ground,    false, 1.00f },
+        { "Mage",      150,  150,  0, 4.0f, 110.0f, 26.0f, 9.0f, false, MobVisual::Mage,      false, 1.00f },
+        { "Brute",     250,  250,  0, 6.0f, 430.0f, 62.0f, 2.2f, false, MobVisual::Ground,    false, 0.90f },
+        { "Bat",       80,   60,   0, 3.0f,  55.0f, 12.0f, 2.0f, false, MobVisual::Bat,       true,  1.20f },
+        { "Flier",     120,  90,   0, 4.0f,  70.0f, 16.0f, 9.0f, false, MobVisual::Flier,     true,  1.10f },
+        { "Demon",     500,  500,  0, 8.0f, 800.0f, 80.0f, 9.0f, false, MobVisual::Demon,     false, 1.00f },
+        { "Bill",      200,  200,  0, 11.0f, 1200.0f, 4.0f, 2.0f, false, MobVisual::Insulter,  false, 1.00f },
+        { "Scavenger", 50,   100,  0, 4.5f, 150.0f, 12.0f, 2.0f, true,  MobVisual::Scavenger, false, 1.00f },
+        { "Knight",    700,  700,  0, 12.0f, 1600.0f, 90.0f, 2.6f, false, MobVisual::Knight,   false, 0.55f },
     };
     return T[(i < 0 || i >= MOB_TYPE_COUNT) ? 0 : i];
 }

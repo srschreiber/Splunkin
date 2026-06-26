@@ -30,6 +30,7 @@ enum class MsgType : uint8_t {
     BuyTurret = 23,     // client -> host: buy one more perimeter turret (reliable)
     BuyUnlock = 24,     // client -> host: unlock a barracks mob type [uint8 type] (reliable)
     RallyCmd = 25,      // client -> host: set/clear the mob rally point [uint8 active][float x][float z] (reliable)
+    HoldCmd = 26,       // client -> host: set a mob TYPE's command-map hold [uint8 type][uint8 active][float x] (reliable)
 };
 
 // Client -> host: place/remove a base piece at a tile. For BuildRemove only col/row matter.
@@ -85,6 +86,7 @@ struct InputCmd {
     float   forward = 0.0f, strafe = 0.0f;
     float   yaw = 0.0f, pitch = 0.0f;
     uint8_t jump = 0;
+    uint8_t board = 0;         // edge: client wants to board/dismount a nearby friendly boat this frame
     uint8_t strike = 0;        // melee connected this frame (host resolves damage)
     uint8_t blocking = 0;      // shield fully raised (host mitigates)
     uint8_t anim_punch = 0;    // mid-swing (drives the punch clip)
@@ -153,6 +155,17 @@ struct EnemyState {
 
 // One friendly lane-mob's render state (host -> everyone): position, facing, health fraction.
 struct AllyState { float x = 0.0f, z = 0.0f, yaw = 0.0f; float health01 = 1.0f; float size = 1.0f; uint8_t kind = 0; };
+
+// One naval unit's render state (host -> everyone). `kind`: 0 = enemy boat, 1 = friendly sub
+// (submerged periscope), 2 = friendly sub surfaced, 4 = friendly warship, 5/6 = enemy sub
+// submerged/surfaced. `health01` drives the over-hull bar.
+struct BoatState { float x = 0.0f, z = 0.0f, yaw = 0.0f; float health01 = 1.0f; uint8_t kind = 0; };
+
+// One enemy SEA-MINE bobbing in the river (host -> everyone): position + arm fraction (0=dropping,1=armed).
+struct MineState { float x = 0.0f, z = 0.0f, armed = 1.0f; };
+
+// One slime puddle on the ground (host -> everyone): position, radius, remaining-life fraction.
+struct SlimePatchState { float x = 0.0f, z = 0.0f, radius = 1.0f, life01 = 1.0f; };
 
 // One dropped coin's position (render-only on clients).
 struct CoinState { float x = 0.0f, z = 0.0f; };
