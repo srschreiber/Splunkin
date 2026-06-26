@@ -31,6 +31,7 @@ enum class MsgType : uint8_t {
     BuyUnlock = 24,     // client -> host: unlock a barracks mob type [uint8 type] (reliable)
     RallyCmd = 25,      // client -> host: set/clear the mob rally point [uint8 active][float x][float z] (reliable)
     HoldCmd = 26,       // client -> host: set a mob TYPE's command-map hold [uint8 type][uint8 active][float x] (reliable)
+    BuyBarracksUp = 27, // client -> host: upgrade a barracks' troops [uint8 stat][uint8 col][uint8 row] (reliable)
 };
 
 // Client -> host: place/remove a base piece at a tile. For BuildRemove only col/row matter.
@@ -154,15 +155,15 @@ struct EnemyState {
 };
 
 // One friendly lane-mob's render state (host -> everyone): position, facing, health fraction.
-struct AllyState { float x = 0.0f, z = 0.0f, yaw = 0.0f; float health01 = 1.0f; float size = 1.0f; uint8_t kind = 0; };
+struct AllyState { float x = 0.0f, z = 0.0f, yaw = 0.0f; float health01 = 1.0f; float size = 1.0f; uint8_t kind = 0; float atk = 0.0f; uint8_t up = 0; };
 
 // One naval unit's render state (host -> everyone). `kind`: 0 = enemy boat, 1 = friendly sub
 // (submerged periscope), 2 = friendly sub surfaced, 4 = friendly warship, 5/6 = enemy sub
 // submerged/surfaced. `health01` drives the over-hull bar.
 struct BoatState { float x = 0.0f, z = 0.0f, yaw = 0.0f; float health01 = 1.0f; uint8_t kind = 0; };
 
-// One enemy SEA-MINE bobbing in the river (host -> everyone): position + arm fraction (0=dropping,1=armed).
-struct MineState { float x = 0.0f, z = 0.0f, armed = 1.0f; };
+// One SEA-MINE bobbing in the river (host -> everyone): position, arm fraction (0=dropping,1=armed), team.
+struct MineState { float x = 0.0f, z = 0.0f, armed = 1.0f; uint8_t team = 0; };
 
 // One slime puddle on the ground (host -> everyone): position, radius, remaining-life fraction.
 struct SlimePatchState { float x = 0.0f, z = 0.0f, radius = 1.0f, life01 = 1.0f; };

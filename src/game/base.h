@@ -60,6 +60,18 @@ inline constexpr float SUB_FIRE_CD     = 2.2f;
 inline constexpr float SUB_DAMAGE      = 90.0f;
 inline constexpr float SUB_MAX_HP      = 320.0f;  // a sub is only vulnerable while SURFACED (submerged = untouchable)
 
+// Naval support ships (the only source of SEA MINES now). A MINELAYER wanders the river dropping
+// mines that blow up the OTHER team's warships (enough of them grind down a battleship). A
+// MINESWEEPER is a cheap kamikaze rowboat that drives into the enemy's mines to clear them.
+inline constexpr float MINELAYER_HP        = 600.0f;
+inline constexpr float MINELAYER_SPEED     = 2.2f;
+inline constexpr float MINELAYER_DROP_CD   = 6.0f;    // seconds between mines laid
+inline constexpr int   MINE_CAP_PER_TEAM   = 18;      // a team's mines stop arming past this
+inline constexpr float MINE_DAMAGE         = 900.0f;  // per mine — warships have ~7000 HP, so it takes several
+inline constexpr float MINE_BLAST_R        = 3.2f;
+inline constexpr float MINESWEEPER_HP      = 140.0f;  // glass: it's meant to die ON a mine
+inline constexpr float MINESWEEPER_SPEED   = 3.2f;    // fast little rowboat
+
 // Water pool slow: anyone standing in a water tile moves at this fraction of speed (and can't jump).
 inline constexpr float WATER_SLOW = 0.45f;
 // Vacuum: slowly drags coins + XP orbs toward the base core within its range.
@@ -106,7 +118,7 @@ inline const MobType& mob_type(int i) {
         { "Demon",     500,  500,  0, 8.0f, 800.0f, 80.0f, 9.0f, false, MobVisual::Demon,     false, 1.00f },
         { "Bill",      200,  200,  0, 11.0f, 1200.0f, 4.0f, 2.0f, false, MobVisual::Insulter,  false, 1.00f },
         { "Scavenger", 50,   100,  0, 4.5f, 150.0f, 12.0f, 2.0f, true,  MobVisual::Scavenger, false, 1.00f },
-        { "Knight",    700,  700,  0, 12.0f, 1600.0f, 90.0f, 2.6f, false, MobVisual::Knight,   false, 0.55f },
+        { "Knight",    700,  700,  0, 10.0f, 1600.0f, 90.0f, 2.8f, false, MobVisual::Knight,   false, 0.72f },
     };
     return T[(i < 0 || i >= MOB_TYPE_COUNT) ? 0 : i];
 }
@@ -122,11 +134,24 @@ inline constexpr float LANDMINE_DAMAGE    = 220.0f;  // explosion damage at cent
 inline constexpr float LANDMINE_KNOCK     = 30.0f;   // explosion knockback
 
 // One placed piece, snapped to a tile. rot is 0..3 (×90° about Y).
+// For a BARRACKS, `up[]` holds per-stat upgrade LEVELS that buff only this barracks' troops:
+// up[0]=HP, up[1]=DEF, up[2]=SPEED, up[3]=SPAWN-RATE.
 struct BasePiece {
     int16_t col = 0, row = 0;
     uint8_t piece = 0;   // BuildPiece
-    uint8_t rot = 0;     // 0..3
+    uint8_t rot = 0;     // 0..3 (or, for a barracks, the mob TYPE; for a shipyard, the boat type)
+    uint8_t up[4] = {0,0,0,0};   // barracks upgrade levels: HP / DEF / SPEED / RATE
 };
+
+// Barracks upgrades: each stat can be bought up to this many times; cost scales with the level.
+inline constexpr int   BARRACKS_UP_MAX = 5;
+inline int   barracks_upgrade_cost(int stat_level) { return 60 + stat_level * 50; }   // 60,110,160,...
+inline float barracks_hp_mult(int lvl)   { return 1.0f + 0.30f * lvl; }   // +30% HP per level
+inline float barracks_def_mult(int lvl)  { float m = 1.0f; for (int i=0;i<lvl;++i) m *= 0.85f; return m; }  // damage TAKEN ×0.85^lvl
+inline float barracks_spd_mult(int lvl)  { return 1.0f + 0.15f * lvl; }   // +15% move speed per level
+inline float barracks_rate_mult(int lvl) { return 1.0f + 0.22f * lvl; }   // spawns this much faster per level
+inline int   barracks_up_total(const BasePiece& p) { return p.up[0]+p.up[1]+p.up[2]+p.up[3]; }
+inline constexpr int BARRACKS_CAP_BASE = 5;   // base barracks capacity (grows with area expansions)
 
 // Buildable-area growth + the cost curve for buying more area (turrets are bought by simply
 // placing turret pieces, priced via piece_cost).
@@ -140,13 +165,18 @@ inline int base_area_cost(float radius) {
     return 60 + steps * 40;   // 60, 100, 140, ...
 }
 
+// How many BARRACKS the base can hold: 5, +1 for each buildable-area expansion bought.
+inline int barracks_capacity(float radius) {
+    return BARRACKS_CAP_BASE + static_cast<int>((radius - BASE_AREA_START) / BASE_AREA_STEP + 0.5f);
+}
+
 // The whole persisted base: buildable radius + every placed piece (turrets included).
 struct BaseSave {
     float                  build_radius = BASE_AREA_START;
     std::vector<BasePiece> pieces;
 };
 
-inline constexpr uint32_t BASE_MAGIC = 0xB0A5E002u;
+inline constexpr uint32_t BASE_MAGIC = 0xB0A5E003u;   // bumped: BasePiece now carries barracks upgrades
 
 inline bool save_base(const BaseSave& b, const char* path) {
     std::FILE* f = std::fopen(path, "wb");
