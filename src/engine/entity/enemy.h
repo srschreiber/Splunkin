@@ -61,17 +61,17 @@ inline float enemy_xp(EnemyKind kind) {
 // Gold dropped (total coin value) per enemy by RANK — tougher/higher units pay out more.
 // Minimum drop is 5 (the basic grunt). Elites multiply this in update_enemies.
 inline float enemy_gold(EnemyKind kind) {
-    switch (kind) {
-        case EnemyKind::Ranged:       return 5.0f;    // wizard
-        case EnemyKind::Flying:       return 4.0f;
-        case EnemyKind::Bat:          return 3.0f;
-        case EnemyKind::Flamethrower: return 8.0f;    // gnome bruiser
-        case EnemyKind::Insulter:     return 9.0f;    // support pest
-        case EnemyKind::Troll:        return 18.0f;
-        case EnemyKind::Demon:        return 24.0f;
+    switch (kind) {                                    // ~35% richer than before -> better player cash flow
+        case EnemyKind::Ranged:       return 7.0f;    // wizard
+        case EnemyKind::Flying:       return 6.0f;
+        case EnemyKind::Bat:          return 4.0f;
+        case EnemyKind::Flamethrower: return 11.0f;   // gnome bruiser
+        case EnemyKind::Insulter:     return 12.0f;   // support pest
+        case EnemyKind::Troll:        return 24.0f;
+        case EnemyKind::Demon:        return 32.0f;
         case EnemyKind::Skeleton:
         case EnemyKind::Melee:
-        default:                      return 3.0f;    // grunt: the floor
+        default:                      return 4.0f;    // grunt: the floor
     }
 }
 

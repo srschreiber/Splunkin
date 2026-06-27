@@ -43,22 +43,63 @@
 // Number of TTS voices currently speaking (caps how many taunts talk over each other).
 static std::atomic<int> g_tts_active{0};
 
-// Speak `text` aloud via the platform's text-to-speech, off-thread so it never blocks the
-// frame. Capped + best-effort: if the OS command is missing it just stays silent.
+// Speak `text` aloud via text-to-speech, off-thread so it never blocks the frame. Capped +
+// best-effort: if no engine is available it just stays silent.
+//
+// PIPER neural TTS (https://github.com/OHF-Voice/piper1-gpl) is used when configured — set
+// DUNGEON_PIPER_MODEL to a downloaded voice .onnx (and optionally DUNGEON_PIPER_BIN if `piper`
+// isn't on PATH). It synthesizes a wav and plays it (afplay/aplay/ffplay). Otherwise we fall
+// back to the OS voice (say / espeak / SAPI).
+static std::atomic<unsigned> g_tts_seq{0};
 static void speak_async(const std::string& text) {
     if (g_tts_active.load() >= 2) return;            // at most two voices at once
     g_tts_active.fetch_add(1);
-    std::thread([text]() {
+    const unsigned seq = g_tts_seq.fetch_add(1);
+    std::thread([text, seq]() {
+        // Strip shell-significant characters so the text can't break out of the command.
+        std::string safe; safe.reserve(text.size());
+        for (char c : text) if (c != '"' && c != '\\' && c != '`' && c != '$' && c != '\n' && c != '\r') safe += c;
+
         std::string cmd;
+        // Voice model: $DUNGEON_PIPER_MODEL, else a model dropped at assets/piper/voice.onnx.
+        std::string model;
+        if (const char* pm = std::getenv("DUNGEON_PIPER_MODEL"); pm && *pm) model = pm;
+        else { std::ifstream f("assets/piper/voice.onnx"); if (f.good()) model = "assets/piper/voice.onnx"; }
+        if (!model.empty()) {
+            // Resolve the piper binary: $DUNGEON_PIPER_BIN, else ~/.local/bin/piper (pipx/pip --user
+            // install location), else bare "piper" off PATH.
+            std::string bin = "piper";
+            if (const char* pb = std::getenv("DUNGEON_PIPER_BIN"); pb && *pb) bin = pb;
+            else if (const char* home = std::getenv("HOME"); home) {
+                std::string local = std::string(home) + "/.local/bin/piper";
+                std::ifstream pf(local); if (pf.good()) bin = local;
+            }
 #if defined(__APPLE__)
-        cmd = "say -v Alex -r 210 \"" + text + "\"";   // Alex = classic male voice, a touch faster
+            // macOS has no simple raw-PCM player, so synth to a unique wav then afplay it.
+            const std::string wav = "/tmp/dc_tts_" + std::to_string(seq) + ".wav";
+            cmd = "printf '%s' \"" + safe + "\" | " + bin + " --model \"" + model + "\" --output_file " + wav
+                + " >/dev/null 2>&1 && afplay " + wav + " >/dev/null 2>&1; rm -f " + wav;
 #elif defined(__linux__)
-        cmd = "espeak -v en+m3 -s 175 \"" + text + "\" >/dev/null 2>&1 || spd-say \"" + text + "\" >/dev/null 2>&1";
+            // Stream raw PCM straight into a player (piper voices are 16-bit mono @ 22050).
+            cmd = "printf '%s' \"" + safe + "\" | " + bin + " --model \"" + model + "\" --output-raw 2>/dev/null | "
+                  "(aplay -q -r 22050 -f S16_LE -t raw - 2>/dev/null || ffplay -nodisp -autoexit -f s16le -ar 22050 -i - >/dev/null 2>&1)";
 #elif defined(_WIN32)
-        cmd = "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Speech;"
-              "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-              "try{$s.SelectVoiceByHints('Male')}catch{};$s.Speak('" + text + "')\"";
+            const std::string wav = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "\\dc_tts_" + std::to_string(seq) + ".wav";
+            cmd = "echo " + safe + " | \"" + bin + "\" --model \"" + model + "\" --output_file \"" + wav + "\" >NUL 2>&1 && "
+                  "powershell -NoProfile -c \"(New-Object Media.SoundPlayer '" + wav + "').PlaySync()\" & del \"" + wav + "\"";
 #endif
+        }
+        if (cmd.empty()) {   // no Piper model configured -> OS voice
+#if defined(__APPLE__)
+            cmd = "say -v Alex -r 210 \"" + safe + "\"";   // Alex = classic male voice, a touch faster
+#elif defined(__linux__)
+            cmd = "espeak -v en+m3 -s 175 \"" + safe + "\" >/dev/null 2>&1 || spd-say \"" + safe + "\" >/dev/null 2>&1";
+#elif defined(_WIN32)
+            cmd = "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Speech;"
+                  "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+                  "try{$s.SelectVoiceByHints('Male')}catch{};$s.Speak('" + safe + "')\"";
+#endif
+        }
         if (!cmd.empty()) std::system(cmd.c_str());
         g_tts_active.fetch_sub(1);
     }).detach();
@@ -223,6 +264,14 @@ int main(int argc, char** argv) {
     const bool boat_loaded = dc::renderer::read_model("assets/models/boat.glb", boat_data);
     if (!boat_loaded) std::fprintf(stderr, "note: assets/models/boat.glb not found; run blender/make_boat.py\n");
 
+    dc::renderer::ModelData barracks_data;   // timber barracks hut (1.9-tile footprint, door +Y, static)
+    const bool barracks_loaded = dc::renderer::read_model("assets/models/barracks.glb", barracks_data);
+    if (!barracks_loaded) std::fprintf(stderr, "note: assets/models/barracks.glb not found; run blender/make_barracks.py\n");
+
+    dc::renderer::ModelData mortar_data;   // heavy siege mortar (barrel +Y, muzzle tip ~(0,1.95,-0.68), static)
+    const bool mortar_loaded = dc::renderer::read_model("assets/models/mortar.glb", mortar_data);
+    if (!mortar_loaded) std::fprintf(stderr, "note: assets/models/mortar.glb not found; run blender/make_mortar.py\n");
+
     dc::renderer::ModelData skeleton_data;
     const bool skeleton_loaded = dc::renderer::read_model("assets/models/skeleton.glb", skeleton_data);
     if (!skeleton_loaded) std::fprintf(stderr, "note: assets/models/skeleton.glb not found; run blender/make_skeleton.py to enable skeletons\n");
@@ -293,6 +342,10 @@ int main(int argc, char** argv) {
     if (mounted_knight_loaded) mounted_knight_model.upload(mounted_knight_data);
     dc::renderer::Model boat_model;
     if (boat_loaded) boat_model.upload(boat_data);
+    dc::renderer::Model barracks_model;
+    if (barracks_loaded) barracks_model.upload(barracks_data);
+    dc::renderer::Model mortar_model;
+    if (mortar_loaded) mortar_model.upload(mortar_data);
     dc::renderer::Model bat_model;
     if (bat_loaded) bat_model.upload(bat_data);
     dc::renderer::Model gnome_model;
@@ -675,8 +728,9 @@ int main(int argc, char** argv) {
             sparks.push_back(s);
         }
     };
-    constexpr int START_GOLD = 100;  // both sides open with this
+    constexpr int START_GOLD = 150;  // both sides open with this (was 100 — a little more buffer)
     int   currency = START_GOLD;
+    double team_passive_accum = 0.0;         // gentle passive gold trickle (enemy AI doesn't measure it)
     double host_damage = 0.0;                // host/standalone: this player's total damage dealt (scoreboard)
     float  my_damage = 0.0f;                 // client: our own total, read back from the snapshot
     bool   scoreboard = false;               // hold Tab: damage leaderboard + your items
@@ -1047,6 +1101,34 @@ int main(int argc, char** argv) {
         turret_flash.resize(n, 0.0f);
     };
     rebuild_turrets();
+    // --- MORTAR artillery: positions rebuilt from Mortar pieces (parallel CD survives frames). ---
+    std::vector<TPos>  mortar_pos;
+    std::vector<float> mortar_cd;
+    uint64_t mortar_built_sig = ~0ull;
+    auto mortar_sig = [&](const std::vector<dc::game::BasePiece>& ps) {
+        uint64_t s = 1469598103934665603ull; uint32_t n = 0;
+        for (const auto& p : ps) if (p.piece == static_cast<uint8_t>(dc::game::BuildPiece::Mortar)) {
+            s = (s ^ static_cast<uint32_t>(p.col * 73856093 ^ p.row * 19349663)) * 1099511628211ull; ++n;
+        }
+        return s ^ (static_cast<uint64_t>(n) << 1);
+    };
+    auto rebuild_mortars = [&]() {
+        const auto& ps = live_pieces();
+        const uint64_t sig = mortar_sig(ps);
+        if (sig == mortar_built_sig) return;
+        mortar_built_sig = sig;
+        std::vector<TPos> np;
+        for (const auto& p : ps) if (p.piece == static_cast<uint8_t>(dc::game::BuildPiece::Mortar)) {
+            const float x = (p.col + 0.5f) * dc::world::TILE, z = (p.row + 0.5f) * dc::world::TILE;
+            np.push_back({ x, terrain.height(x, z), z });
+        }
+        mortar_cd.resize(np.size(), 2.5f);   // first shot a couple seconds after building
+        mortar_pos = std::move(np);
+    };
+    rebuild_mortars();
+    // In-flight mortar shells (host sims the AoE on impact; every peer renders the arc + boom).
+    struct MortarShell { vec3 from, impact; float t = 0.0f, dur = dc::game::MORTAR_SHELL_TIME; };
+    std::vector<MortarShell> mortar_shells;
     // Travelling turret tracer rounds (cosmetic; the damage is instant at fire time). Each
     // peer spawns them from the synced phase pulse so everyone sees the same fire.
     struct TBullet { vec3 pos, vel; float life; bool red = false; };
@@ -2432,13 +2514,14 @@ int main(int argc, char** argv) {
         if (building_mode && !spawn_menu) {
             // 1..N select a PLACEABLE piece (Barracks come from the muster menu; Water is terrain,
             // not buyable). R rotates 90°.
-            const int BUILD_KINDS[5] = { static_cast<int>(dc::game::BuildPiece::Barricade),
+            const int BUILD_KINDS[6] = { static_cast<int>(dc::game::BuildPiece::Barricade),
                                          static_cast<int>(dc::game::BuildPiece::Landmine),
                                          static_cast<int>(dc::game::BuildPiece::Turret),
                                          static_cast<int>(dc::game::BuildPiece::Vacuum),
-                                         static_cast<int>(dc::game::BuildPiece::Shipyard) };   // Sub Pen disabled for now
-            const int kscan[5] = { SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_5 };
-            for (int k = 0; k < 5; ++k) {
+                                         static_cast<int>(dc::game::BuildPiece::Shipyard),   // Sub Pen disabled for now
+                                         static_cast<int>(dc::game::BuildPiece::Mortar) };
+            const int kscan[6] = { SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_5, SDL_SCANCODE_6 };
+            for (int k = 0; k < 6; ++k) {
                 const bool d = input.key_down(kscan[k]);
                 if (d && !digit_prev[k]) build_sel = BUILD_KINDS[k];
                 digit_prev[k] = d;
@@ -2520,6 +2603,7 @@ int main(int argc, char** argv) {
         // The base is NOT saved to disk — it lives only for the current run.
         base_dirty = false;
         rebuild_turrets();
+        rebuild_mortars();
 
         // RALLY command: C sets a hold-position rally at the crosshair ground point; X clears it
         // (mobs resume pushing the enemy core). Host applies directly; clients ask via RallyCmd.
@@ -3570,8 +3654,17 @@ int main(int argc, char** argv) {
                 float dx = tx - a.pos[0], dz = tz - a.pos[2];
                 float d = std::sqrt(dx*dx + dz*dz); if (d < 1e-4f) { dx = 1.0f; dz = 0.0f; d = 1.0f; }
                 const float hx = dx / d, hz = dz / d;
-                a.yaw = std::atan2(hz, hx);
                 const float reach = mt.reach;   // per-type (mage/flier zap from afar)
+                // Gentle lateral WANDER so the army doesn't march in a perfectly straight line —
+                // rotate the heading by a slow per-mob sine while traveling (not when a target's in reach).
+                float shx = hx, shz = hz;
+                if (!tgt || d > reach + 1.0f) {
+                    const float wob = std::sin(t_now*1.0f + static_cast<float>(i)*2.399f) * 0.30f
+                                    + std::sin(t_now*0.37f + static_cast<float>(i)) * 0.12f;
+                    const float cw = std::cos(wob), sw = std::sin(wob);
+                    shx = hx*cw - hz*sw; shz = hx*sw + hz*cw;
+                }
+                a.yaw = std::atan2(shz, shx);
                 // Stand OFF the enemy core (don't walk into the tower): stop at its radius + reach.
                 const float stop = march_core ? (CORE_RAD + reach * 0.6f)
                                   : ((!mt.scavenger && tgt) ? reach : 0.4f);
@@ -3579,7 +3672,7 @@ int main(int argc, char** argv) {
                 if (d > stop) {
                     const float smul = in_slime(a.pos[0], a.pos[2]) ? SLIME_SLOW : 1.0f;   // your mobs mired by enemy slime
                     const float step = std::min(dc::game::ALLY_SPEED * a.speed_mul * smul * mt.speed * dt, d - stop);   // mt.speed: knights are slow
-                    a.pos[0] += hx * step; a.pos[2] += hz * step;
+                    a.pos[0] += shx * step; a.pos[2] += shz * step;
                 }
                 // Separation (boids): push apart from crowded same-team neighbors so the army
                 // spreads into a loose front instead of collapsing into a single-file line. Fliers
@@ -3868,11 +3961,20 @@ int main(int argc, char** argv) {
                             if (eb && ed2 <= BOAT_RANGE*BOAT_RANGE) {
                                 eb->health -= 50.0f; b.fire_cd = BOAT_FIRE_CD;
                                 shot_x = eb->pos[0]; shot_y = eb->pos[1]+1.0f; shot_z = eb->pos[2]; fired = true;
-                            } else {   // shell the enemy core from range
-                                const float cx = enemy_core_pos[0]-b.pos[0], cz = enemy_core_pos[2]-b.pos[2];
-                                if (cx*cx+cz*cz <= (BOAT_RANGE)*(BOAT_RANGE) && enemy_core_health > 0.0f) {
-                                    enemy_core_health -= 30.0f; if (enemy_core_health<0) enemy_core_health=0; b.fire_cd = BOAT_FIRE_CD;
-                                    shot_x = enemy_core_pos[0]; shot_y = enemy_core_pos[1]+1.5f; shot_z = enemy_core_pos[2]; fired = true;
+                            } else {   // no enemy boat: shell the nearest enemy MOB in range, else the core
+                                dc::entity::Entity* em = nullptr; float emd2 = BOAT_RANGE*BOAT_RANGE;
+                                for (auto& e : entities.items) if (e.alive && e.type == dc::entity::EntityType::Enemy) {
+                                    const float ex=e.position[0]-b.pos[0], ez=e.position[2]-b.pos[2], e2=ex*ex+ez*ez;
+                                    if (e2 < emd2) { emd2 = e2; em = &e; } }
+                                if (em) {
+                                    em->health -= 45.0f; b.fire_cd = BOAT_FIRE_CD;
+                                    shot_x = em->position[0]; shot_y = em->position[1]+0.8f; shot_z = em->position[2]; fired = true;
+                                } else {
+                                    const float cx = enemy_core_pos[0]-b.pos[0], cz = enemy_core_pos[2]-b.pos[2];
+                                    if (cx*cx+cz*cz <= (BOAT_RANGE)*(BOAT_RANGE) && enemy_core_health > 0.0f) {
+                                        enemy_core_health -= 30.0f; if (enemy_core_health<0) enemy_core_health=0; b.fire_cd = BOAT_FIRE_CD;
+                                        shot_x = enemy_core_pos[0]; shot_y = enemy_core_pos[1]+1.5f; shot_z = enemy_core_pos[2]; fired = true;
+                                    }
                                 }
                             }
                             if (fired) {   // visible tracer shell from the forward cannon MUZZLE toward the target
@@ -4119,6 +4221,43 @@ int main(int argc, char** argv) {
                 }
             }
 
+            // --- MORTAR artillery: very slow, long-range lobbed shells with a big AoE. Each picks
+            // the densest enemy cluster in [MIN, RANGE] and lobs a shell that detonates on arrival. ---
+            for (int i = 0; i < static_cast<int>(mortar_pos.size()); ++i) {
+                if (mortar_cd[i] > 0.0f) { mortar_cd[i] -= dt; continue; }
+                const float mx = mortar_pos[i].x, mz = mortar_pos[i].z;
+                const dc::entity::Entity* best = nullptr; int bestN = -1; float bestD2 = 0.0f;
+                for (const auto& e : entities.items) {
+                    if (!e.alive || e.type != dc::entity::EntityType::Enemy) continue;
+                    const float dx = e.position[0]-mx, dz = e.position[2]-mz, d2 = dx*dx + dz*dz;
+                    if (d2 < dc::game::MORTAR_MIN_RANGE*dc::game::MORTAR_MIN_RANGE || d2 > dc::game::MORTAR_RANGE*dc::game::MORTAR_RANGE) continue;
+                    int cnt = 0;   // how many enemies cluster around this one (maximize splash value)
+                    for (const auto& o : entities.items) if (o.alive && o.type == dc::entity::EntityType::Enemy) {
+                        const float ox = o.position[0]-e.position[0], oz = o.position[2]-e.position[2];
+                        if (ox*ox + oz*oz < dc::game::MORTAR_BLAST*dc::game::MORTAR_BLAST) ++cnt;
+                    }
+                    if (cnt > bestN || (cnt == bestN && d2 > bestD2)) { bestN = cnt; best = &e; bestD2 = d2; }
+                }
+                if (best) {
+                    MortarShell sh;
+                    sh.from[0]=mx; sh.from[1]=mortar_pos[i].y+1.2f; sh.from[2]=mz;
+                    sh.impact[0]=best->position[0]; sh.impact[1]=terrain.height(best->position[0], best->position[2]); sh.impact[2]=best->position[2];
+                    mortar_shells.push_back(sh);
+                    mortar_cd[i] = dc::game::MORTAR_CD;
+                }
+            }
+            // Advance in-flight shells; on arrival, detonate a big AoE + a boom.
+            for (std::size_t s = 0; s < mortar_shells.size(); ) {
+                mortar_shells[s].t += dt;
+                if (mortar_shells[s].t >= mortar_shells[s].dur) {
+                    vec3 c = { mortar_shells[s].impact[0], mortar_shells[s].impact[1], mortar_shells[s].impact[2] };
+                    std::vector<uint32_t> ids;
+                    dc::entity::radius_attack(entities, c, dc::game::MORTAR_BLAST, dc::game::MORTAR_DAMAGE, 11.0f, ids, &frame_hits);
+                    frame_booms.push_back(c[0]); frame_booms.push_back(c[1]+0.4f); frame_booms.push_back(c[2]);
+                    mortar_shells[s] = mortar_shells.back(); mortar_shells.pop_back();
+                } else ++s;
+            }
+
             // ENEMY-BASE turrets fire on the nearest of our mobs (then players) in range.
             for (int i = 0; i < enemy_turret_n; ++i) {
                 if (eturret_cd[i] > 0.0f) eturret_cd[i] -= dt;
@@ -4216,7 +4355,7 @@ int main(int argc, char** argv) {
                         ally_rng = ally_rng * 1664525u + 1013904223u;
                         const float jx = ((ally_rng >> 9) % 100) / 100.0f - 0.5f;
                         const float jz = ((ally_rng >> 17) % 100) / 100.0f - 0.5f;
-                        Ally a; a.pos[0] = bx + jx * 1.5f; a.pos[2] = bz + jz * 1.5f;
+                        Ally a; a.pos[0] = bx + jx * 1.9f; a.pos[2] = bz + jz * 1.9f;
                         a.pos[1] = terrain.height(a.pos[0], a.pos[2]) + dc::world::EYE_HEIGHT;
                         a.max_hp = mt.hp * up_hp; a.health = a.max_hp; a.attack_cd = 0.0f; a.kind = bp.rot;
                         a.def_mult = up_def; a.up = static_cast<uint8_t>(dc::game::barracks_up_total(bp));
@@ -4837,7 +4976,7 @@ int main(int argc, char** argv) {
         if (victory_flash > 0.0f) victory_flash -= dt;
 
         // Enemies get tougher (HP + damage) as the run wears on; the AI applies this on spawn.
-        const float stat_mult = 1.0f + run_time / 120.0f;
+        // (Enemy power no longer scales with time — it comes from PAID barracks upgrades the AI buys.)
         // Frontline: how far our army/hero has pushed toward the ENEMY base (0..1). The enemy AI
         // reads this to decide when to wall up with turrets.
         float front_x = core_pos[0];
@@ -4861,8 +5000,12 @@ int main(int argc, char** argv) {
                 our_gold_rate = our_gold_rate * 0.6f + static_cast<float>(gold_drop_accum) * 0.4f;
                 gold_drop_accum = 0.0; gold_drop_timer = 1.0f;
             }
-            enemy_rate = our_gold_rate * 1.2f + (1.5f + 0.7f * (day_num - 1));
+            enemy_rate = our_gold_rate * 0.90f + (0.9f + 0.45f * (day_num - 1));   // enemy earns ~our rate + a gentler per-day floor (was 1.2x + 1.5+0.7/day)
             enemy_gold += enemy_rate * dt;
+            // Passive base income for the player team — smooths cash flow so it doesn't fully
+            // depend on kills. NOT counted in gold_drop_accum, so the enemy AI can't scale off it.
+            team_passive_accum += 1.6 * dt;
+            while (team_passive_accum >= 1.0) { currency += 1; team_passive_accum -= 1.0; }
 
             // -- sensing: our forces vs theirs --
             int aliveK[10] = {}; int troops_alive = 0;
@@ -4964,7 +5107,7 @@ int main(int argc, char** argv) {
                     case IT_TURRET: s = (front_frac>0.75f ? 5.0f + (front_frac-0.75f)*20.0f : front_frac*1.5f) - std::max(0,enemy_turret_n-1)*0.7f; break;
                     case IT_CAVALRY:s = (our_speed > their_speed*1.05f ? (our_speed/their_speed - 1.0f)*12.0f : 0.0f) - (enemy_speed_mult-1.0f)*7.0f; break;
                     // self-upgrade the laggard barracks: wanted more as days pass + when out-swarmed.
-                    case IT_UPGRADE: s = (lag_idx >= 0) ? (2.0f + 0.3f*day_num + swarm_need*1.5f - lag_lvl*0.8f) : 0.0f; break;
+                    case IT_UPGRADE: s = (lag_idx >= 0) ? (3.2f + 0.5f*day_num + swarm_need*1.5f - lag_lvl*0.5f) : 0.0f; break;   // paid upgrades are the enemy's ONLY power scaling now -> invest more
                 }
                 // When the player out-swarms us, favour HIGH-CAPACITY barracks types to keep up.
                 if (it <= IT_BAR_SLIME && swarm_need > 0.0f) s += swarm_need * ekcap(BARKIND[it]) / 7.0f;
@@ -5078,10 +5221,11 @@ int main(int argc, char** argv) {
                     for (const auto& q : ebarracks) if (q.kind == b.kind) type_cap += kcap(q.kind) + dc::game::barracks_cap_bonus(q.up);
                     if (live >= 200 || aliveK[b.kind] >= static_cast<int>(type_cap * panic)) { b.cd = 1.0f; continue; }
                     b.cd = barint(b.kind) / panic;
-                    const float jx = (rand01(ai_rng)-0.5f)*1.5f, jz = (rand01(ai_rng)-0.5f)*1.5f;
+                    const float jx = (rand01(ai_rng)-0.5f)*1.9f, jz = (rand01(ai_rng)-0.5f)*1.9f;   // spawn in a slightly different spot each time
                     auto& e = entities.spawn_enemy(b.x+jx, b.z+jz, (dc::entity::EnemyKind)b.kind, false);
-                    // escalation × this barracks' UPGRADE level (+30% HP / +20% damage per level).
-                    const float um = stat_mult * (1.0f + 0.30f * b.up), ud = stat_mult * (1.0f + 0.20f * b.up);
+                    // Enemy power comes from PAID barracks upgrades (like ours) — no free time-based
+                    // scaling: +40% HP / +28% damage per upgrade level the AI bought for this barracks.
+                    const float um = 1.0f + 0.40f * b.up, ud = 1.0f + 0.28f * b.up;
                     e.stats.max_health *= um; e.health = e.stats.max_health; e.stats.attack_damage *= ud;
                     ++live; ++aliveK[b.kind];
                 }
@@ -5723,6 +5867,7 @@ int main(int argc, char** argv) {
                     case dc::game::MobVisual::Insulter:  if (insulter_loaded)  { amdp=&insulter_data; amdlp=&insulter_model; white=true; } break;
                     case dc::game::MobVisual::Flame:     if (gnome_loaded)     { amdp=&gnome_data; amdlp=&gnome_model; white=true; } break;
                     case dc::game::MobVisual::Troll:     if (troll_loaded)     { amdp=&troll_data; amdlp=&troll_model; white=true; } break;
+                    case dc::game::MobVisual::Drone:     if (drone_loaded)     { amdp=&drone_data; amdlp=&drone_model; white=true; } break;
                     default: break;   // Slime is procedural (handled below)
                 }
                 dc::renderer::ModelData& amd = *amdp; dc::renderer::Model& amdl = *amdlp;
@@ -5940,7 +6085,7 @@ int main(int argc, char** argv) {
                         continue;
                     }
                     if (bkind == 8 || bkind == 9) {   // MINELAYER: the boat MODEL barge with mine racks + a team flag
-                        const float gy = wbase + 0.28f + std::sin(t_now*1.6f + i)*0.08f;
+                        const float gy = wbase + 0.55f + std::sin(t_now*1.6f + i)*0.07f;   // ride ON the water
                         if (boat_loaded) {
                             std::vector<dc::renderer::AnimLayer> bl; bl.push_back({ &boat_data.idle, t_now + static_cast<float>(i), -1 });   // barge: gentle bob, oars shipped
                             dc::renderer::pose_model(boat_data, bl, 0.0f, enemy_part_world);
@@ -5962,7 +6107,7 @@ int main(int argc, char** argv) {
                         continue;
                     }
                     if (bkind == 10 || bkind == 11) {   // MINESWEEPER: the rowboat MODEL with a skeleton rowing it
-                        const float gy = wbase + 0.28f + std::sin(t_now*2.2f + i)*0.10f;   // float at the waterline (model origin = waterline)
+                        const float gy = wbase + 0.50f + std::sin(t_now*2.2f + i)*0.08f;   // ride ON the water (surface is wbase+0.30)
                         if (boat_loaded) {
                             std::vector<dc::renderer::AnimLayer> bl; bl.push_back({ &boat_data.walk, t_now*1.6f + static_cast<float>(i), -1 });   // oars row
                             dc::renderer::pose_model(boat_data, bl, 0.0f, enemy_part_world);
@@ -5989,7 +6134,7 @@ int main(int argc, char** argv) {
                     // square sail and deck CANNONS that point forward. The hull steers to face its
                     // target (b.yaw aims at it), so the forward cannons are trained on the target and
                     // their muzzles are where the shells spawn.
-                    const float gy = wbase + 0.30f + std::sin(t_now * 1.6f + i) * 0.10f;   // bob (waterline)
+                    const float gy = wbase + 0.65f + std::sin(t_now * 1.6f + i) * 0.08f;   // ride ON the water (surface is wbase+0.30)
                     if (boat_loaded) {
                         std::vector<dc::renderer::AnimLayer> bl; bl.push_back({ &boat_data.walk, t_now*1.1f + static_cast<float>(i), -1 });
                         dc::renderer::pose_model(boat_data, bl, 0.0f, enemy_part_world);
@@ -6329,6 +6474,30 @@ int main(int argc, char** argv) {
             };
             const bool night = is_night();
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
+            // --- MORTARS: the heavy mortar MODEL at each piece + arcing shells in flight. ---
+            if (mortar_loaded && !mortar_pos.empty()) {
+                static std::vector<dc::renderer::Mat4> mortar_pw;
+                if (mortar_pw.empty()) dc::renderer::pose_model(mortar_data, {}, 0.0f, mortar_pw);
+                for (const auto& mp : mortar_pos) {
+                    mat4 mpl; glm_mat4_identity(mpl);
+                    vec3 mpos = { mp.x, mp.y, mp.z }; glm_translate(mpl, mpos);
+                    glm_rotate_y(mpl, MODEL_YAW_OFFSET, mpl);
+                    vec3 mtint = { 0.85f, 0.85f, 0.92f };
+                    renderer.draw_model(mortar_model, mortar_pw, mpl, mtint);
+                }
+            }
+            // Arcing shells: a glowing sphere on a parabola from muzzle -> impact + a smoke puff.
+            for (const auto& sh : mortar_shells) {
+                const float u = sh.dur > 0.0f ? (sh.t / sh.dur) : 1.0f;
+                const float px = sh.from[0] + (sh.impact[0]-sh.from[0]) * u;
+                const float pz = sh.from[2] + (sh.impact[2]-sh.from[2]) * u;
+                const float arc = 9.0f * u * (1.0f - u);   // parabolic lob height
+                const float py = sh.from[1] + (sh.impact[1]-sh.from[1]) * u + arc;
+                const float s = 0.22f;
+                auto P = [&](float a, float b){ particle_verts.insert(particle_verts.end(), {
+                    px + R[0]*a + U[0]*b, py + R[1]*a + U[1]*b, pz + R[2]*a + U[2]*b, 1.0f, 0.75f, 0.30f, 1.0f }); };
+                P(-s,-s);P(s,-s);P(s,s); P(-s,-s);P(s,s);P(-s,s);
+            }
             // Turret housing model posed once (static); each turret draws it yawed to its
             // HELD aim. Barrel is procedural (3D). Turrets never power down — they hold the
             // last aim when idle — and fire visible tracer rounds on a per-turret timer.
@@ -6438,27 +6607,17 @@ int main(int argc, char** argv) {
 
             // ENEMY BARRACKS: the dark-red huts the AI built on its base tiles (host-owned). Each
             // pulses a little when it's about to spawn. (Spawned enemies replicate normally.)
-            if (net.role != dc::net::Role::Client && !ebarracks.empty()) {
-                std::vector<float> ebv;
-                auto ebox = [&](float cx,float cy,float cz,float hx,float hy,float hz){
-                    auto Vt=[&](float x,float y,float z,float nx,float ny,float nz){ ebv.insert(ebv.end(),{cx+x,cy+y,cz+z,nx,ny,nz,0.f,0.f,0.f}); };
-                    const float X0=-hx,X1=hx,Y0=-hy,Y1=hy,Z0=-hz,Z1=hz;
-                    Vt(X1,Y0,Z0,1,0,0);Vt(X1,Y1,Z0,1,0,0);Vt(X1,Y1,Z1,1,0,0); Vt(X1,Y0,Z0,1,0,0);Vt(X1,Y1,Z1,1,0,0);Vt(X1,Y0,Z1,1,0,0);
-                    Vt(X0,Y0,Z1,-1,0,0);Vt(X0,Y1,Z1,-1,0,0);Vt(X0,Y1,Z0,-1,0,0); Vt(X0,Y0,Z1,-1,0,0);Vt(X0,Y1,Z0,-1,0,0);Vt(X0,Y0,Z0,-1,0,0);
-                    Vt(X0,Y1,Z0,0,1,0);Vt(X1,Y1,Z0,0,1,0);Vt(X1,Y1,Z1,0,1,0); Vt(X0,Y1,Z0,0,1,0);Vt(X1,Y1,Z1,0,1,0);Vt(X0,Y1,Z1,0,1,0);
-                    Vt(X0,Y0,Z1,0,-1,0);Vt(X1,Y0,Z1,0,-1,0);Vt(X1,Y0,Z0,0,-1,0); Vt(X0,Y0,Z1,0,-1,0);Vt(X1,Y0,Z0,0,-1,0);Vt(X0,Y0,Z0,0,-1,0);
-                    Vt(X0,Y0,Z1,0,0,1);Vt(X1,Y0,Z1,0,0,1);Vt(X1,Y1,Z1,0,0,1); Vt(X0,Y0,Z1,0,0,1);Vt(X1,Y1,Z1,0,0,1);Vt(X0,Y1,Z1,0,0,1);
-                    Vt(X1,Y0,Z0,0,0,-1);Vt(X0,Y0,Z0,0,0,-1);Vt(X0,Y1,Z0,0,0,-1); Vt(X1,Y0,Z0,0,0,-1);Vt(X0,Y1,Z0,0,0,-1);Vt(X1,Y1,Z0,0,0,-1);
-                };
+            if (net.role != dc::net::Role::Client && !ebarracks.empty() && barracks_loaded) {
+                static std::vector<dc::renderer::Mat4> ebk_pw;
+                if (ebk_pw.empty()) dc::renderer::pose_model(barracks_data, {}, 0.0f, ebk_pw);
                 for (auto& b : ebarracks) {
                     const float h = terrain.height(b.x, b.z);
-                    ebox(b.x, h+0.55f, b.z, 0.95f, 0.55f, 0.8f);     // hut body
-                    ebox(b.x, h+1.25f, b.z, 0.65f, 0.22f, 0.9f);     // ridge roof
-                    ebox(b.x, h+0.5f,  b.z-0.86f, 0.3f, 0.5f, 0.06f);// dark doorway facing the lane
+                    mat4 ebpl; glm_mat4_identity(ebpl);
+                    vec3 ebpos = { b.x, h, b.z }; glm_translate(ebpl, ebpos);
+                    glm_rotate_y(ebpl, 3.14159265f + MODEL_YAW_OFFSET, ebpl);   // door faces the lane (toward the player)
+                    vec3 ebtint = { 1.0f, 0.42f, 0.38f };   // enemy red barracks
+                    renderer.draw_model(barracks_model, ebk_pw, ebpl, ebtint);
                 }
-                static dc::renderer::Mesh ebar_mesh; ebar_mesh.upload(ebv);
-                vec3 ebcol = { 0.40f, 0.13f, 0.12f };   // dark enemy red
-                renderer.draw_terrain(ebar_mesh, ebcol, true);
             }
 
             // --- Player-placed DEFENSES: barricades (tinted by remaining HP) + landmines.
@@ -6531,8 +6690,20 @@ int main(int argc, char** argv) {
                         emit_barricade(v, cx, cz, h, ca, sa, php / dc::game::BARRICADE_MAX_HP, col);
                     else if (pc.piece == static_cast<uint8_t>(dc::game::BuildPiece::Landmine))
                         emit_mine(v, cx, cz, h, php > 0.5f, col);
-                    else if (pc.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks))
+                    else if (pc.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) {
+                        if (barracks_loaded) {   // the timber barracks MODEL, tinted toward its mob-type color
+                            static std::vector<dc::renderer::Mat4> bk_pw;
+                            if (bk_pw.empty()) dc::renderer::pose_model(barracks_data, {}, 0.0f, bk_pw);
+                            const int ti = (pc.rot >= 0 && pc.rot < 4) ? pc.rot : 0;
+                            mat4 bkpl; glm_mat4_identity(bkpl);
+                            vec3 bkpos = { cx, h, cz }; glm_translate(bkpl, bkpos);
+                            glm_rotate_y(bkpl, MODEL_YAW_OFFSET, bkpl);
+                            vec3 bktint = { 0.62f + 0.38f*TYCOL[ti][0], 0.62f + 0.38f*TYCOL[ti][1], 0.62f + 0.38f*TYCOL[ti][2] };
+                            renderer.draw_model(barracks_model, bk_pw, bkpl, bktint);
+                            continue;
+                        }
                         emit_barracks(v, cx, cz, h, pc.rot, col);
+                    }
                     else if (pc.piece == static_cast<uint8_t>(dc::game::BuildPiece::Water))
                         emit_water(v, cx, cz, h, col);
                     else if (pc.piece == static_cast<uint8_t>(dc::game::BuildPiece::SubPen))
@@ -8094,7 +8265,7 @@ int main(int argc, char** argv) {
             // Build & muster menu labels.
             if (spawn_menu) {
                 vec3 gold = {1.0f,0.85f,0.3f}, white = {0.95f,0.95f,0.95f}, grey = {0.6f,0.62f,0.68f};
-                renderer.draw_text("MUSTER  -  1-8 mob barracks, 9 area  (defenses + ships via B)  E close", -0.62f, 0.48f, 12.0f, gold, 1.0f, fbw, fbh);
+                renderer.draw_text("MUSTER  -  1-8 mob barracks, 9 area  (defenses + ships via B)  E close", -0.62f, 0.48f, 14.0f, gold, 1.0f, fbw, fbh);
                 for (int k = 0; k < dc::game::MOB_TYPE_COUNT; ++k) {
                     const dc::game::MobType& mt = dc::game::mob_type(k);
                     const bool unlocked = (barracks_unlocked & (1u << k)) != 0;
@@ -8105,7 +8276,7 @@ int main(int argc, char** argv) {
                                       k+1, mt.name, mt.place_cost, mt.interval, mt.hp, mt.damage);
                     else
                         std::snprintf(line, sizeof line, "[%d] %-9s  press to UNLOCK (free)", k+1, mt.name);
-                    renderer.draw_text(line, -0.60f, ry - 0.005f, 12.0f, unlocked ? white : grey, 1.0f, fbw, fbh);
+                    renderer.draw_text(line, -0.60f, ry - 0.005f, 15.0f, unlocked ? white : grey, 1.0f, fbw, fbh);
                 }
                 {   // expand-area row
                     char line[128];
@@ -8113,7 +8284,7 @@ int main(int argc, char** argv) {
                         std::snprintf(line, sizeof line, "[0] Expand build area  buy $%d", dc::game::base_area_cost(base.build_radius));
                     else std::snprintf(line, sizeof line, "[9] Build area MAXED");
                     const float ry = 0.40f - dc::game::MOB_TYPE_COUNT * 0.072f;
-                    renderer.draw_text(line, -0.60f, ry - 0.005f, 12.0f, gold, 1.0f, fbw, fbh);
+                    renderer.draw_text(line, -0.60f, ry - 0.005f, 15.0f, gold, 1.0f, fbw, fbh);
                 }
             }
             // Barracks upgrade menu labels.
@@ -8123,18 +8294,18 @@ int main(int argc, char** argv) {
                     const auto& bp = base.pieces[bidx];
                     vec3 gold = {1.0f,0.85f,0.3f}, white = {0.95f,0.95f,0.95f}, red = {1.0f,0.55f,0.45f}, dimc = {0.6f,0.65f,0.72f};
                     char hdr[80]; std::snprintf(hdr, sizeof hdr, "UPGRADE  %s barracks   (Lv %d, cap %d)", dc::game::mob_type(bp.rot).name, dc::game::barracks_up_total(bp), dc::game::mob_type(bp.rot).cap + dc::game::barracks_cap_bonus(bp.up[4]));
-                    renderer.draw_text(hdr, -0.46f, 0.34f, 13.0f, gold, 1.0f, fbw, fbh);
+                    renderer.draw_text(hdr, -0.46f, 0.34f, 15.0f, gold, 1.0f, fbw, fbh);
                     const char* nm[5] = { "Health", "Defense", "Speed", "Spawn Rate", "Capacity" };
                     for (int s = 0; s < 5; ++s) {
                         const float ry = 0.24f - s * 0.085f;
                         char line[96];
                         if (bp.up[s] >= dc::game::BARRACKS_UP_MAX) std::snprintf(line, sizeof line, "[%d] %-10s  L%d  MAX", s+1, nm[s], bp.up[s]);
                         else std::snprintf(line, sizeof line, "[%d] %-10s  L%d -> L%d   $%d", s+1, nm[s], bp.up[s], bp.up[s]+1, dc::game::barracks_upgrade_cost(bp.up[s]));
-                        renderer.draw_text(line, -0.44f, ry - 0.005f, 12.0f, white, 1.0f, fbw, fbh);
+                        renderer.draw_text(line, -0.44f, ry - 0.005f, 15.0f, white, 1.0f, fbw, fbh);
                     }
                     char sell[64]; std::snprintf(sell, sizeof sell, "[S] Sell barracks  (+$%d)", (dc::game::mob_type(bp.rot).place_cost * 3) / 4);
-                    renderer.draw_text(sell, -0.44f, -0.235f, 12.0f, red, 1.0f, fbw, fbh);
-                    renderer.draw_text("E / Esc  close", -0.10f, 0.37f, 10.0f, dimc, 1.0f, fbw, fbh);
+                    renderer.draw_text(sell, -0.44f, -0.235f, 15.0f, red, 1.0f, fbw, fbh);
+                    renderer.draw_text("E / Esc  close", -0.10f, 0.37f, 13.0f, dimc, 1.0f, fbw, fbh);
                 }
             }
             // Build-mode palette: current piece + (for barracks) the mob type + key hints.
@@ -8152,8 +8323,8 @@ int main(int argc, char** argv) {
                     std::snprintf(line, sizeof line, "BUILD: %s  $%d", dc::game::piece_name(bp), dc::game::piece_cost(bp));
                 }
                 renderer.draw_text(line, -0.32f, -0.74f, 15.0f, c, 1.0f, fbw, fbh);
-                renderer.draw_text("1 wall 2 mine 3 turret 4 vacuum 5 shipyard (T: warship/minelayer/sweeper)   R rot   LMB place   RMB remove   B exit",
-                                   -0.42f, -0.80f, 11.0f, hint, 1.0f, fbw, fbh);
+                renderer.draw_text("1 wall  2 mine  3 turret  4 vacuum  5 shipyard  6 mortar   (T: ship type)   R rot   LMB place   RMB remove   B exit",
+                                   -0.52f, -0.80f, 13.0f, hint, 1.0f, fbw, fbh);
                 // Barracks capacity readout when the barracks tool is selected.
                 if (build_sel == static_cast<int>(dc::game::BuildPiece::Barracks)) {
                     int nbar = 0; for (const auto& q : base.pieces) if (q.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) ++nbar;

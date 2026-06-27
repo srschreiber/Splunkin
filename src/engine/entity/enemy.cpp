@@ -132,6 +132,15 @@ void flow_advance(Entity& e, const dc::world::Map& map, const dc::world::FlowFie
     const float ml = std::sqrt(mx * mx + mz * mz);
     if (ml > 1e-4f) {
         mx /= ml; mz /= ml;
+        // Gentle lateral WANDER so enemies don't march in a perfectly straight line. Phase is
+        // per-enemy (its walk clock + position), so neighbors weave independently.
+        {
+            const float ph = e.anim_time * 1.7f + e.position[0] * 0.31f + e.position[2] * 0.23f;
+            const float wob = std::sin(ph) * 0.26f;
+            const float cw = std::cos(wob), sw = std::sin(wob);
+            const float wmx = mx*cw - mz*sw, wmz = mx*sw + mz*cw;
+            mx = wmx; mz = wmz;
+        }
         const float step = ENEMY_SPEED * speed_mult * dt;
         const float npx = e.position[0] + mx * step, npz = e.position[2] + mz * step;
         if (!dc::world::circle_hits_solid(map, npx, e.position[2], ENEMY_RADIUS)) e.position[0] = npx;

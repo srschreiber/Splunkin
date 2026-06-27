@@ -18,7 +18,17 @@ namespace dc::game {
 //  - Barracks:  periodically spawns a FRIENDLY mob (each spawn costs gold) that marches the
 //               lane to fight the enemy and attack their base.
 // Keep Count last.
-enum class BuildPiece : uint8_t { Barricade = 0, Landmine = 1, Turret = 2, Barracks = 3, Water = 4, Vacuum = 5, SubPen = 6, Shipyard = 7, Count = 8 };
+enum class BuildPiece : uint8_t { Barricade = 0, Landmine = 1, Turret = 2, Barracks = 3, Water = 4, Vacuum = 5, SubPen = 6, Shipyard = 7, Mortar = 8, Count = 9 };
+
+// MORTAR (base artillery): a costly, very-slow siege piece that lobs shells far down the lane
+// (out to ~mid-map) and detonates in a big AoE for massive damage. Counters enemy blobs at range.
+inline constexpr float MORTAR_RANGE      = 130.0f;  // reaches roughly to the middle of the map
+inline constexpr float MORTAR_MIN_RANGE  = 14.0f;   // can't hit point-blank (lob arcs over the near area)
+inline constexpr float MORTAR_BLAST      = 6.0f;    // splash radius
+inline constexpr float MORTAR_DAMAGE     = 320.0f;  // massive (clears blobs)
+inline constexpr float MORTAR_CD         = 7.0f;    // seconds between shots — VERY slow
+inline constexpr float MORTAR_SHELL_TIME = 1.7f;    // shell flight time (arc)
+inline constexpr float MORTAR_HP         = 360.0f;
 
 // Gold cost of PLACING one piece (refund is half on removal).
 inline int piece_cost(BuildPiece p) {
@@ -31,6 +41,7 @@ inline int piece_cost(BuildPiece p) {
         case BuildPiece::Vacuum:    return 120;
         case BuildPiece::SubPen:    return 200;
         case BuildPiece::Shipyard:  return 220;
+        case BuildPiece::Mortar:    return 400;   // costly siege artillery
         default:                    return 15;
     }
 }
@@ -45,6 +56,7 @@ inline const char* piece_name(BuildPiece p) {
         case BuildPiece::Vacuum:    return "Vacuum";
         case BuildPiece::SubPen:    return "Sub Pen";
         case BuildPiece::Shipyard:  return "Shipyard";
+        case BuildPiece::Mortar:    return "Mortar";
         default:                    return "?";
     }
 }
@@ -89,7 +101,7 @@ inline constexpr float ALLY_AGGRO     = 16.0f; // engages enemies within this ra
 // every `interval` seconds for `spawn_cost` gold each. The Scavenger doesn't fight the lane —
 // it roams collecting dropped coins into the shared pool (with decent HP for self-defense).
 // Visual/behaviour class of a friendly mob — mirrors the enemy roster.
-enum class MobVisual : uint8_t { Ground = 0, Scavenger = 1, Flier = 2, Bat = 3, Demon = 4, Mage = 5, Insulter = 6, Knight = 7, Flame = 8, Troll = 9, Slime = 10 };
+enum class MobVisual : uint8_t { Ground = 0, Scavenger = 1, Flier = 2, Bat = 3, Demon = 4, Mage = 5, Insulter = 6, Knight = 7, Flame = 8, Troll = 9, Slime = 10, Drone = 11 };
 struct MobType {
     const char* name;
     int   unlock_cost;   // one-time gold to unlock this barracks type (0 = free from the start)
@@ -104,7 +116,7 @@ struct MobType {
     float speed;         // movement multiplier vs ALLY_SPEED (the Mounted Knight is heavy + slow)
     int   cap;           // how many of THIS mob one barracks keeps alive at once (weak swarmers = high)
 };
-inline constexpr int MOB_TYPE_COUNT = 12;
+inline constexpr int MOB_TYPE_COUNT = 13;
 inline const MobType& mob_type(int i) {
     // Barracks are a one-time PURCHASE (place_cost) that then spawn their mob for FREE on a
     // timer. The roster MIRRORS the enemy types (grunt=skeleton, mage=ranged caster, bat,
@@ -123,6 +135,7 @@ inline const MobType& mob_type(int i) {
         { "Gnome",     0,    150,  0, 5.0f,  200.0f, 30.0f, 3.5f, false, MobVisual::Flame,    false, 1.00f,  6 },
         { "Troll",     0,    300,  0, 7.0f,  600.0f, 70.0f, 2.2f, false, MobVisual::Troll,    false, 0.75f,  4 },
         { "Slime",     0,    130,  0, 4.5f,  550.0f, 14.0f, 2.0f, false, MobVisual::Slime,    false, 0.85f,  6 },
+        { "Drone",     100,  120,  0, 1.4f,  10.0f,  5.0f,  2.0f, false, MobVisual::Drone,    true,  1.30f, 15 },   // cheap low-HP swarm to distract; cap 15
     };
     return T[(i < 0 || i >= MOB_TYPE_COUNT) ? 0 : i];
 }
