@@ -38,6 +38,22 @@ struct Terrain {
 
     std::vector<Plateau> plateaus;   // placed sheer-cliff plateaus (override the noise where higher)
 
+    // Optional RIVER carve: erodes a channel into the ground so the lane's river sits in a
+    // LOWERED bed with sloping banks (the ground drops off into the water). set_river() turns
+    // it on; carve = 0 disables. Mirrors the river's centerline/width so water + bed align.
+    bool  river_on    = false;
+    float river_z     = 0.0f;   // base centerline Z
+    float river_amp   = 0.0f;   // winding amplitude
+    float river_windf = 1.6f;   // winding frequency along the lane
+    float river_x0 = 0.0f, river_x1 = 0.0f;   // lane span the river runs across
+    float river_half  = 3.2f;   // water half-width at the narrow stretch
+    float river_basin = 10.0f;  // extra half-width in the mid-lane basin
+    float river_carve = 0.0f;   // max depth carved at the channel center
+    float river_bank  = 4.5f;   // how far past the water the banks slope up
+    void  set_river(float z, float amp, float windf, float x0, float x1,
+                    float half, float basin, float carve, float bank);
+    float river_carve_at(float x, float z) const;   // depth (>=0) to drop the ground here
+
     // Noise ground height (base + hills + mounds), WITHOUT any placed plateaus.
     float height_ground(float x, float z) const;
     // Ground height at a world position (noise ground, raised by any plateau on top).

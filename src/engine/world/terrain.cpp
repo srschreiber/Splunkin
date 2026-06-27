@@ -113,7 +113,31 @@ float Terrain::height(float x, float z) const {
             if (ch > pl) pl = ch;
         }
     }
-    return pl > ground ? pl : ground;
+    float h = pl > ground ? pl : ground;
+    return h - river_carve_at(x, z);   // erode the river channel into the ground
+}
+
+void Terrain::set_river(float z, float amp, float windf, float x0, float x1,
+                        float half, float basin, float carve, float bank) {
+    river_on = carve > 0.0f; river_z = z; river_amp = amp; river_windf = windf;
+    river_x0 = x0; river_x1 = x1; river_half = half; river_basin = basin;
+    river_carve = carve; river_bank = bank;
+}
+
+// Depth to lower the ground at (x,z): full carve in the water, easing up to 0 at the bank edge.
+float Terrain::river_carve_at(float x, float z) const {
+    if (!river_on || x < river_x0 || x > river_x1) return 0.0f;
+    const float t = (x - river_x0) / (river_x1 - river_x0);
+    const float center = river_z + std::sin(t * 6.2831853f * river_windf) * river_amp;
+    const float bump = std::exp(-((t - 0.5f) * (t - 0.5f)) / (2.0f * 0.018f));
+    const float half = river_half + bump * river_basin;
+    const float bank = half + river_bank;
+    const float dist = std::fabs(z - center);
+    if (dist >= bank) return 0.0f;
+    // 1 inside the water (dist <= half*0.6), easing to 0 at the bank rim.
+    const float e0 = half * 0.6f, e1 = bank;
+    float d = dist <= e0 ? 1.0f : (dist >= e1 ? 0.0f : 1.0f - smooth((dist - e0) / (e1 - e0)));
+    return river_carve * d;
 }
 
 int Terrain::surface_kind(float x, float z) const {

@@ -38,6 +38,9 @@ bool Renderer::init() {
     world_use_solid_loc    = glGetUniformLocation(world_program, "u_use_solid");
     world_solid_loc        = glGetUniformLocation(world_program, "u_solid");
     world_ambient_loc      = glGetUniformLocation(world_program, "u_ambient");
+    world_campos_loc       = glGetUniformLocation(world_program, "u_cam_pos");
+    world_fog_loc          = glGetUniformLocation(world_program, "u_fog_color");
+    world_time_loc         = glGetUniformLocation(world_program, "u_time");
     world_light_count_loc  = glGetUniformLocation(world_program, "u_light_count");
     world_light_pos_loc    = glGetUniformLocation(world_program, "u_light_pos");
     world_light_color_loc  = glGetUniformLocation(world_program, "u_light_color");
@@ -51,6 +54,8 @@ bool Renderer::init() {
     model_alpha_loc        = glGetUniformLocation(model_program, "u_alpha");
     model_emissive_loc     = glGetUniformLocation(model_program, "u_emissive");
     model_ambient_loc      = glGetUniformLocation(model_program, "u_ambient");
+    model_campos_loc       = glGetUniformLocation(model_program, "u_cam_pos");
+    model_fog_loc          = glGetUniformLocation(model_program, "u_fog_color");
     model_light_count_loc  = glGetUniformLocation(model_program, "u_light_count");
     model_light_pos_loc    = glGetUniformLocation(model_program, "u_light_pos");
     model_light_color_loc  = glGetUniformLocation(model_program, "u_light_color");
@@ -147,8 +152,6 @@ bool Renderer::init() {
 void Renderer::begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player,
                            float dt, int fb_w, int fb_h) {
     glViewport(0, 0, fb_w, fb_h);
-    glClearColor(0.015f, 0.015f, 0.028f, 1.0f);   // dark — let the dynamic lights carry the scene
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const float aspect = (fb_h > 0) ? static_cast<float>(fb_w) / fb_h : 1.0f;
     mat4 view, proj;
@@ -160,9 +163,31 @@ void Renderer::begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Play
     // (column-major: view[col][row]). Used to billboard particles toward the camera.
     cam_right[0] = view[0][0]; cam_right[1] = view[1][0]; cam_right[2] = view[2][0];
     cam_up[0]    = view[0][1]; cam_up[1]    = view[1][1]; cam_up[2]    = view[2][1];
+    // Camera WORLD position = translation of the inverse view matrix (for fog + rim light).
+    mat4 inv_view; glm_mat4_inv(view, inv_view);
+    cam_pos[0] = inv_view[3][0]; cam_pos[1] = inv_view[3][1]; cam_pos[2] = inv_view[3][2];
+
+    // Atmospheric horizon/fog color from day/night ambient: soft blue-grey by day, deep
+    // blue at night. The sky is cleared to this so distant geometry melts into the horizon.
+    const float a = ambient_state < 0.0f ? 0.0f : (ambient_state > 1.0f ? 1.0f : ambient_state);
+    const float t = a * a * (3.0f - 2.0f * a);   // smoothstep day<->night
+    // Night = a deep dark BLUE; day = soft blue-grey haze.
+    vec3 fog = { 0.03f + t * 0.53f, 0.05f + t * 0.58f, 0.17f + t * 0.54f };
+    glClearColor(fog[0], fog[1], fog[2], 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    time_state += dt;
+    glUseProgram(world_program);
+    glUniform3fv(world_campos_loc, 1, cam_pos);
+    glUniform3fv(world_fog_loc, 1, fog);
+    glUniform1f(world_time_loc, time_state);
+    glUseProgram(model_program);
+    glUniform3fv(model_campos_loc, 1, cam_pos);
+    glUniform3fv(model_fog_loc, 1, fog);
 }
 
 void Renderer::set_ambient(float ambient) {
+    ambient_state = ambient;   // begin_frame derives the fog/sky color from this
     glUseProgram(world_program); glUniform1f(world_ambient_loc, ambient);
     glUseProgram(model_program); glUniform1f(model_ambient_loc, ambient);
 }
@@ -199,6 +224,22 @@ void Renderer::draw_terrain(const Mesh& mesh, const vec3 color, bool plain) {
     glUseProgram(world_program);
     glUniformMatrix4fv(world_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
     glUniform1i(world_use_solid_loc, plain ? 2 : 1);   // 1 = terrain albedo, 2 = flat solid color
+    glUniform3fv(world_solid_loc, 1, color);
+    mesh.draw();
+}
+
+void Renderer::draw_water(const Mesh& mesh, const vec3 color) {
+    glUseProgram(world_program);
+    glUniformMatrix4fv(world_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
+    glUniform1i(world_use_solid_loc, 3);   // 3 = animated reflective water
+    glUniform3fv(world_solid_loc, 1, color);
+    mesh.draw();
+}
+
+void Renderer::draw_glow(const Mesh& mesh, const vec3 color) {
+    glUseProgram(world_program);
+    glUniformMatrix4fv(world_viewproj_loc, 1, GL_FALSE, reinterpret_cast<const float*>(viewproj));
+    glUniform1i(world_use_solid_loc, 4);   // 4 = unlit emissive glow
     glUniform3fv(world_solid_loc, 1, color);
     mesh.draw();
 }

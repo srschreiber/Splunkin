@@ -25,6 +25,12 @@ struct Renderer {
     int world_light_count_loc = -1, world_light_pos_loc = -1, world_light_color_loc = -1, world_light_radius_loc = -1;
     int model_light_count_loc = -1, model_light_pos_loc = -1, model_light_color_loc = -1, model_light_radius_loc = -1;
     int world_ambient_loc = -1, model_ambient_loc = -1;   // day/night ambient scale
+    int world_campos_loc = -1, model_campos_loc = -1;     // camera world pos (fog + rim)
+    int world_fog_loc = -1, model_fog_loc = -1;           // atmospheric fog/horizon color
+    int world_time_loc = -1;                              // animated water ripples/glints
+    float ambient_state = 1.0f;                           // last set_ambient value (drives fog/sky color)
+    float time_state = 0.0f;                              // accumulated time (water animation)
+    vec3 cam_pos = {0.0f, 0.0f, 0.0f};                    // camera world position (fog + rim)
     uint32_t particle_vao = 0, particle_vbo = 0;
     // Text rendering: a baked glyph atlas (single-channel coverage) drawn as textured
     // NDC quads. ASCII 32..126 are baked from assets/fonts/sansrounded.ttf at FONT_BAKE_PX
@@ -57,6 +63,8 @@ struct Renderer {
     // skips the dirt/grass albedo blend for a flat color — used for props (flyer cubes,
     // stone pillars) rather than the ground.
     void draw_terrain(const Mesh& mesh, const vec3 color, bool plain = false);
+    void draw_water(const Mesh& mesh, const vec3 color);   // reflective animated water surface
+    void draw_glow(const Mesh& mesh, const vec3 color);    // unlit emissive (glowing orbs/projectiles)
     // Draw a model: each part i uses placement * part_world[i] (from pose_model), flat color.
     // alpha < 1 alpha-blends the model (used to render dead players as faint ghosts).
     void draw_model(const Model& model, const std::vector<Mat4>& part_world, mat4 placement, vec3 color, float alpha = 1.0f);

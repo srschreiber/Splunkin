@@ -237,6 +237,11 @@ int main(int argc, char** argv) {
                            (map->spawn_col + 0.5f) * dc::world::TILE, (map->spawn_row + 0.5f) * dc::world::TILE);
     // Flatten the rolling hills/mounds too so the lane reads clean (terrain code kept intact).
     terrain.hill_amp = 0.0f; terrain.mound_amp = 0.0f; terrain.base_amp = 0.0f;
+    // EROSION: carve the river channel into the ground so banks slope down into the water.
+    // Span/centerline must match river_depth (riverZ = height*0.30, x0=16*TILE+8, x1=(width-16)*TILE-8).
+    terrain.set_river(map->height * 0.30f * dc::world::TILE, 4.5f, 1.6f,
+                      16.0f * dc::world::TILE + 8.0f, (map->width - 16.0f) * dc::world::TILE - 8.0f,
+                      3.2f, 10.0f, /*carve*/2.2f, /*bank*/5.0f);
     const vec3 terrain_color = { 0.32f, 0.40f, 0.26f };   // mossy green-brown
 
     // Per-tile ground height (sampled at tile centers), computed once — terrain is static.
@@ -5166,6 +5171,42 @@ int main(int argc, char** argv) {
         renderer.set_ambient(0.5f + 3.0f * daylight01());
         renderer.draw_map(mesh);
         renderer.draw_terrain(terrain_mesh, terrain_color);
+        // --- GRASS: single-color POINTY blades on flat grassy ground around the player. Blades
+        // grow IN from the ground toward the rim (height eases to 0) so they don't pop as you walk.
+        {
+            static dc::renderer::Mesh grass_mesh;
+            std::vector<float> gv;
+            const float GR = 26.0f, SP = 1.0f;
+            const float px = player.position[0], pz = player.position[2];
+            auto h2 = [](int a, int b){ uint32_t x = (uint32_t)(a*73856093) ^ (uint32_t)(b*19349663); x ^= x>>13; x*=0x5bd1e995u; x^=x>>15; return (x & 0xffffu)/65535.0f; };
+            const int c0 = (int)std::floor((px-GR)/SP), c1 = (int)std::floor((px+GR)/SP);
+            const int r0 = (int)std::floor((pz-GR)/SP), r1 = (int)std::floor((pz+GR)/SP);
+            // a single tapered TRIANGLE blade (wide base -> sharp point) — never bulbous.
+            auto blade = [&](float bx, float gy, float bz, float tx, float ty, float tz, float w, float ux, float uz){
+                auto P=[&](float x,float y,float z){ gv.insert(gv.end(), { x,y,z, 0.0f,1.0f,0.0f, 0.f,0.f,0.f }); };
+                P(bx-ux*w, gy, bz-uz*w); P(bx+ux*w, gy, bz+uz*w); P(tx, ty, tz);
+            };
+            for (int gc = c0; gc <= c1; ++gc) for (int gr = r0; gr <= r1; ++gr) {
+                const float hx = h2(gc, gr), hz = h2(gc+7, gr-3), hh = h2(gc-5, gr+11);
+                const float bx = (gc+hx)*SP, bz = (gr+hz)*SP;
+                const float dx = bx-px, dz = bz-pz, d2 = dx*dx+dz*dz;
+                if (d2 > GR*GR) continue;
+                if (in_water(bx, bz)) continue;
+                const float gy = terrain.height(bx, bz);
+                if (gy > 6.0f) continue;                                  // not on the high rocky plateaus
+                if (std::fabs(terrain.height(bx+0.4f,bz)-gy) + std::fabs(terrain.height(bx,bz+0.4f)-gy) > 0.45f) continue;  // skip steep/rock
+                const float r = std::sqrt(d2)/GR, edge = 1.0f - r*r;      // ease height to 0 toward the rim
+                if (hh > 0.55f) continue;                                 // ~half the cells get a tuft
+                const float height = (0.26f + hh*0.34f) * edge;
+                if (height < 0.03f) continue;
+                const float sway = std::sin(t_now*1.5f + bx*0.5f + bz*0.45f) * 0.10f * height + 0.03f;
+                const float tx = bx + 0.5f*sway, tz = bz + 0.85f*sway;    // wind-leaned tip
+                const float w = 0.035f;
+                blade(bx, gy, bz, tx, gy+height, tz, w, 1.0f, 0.0f);      // crossed pair for a bit of volume
+                blade(bx, gy, bz, tx, gy+height, tz, w, 0.0f, 1.0f);
+            }
+            if (!gv.empty()) { grass_mesh.upload(gv); vec3 c = {0.30f, 0.50f, 0.20f}; renderer.draw_terrain(grass_mesh, c, true); }
+        }
         // Base-area floor: a tinted disc on the ground within the buildable radius, so players
         // can see exactly where they can build. Rebuilt each frame (radius grows when you buy area).
         {
@@ -5241,7 +5282,7 @@ int main(int argc, char** argv) {
             }
             river_mesh.upload(rv);
             vec3 deep = { 0.06f, 0.20f, 0.42f };
-            renderer.draw_terrain(river_mesh, deep, true);   // (single rippling sheet; deep blue)
+            renderer.draw_water(river_mesh, deep);   // reflective animated water (ripples + sun glints)
         }
         const float GHOST_ALPHA = 0.18f;               // dead remote players render faint + translucent
         // First person (default): don't draw our own body/helmet — only the held sword
@@ -5339,7 +5380,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Orbit special: spinning swords circling the player at waist height.
+        // Orbit special: spinning swords (knight) or glowing arcane ORBS (wizard) circling you.
         if (orbit.active && player.weapon) {
             float rig_scale = std::sqrt(l_hand_world.m[0][0] * l_hand_world.m[0][0]
                                       + l_hand_world.m[0][1] * l_hand_world.m[0][1]
@@ -5347,20 +5388,24 @@ int main(int argc, char** argv) {
             float s = rig_scale * player.sword_scale;
             const bool wiz = (my_look.weapon_class == 1);
             const auto& w = *player.weapon;
+            std::vector<float> orb_geo;   // wizard: 3D glowing spheres drawn IMMEDIATELY (the particle
+                                          // buffer is cleared after this point, so billboards would vanish).
+            auto sph = [&](float cx, float cy, float cz, float rad) {
+                const int ST = 4, SL = 7; const float PI = 3.14159265f;
+                auto sp = [](float t, float p, float& x, float& y, float& z){ x=std::sin(t)*std::cos(p); y=std::cos(t); z=std::sin(t)*std::sin(p); };
+                auto V = [&](float x,float y,float z){ orb_geo.insert(orb_geo.end(), { cx+x*rad, cy+y*rad, cz+z*rad, x,y,z, 0.f,0.f,0.f }); };
+                for (int i=0;i<ST;++i){ const float t0=PI*i/ST,t1=PI*(i+1)/ST;
+                    for (int j=0;j<SL;++j){ const float p0=2*PI*j/SL,p1=2*PI*(j+1)/SL; float ax,ay,az,bx,by,bz,c2x,c2y,c2z,dx,dy,dz;
+                        sp(t0,p0,ax,ay,az);sp(t1,p0,bx,by,bz);sp(t1,p1,c2x,c2y,c2z);sp(t0,p1,dx,dy,dz);
+                        V(ax,ay,az);V(bx,by,bz);V(c2x,c2y,c2z); V(ax,ay,az);V(c2x,c2y,c2z);V(dx,dy,dz); } }
+            };
             for (int i = 0; i < w.orbit_count; ++i) {
                 float a = orbit.angle + (6.2831853f * i) / w.orbit_count;
                 vec3 opos = { player.position[0] + std::cos(a) * w.orbit_radius,
-                              (player.position[1] - dc::world::EYE_HEIGHT) + 1.2f,   // ride the player's ground
+                              (player.position[1] - dc::world::EYE_HEIGHT) + 1.2f,
                               player.position[2] + std::sin(a) * w.orbit_radius };
-                if (wiz) {   // wizard: a fat purple glowing ORB instead of a sword
-                    const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
-                    for (int g = 0; g < 4; ++g) {
-                        const float sz = 0.52f - g * 0.11f, br = 1.0f - g * 0.18f;
-                        auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
-                            opos[0]+R[0]*u+U[0]*v, opos[1]+R[1]*u+U[1]*v, opos[2]+R[2]*u+U[2]*v,
-                            0.66f*br, 0.34f*br, 1.0f*br, 1.0f }); };
-                        P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz);
-                    }
+                if (wiz) {
+                    sph(opos[0], opos[1], opos[2], 0.26f);   // a glowing arcane orb (3D, drawn below)
                 } else {
                     mat4 op; glm_mat4_identity(op);
                     glm_translate(op, opos);
@@ -5369,6 +5414,11 @@ int main(int argc, char** argv) {
                     vec3 oc = { 0.85f, 0.85f, 0.95f };
                     renderer.draw_model(sword_model, sword_offset, op, oc);
                 }
+            }
+            if (!orb_geo.empty()) {
+                static dc::renderer::Mesh orb_mesh; orb_mesh.upload(orb_geo);
+                vec3 oc = { 0.85f, 0.45f, 1.35f };   // glowing violet arcane energy
+                renderer.draw_glow(orb_mesh, oc);
             }
         }
 
@@ -6523,27 +6573,24 @@ int main(int argc, char** argv) {
                         sp(t0,p0,ax,ay,az); sp(t1,p0,bx,by,bz); sp(t1,p1,cx2,cy2,cz2); sp(t0,p1,dx,dy,dz);
                         V(ax,ay,az);V(bx,by,bz);V(cx2,cy2,cz2); V(ax,ay,az);V(cx2,cy2,cz2);V(dx,dy,dz); } }
             };
+            (void)R; (void)U;
+            // A glowing energy ORB (bright unlit sphere) trailed by a few smaller orbs — all 3D,
+            // so there are no flat squares; the trail fades by shrinking.
             auto draw_bolt = [&](float x, float y, float z, bool big, float dx, float dy, float dz) {
-                const float core = big ? 0.28f : 0.16f, glow = big ? 0.6f : 0.34f;
-                sphere_into(x, y, z, core);   // the dimensional orb
-                // soft outer glow (one camera-facing quad behind the sphere) + a fading comet tail.
-                auto quad = [&](float ox,float oy,float oz,float sz,float r,float g,float b,float a){
-                    auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
-                        ox+R[0]*u+U[0]*v, oy+R[1]*u+U[1]*v, oz+R[2]*u+U[2]*v, r,g,b,a }); };
-                    P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz); };
-                quad(x,y,z, glow, 0.25f,0.6f,1.0f, 0.45f);
+                const float core = big ? 0.30f : 0.18f;
+                sphere_into(x, y, z, core);
                 const float dl = std::sqrt(dx*dx+dy*dy+dz*dz);
                 if (dl > 1e-3f) { const float nx=dx/dl, ny=dy/dl, nz=dz/dl;
-                    for (int k = 1; k <= 4; ++k) { const float t = k*0.28f, fade = 1.0f - k*0.22f;
-                        quad(x-nx*t, y-ny*t, z-nz*t, core*(1.0f-k*0.18f), 0.45f,0.78f,1.0f, 0.35f*fade); } }
+                    for (int k = 1; k <= 5; ++k) { const float t = k*0.22f;
+                        sphere_into(x-nx*t, y-ny*t, z-nz*t, core*(1.0f - k*0.16f)); } }
             };
             if (net.role == dc::net::Role::Client) for (const auto& b : render_bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, 0,0,0);
             else for (const auto& b : bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, b.dir[0], b.dir[1], b.dir[2]);
             if (!bolt_geo.empty()) {
                 static dc::renderer::Mesh bolt_mesh;
                 bolt_mesh.upload(bolt_geo);
-                vec3 bcol = { 0.55f, 0.9f, 1.0f };   // glowing cyan energy
-                renderer.draw_terrain(bolt_mesh, bcol, true);
+                vec3 bcol = { 0.65f, 1.05f, 1.35f };   // bright glowing cyan energy (unlit)
+                renderer.draw_glow(bolt_mesh, bcol);
             }
         }
 
