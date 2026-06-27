@@ -93,6 +93,7 @@ int find_bone(const cgltf_data* data, const char* name) {
 bool read_model(const char* path, ModelData& out) {
     out.nodes.clear();
     out.parts.clear();
+    out.idle = Animation{};
     out.walk = Animation{};
     out.punch = Animation{};
     out.block = Animation{};
@@ -189,7 +190,8 @@ bool read_model(const char* path, ModelData& out) {
     for (cgltf_size i = 0; i < data->animations_count; ++i) {
         const cgltf_animation* anim = &data->animations[i];
         Animation clip = read_animation(data, anim);
-        if (clip.name == "walk")       out.walk = std::move(clip);
+        if (clip.name == "idle")       out.idle = std::move(clip);
+        else if (clip.name == "walk")  out.walk = std::move(clip);
         else if (clip.name == "punch") out.punch = std::move(clip);
         else if (clip.name == "block") out.block = std::move(clip);  // example of a block layer that masks no bones
         else if (clip.name == "open")  out.open = std::move(clip);

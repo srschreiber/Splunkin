@@ -7,8 +7,6 @@ const UpgradeDef& upgrade_def(Upgrade u) {
         { "Whetstone",    "+25% attack damage per stack.",                    IconShape::Sword,    0.85f, 0.20f, 0.20f },  // red
         { "Long Reach",   "Longer, wider swing and a bigger blade per stack.", IconShape::Crescent,0.25f, 0.50f, 1.00f },  // blue
         { "Adrenaline",   "All ability cooldowns -15% per stack.",            IconShape::Clock,    0.20f, 0.85f, 0.90f },  // cyan
-        { "Lunge",        "Dodge dashes farther per stack.",                  IconShape::Arrow,    1.00f, 0.55f, 0.15f },  // orange
-        { "Afterimage",   "+0.12s dodge invincibility per stack.",            IconShape::Shield,   0.70f, 0.50f, 0.95f },  // violet
         { "Keen Edge",    "+8% melee crit chance per stack.",                 IconShape::Star,     1.00f, 0.85f, 0.20f },  // gold
         { "Deathblow",    "+0.5x melee crit damage per stack.",               IconShape::Fang,     0.95f, 0.20f, 0.60f },  // magenta
         { "Regeneration", "+1 health/sec per stack.",                         IconShape::Heart,    0.95f, 0.45f, 0.55f },  // rose
@@ -44,8 +42,6 @@ void apply_upgrade(dc::entity::Player& p, Upgrade u) {
                                    p.swing_cone_bonus  += 0.12f;
                                    p.sword_scale       += 0.2f;   break;  // + a bigger blade
         case Upgrade::Cooldown:    p.cooldown_mult *= 0.85f;      break;  // cyan: -15% cooldowns (diminishing)
-        case Upgrade::DodgeDistance: p.dash_speed += 6.0f;       break;  // orange: faster -> farther dash
-        case Upgrade::DodgeIframes:  p.dash_iframes += 0.12f;    break;  // violet: longer i-frame window
         case Upgrade::CritChance:    p.crit_chance += 0.08f;     break;  // gold: +8% crit chance
         case Upgrade::CritDamage:    p.crit_mult += 0.5f;        break;  // magenta: +0.5x crit damage
         case Upgrade::Regen:         p.health_regen += 1.0f;     break;  // rose: +1 hp/sec

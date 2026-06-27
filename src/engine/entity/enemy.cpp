@@ -204,7 +204,7 @@ void update_enemies(EntityList& list, const dc::world::Map& map,
                 const float dot = (tx * pc.aim[0] + ty * pc.aim[1] + tz * pc.aim[2]) / d;
                 if (dot >= pc.strike_cos) {
                     bool crit = pc.crit_chance > 0.0f && rng01(list.rng) < pc.crit_chance;
-                    const float dmg = crit ? pc.strike_damage * pc.crit_mult : pc.strike_damage;
+                    const float dmg = (crit ? pc.strike_damage * pc.crit_mult : pc.strike_damage) * e.dmg_taken_mult;   // defense debuff near a friendly Insulter
                     out[pi].dealt += (dmg < e.health) ? dmg : (e.health > 0.0f ? e.health : 0.0f);
                     if (hits) hits->push_back({ {e.position[0], e.position[1], e.position[2]}, dmg, crit });
                     e.health -= dmg;

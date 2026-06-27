@@ -215,6 +215,14 @@ int main(int argc, char** argv) {
     const bool insulter_loaded = dc::renderer::read_model("assets/models/insulter.glb", insulter_data);
     if (!insulter_loaded) std::fprintf(stderr, "note: assets/models/insulter.glb not found; run blender/make_insulter.py\n");
 
+    dc::renderer::ModelData mounted_knight_data;   // Tree-Sentinel cavalier: barded warhorse + lance/shield rider (origin at hind hooves)
+    const bool mounted_knight_loaded = dc::renderer::read_model("assets/models/mounted_knight.glb", mounted_knight_data);
+    if (!mounted_knight_loaded) std::fprintf(stderr, "note: assets/models/mounted_knight.glb not found; run blender/make_mounted_knight.py\n");
+
+    dc::renderer::ModelData boat_data;   // wooden rowboat hull + rowing oars (bow +Y, origin at the waterline)
+    const bool boat_loaded = dc::renderer::read_model("assets/models/boat.glb", boat_data);
+    if (!boat_loaded) std::fprintf(stderr, "note: assets/models/boat.glb not found; run blender/make_boat.py\n");
+
     dc::renderer::ModelData skeleton_data;
     const bool skeleton_loaded = dc::renderer::read_model("assets/models/skeleton.glb", skeleton_data);
     if (!skeleton_loaded) std::fprintf(stderr, "note: assets/models/skeleton.glb not found; run blender/make_skeleton.py to enable skeletons\n");
@@ -241,7 +249,7 @@ int main(int argc, char** argv) {
     // Span/centerline must match river_depth (riverZ = height*0.30, x0=16*TILE+8, x1=(width-16)*TILE-8).
     terrain.set_river(map->height * 0.30f * dc::world::TILE, 4.5f, 1.6f,
                       16.0f * dc::world::TILE + 8.0f, (map->width - 16.0f) * dc::world::TILE - 8.0f,
-                      3.2f, 10.0f, /*carve*/2.2f, /*bank*/5.0f);
+                      3.2f, 10.0f, /*carve*/1.2f, /*bank*/4.0f);   // subtle erosion (deep carve broke the build raycast)
     const vec3 terrain_color = { 0.32f, 0.40f, 0.26f };   // mossy green-brown
 
     // Per-tile ground height (sampled at tile centers), computed once — terrain is static.
@@ -281,6 +289,10 @@ int main(int argc, char** argv) {
     if (scavenger_loaded) scavenger_model.upload(scavenger_data);
     dc::renderer::Model insulter_model;
     if (insulter_loaded) insulter_model.upload(insulter_data);
+    dc::renderer::Model mounted_knight_model;
+    if (mounted_knight_loaded) mounted_knight_model.upload(mounted_knight_data);
+    dc::renderer::Model boat_model;
+    if (boat_loaded) boat_model.upload(boat_data);
     dc::renderer::Model bat_model;
     if (bat_loaded) bat_model.upload(bat_data);
     dc::renderer::Model gnome_model;
@@ -511,6 +523,12 @@ int main(int argc, char** argv) {
             const float bump = std::exp(-((t - 0.5f) * (t - 0.5f)) / (2.0f * 0.018f));
             return std::fabs(wz - center) < (3.2f + bump * 10.0f);
         };
+        // No grass inside either base's footprint (so blades don't poke through the blue base
+        // perimeter marker). Clear the LARGEST the base can grow to; both cores sit at the lane
+        // center, 16 tiles in from each end.
+        const float baseZ = map->height * 0.5f * dc::world::TILE;
+        const float p_core_x = 16.0f * dc::world::TILE, e_core_x = (map->width - 16.0f) * dc::world::TILE;
+        const float base_clear2 = dc::game::BASE_AREA_MAX * dc::game::BASE_AREA_MAX;
         const int TUFTS = 1400;
         for (int i = 0; i < TUFTS; ++i) {
             const float x = gf() * (map->width * dc::world::TILE);
@@ -518,6 +536,8 @@ int main(int argc, char** argv) {
             const int c = static_cast<int>(x / dc::world::TILE), r = static_cast<int>(z / dc::world::TILE);
             if (map->at(c, r) != dc::world::Cell::Open) continue;
             if (grass_in_river(x, z)) continue;   // no grass in the water
+            { const float dx = x - p_core_x, dz = z - baseZ; if (dx*dx + dz*dz < base_clear2) continue; }   // player base
+            { const float dx = x - e_core_x, dz = z - baseZ; if (dx*dx + dz*dz < base_clear2) continue; }   // enemy base
             const float y = terrain.height(x, z);
             const int n = 3 + static_cast<int>(gf() * 3);   // a few blades per tuft
             for (int b = 0; b < n; ++b) {
@@ -765,7 +785,7 @@ int main(int argc, char** argv) {
     std::vector<float> piece_hp;
     std::vector<float> net_piece_hp;
     // Friendly lane mobs (barracks output). Host owns `allies`; clients render `net_allies`.
-    struct Ally { vec3 pos; float yaw = 0.0f, health = 0.0f, max_hp = 1.0f, attack_cd = 0.0f, speed_mul = 1.0f, size_mul = 1.0f, def_mult = 1.0f; uint8_t kind = 0, up = 0; float atk = 0.0f, slam = -1.0f; };  // up = barracks upgrade level; def_mult = damage-taken scale
+    struct Ally { vec3 pos; float yaw = 0.0f, health = 0.0f, max_hp = 1.0f, attack_cd = 0.0f, speed_mul = 1.0f, size_mul = 1.0f, def_mult = 1.0f; uint8_t kind = 0, up = 0; float atk = 0.0f, slam = -1.0f; bool moving = false; };  // up = barracks upgrade level; def_mult = damage-taken scale; moving = advanced this frame (idle vs walk anim)
     std::vector<Ally> allies;
     std::vector<dc::net::AllyState> net_allies;
     const uint32_t ALLY_ID_BASE = 0xA11E0000u;   // pseudo-ids so they slot into the combat target list
@@ -1183,6 +1203,8 @@ int main(int argc, char** argv) {
     std::vector<Bolt> bolts;
     struct BoltVis { vec3 pos; bool big; };
     std::vector<BoltVis> render_bolts;   // client: bolts to draw, from the snapshot
+    struct BoltSpark { vec3 pos; float age = 0.0f, life = 0.38f, sz = 0.11f; };
+    std::vector<BoltSpark> bolt_sparks;  // persistent fading particle trail streaming behind staff bolts
     float bolt_cd = 0.0f;                // small-bolt (LMB) cooldown
     constexpr float BOLT_SPEED = 32.0f, BOLT_RANGE = 32.0f;
     // Orbit special (2): spinning swords circling the player for a short time.
@@ -2852,28 +2874,32 @@ int main(int argc, char** argv) {
                     throw_cd = player.weapon->throw_cooldown * player.cooldown_mult;
                 } else {
                     player_strike = true;
-                    // Air-slash "cut" at full extension: a thin bright crescent of motes
-                    // launched forward along the aim (bowed in the middle so it reads as a
-                    // slash edge, not a round puff).
-                    vec3 aim; player.front(aim);
-                    vec3 wup = {0.0f, 1.0f, 0.0f}; if (std::fabs(aim[1]) > 0.9f) { wup[0] = 1.0f; wup[1] = 0.0f; }
-                    vec3 rgt, up2;
-                    glm_vec3_cross(aim, wup, rgt);  glm_vec3_normalize(rgt);
-                    glm_vec3_cross(rgt, aim, up2);  glm_vec3_normalize(up2);
-                    const int N = 22;
-                    const float HALF = 1.2f, BOW = 0.7f, spd = 17.0f;
+                    // Telegraph the SWING ARC: a fan of bright motes spanning the ACTUAL damage
+                    // cone (reach + half-angle, at swing height), so the area that does damage is
+                    // obvious. Two motes per angle (mid + outer reach) fill the wedge.
+                    vec3 aimf; player.front(aimf);
+                    const float ayaw = std::atan2(aimf[2], aimf[0]);
+                    const float reach = (player.weapon ? player.weapon->reach : dc::entity::UNARMED_REACH) + player.swing_reach_bonus;
+                    float ccos = (player.weapon ? player.weapon->cone_cos : dc::entity::UNARMED_CONE) - player.swing_cone_bonus;
+                    if (ccos < -0.5f) ccos = -0.5f; if (ccos > 1.0f) ccos = 1.0f;
+                    const float halfa = std::acos(ccos);   // cone half-angle
+                    const float cy = terrain.height(player.position[0], player.position[2]) + 1.05f;   // chest-height sweep
+                    const int N = 26;
                     for (int i = 0; i < N; ++i) {
-                        const float ti = static_cast<float>(i) / (N - 1) * 2.0f - 1.0f;   // -1..1 along the edge
-                        const float lat = ti * HALF, bow = (1.0f - ti * ti) * BOW;        // crescent: middle forward
-                        const float skew = 0.12f;   // slight diagonal tilt (was 0.3 — straighter, less clockwise)
-                        Spark s;
-                        s.pos[0] = player.position[0] + aim[0]*0.6f + up2[0]*lat + rgt[0]*lat*skew + aim[0]*bow;
-                        s.pos[1] = player.position[1] - 0.1f + aim[1]*0.6f + up2[1]*lat + rgt[1]*lat*skew + aim[1]*bow;
-                        s.pos[2] = player.position[2] + aim[2]*0.6f + up2[2]*lat + rgt[2]*lat*skew + aim[2]*bow;
-                        s.vel[0] = aim[0]*spd; s.vel[1] = aim[1]*spd; s.vel[2] = aim[2]*spd;
-                        s.color[0] = 1.0f; s.color[1] = 1.0f; s.color[2] = 1.0f;
-                        s.age = 0.0f; s.life = 0.28f;
-                        sparks.push_back(s);
+                        const float t = (i / static_cast<float>(N - 1)) * 2.0f - 1.0f;   // -1..1 across the arc
+                        const float a = ayaw + t * halfa;
+                        const float dcs = std::cos(a), dsn = std::sin(a);
+                        for (int rr = 0; rr < 2; ++rr) {
+                            const float rad = reach * (rr == 0 ? 0.62f : 1.0f);
+                            Spark s;
+                            s.pos[0] = player.position[0] + dcs * rad;
+                            s.pos[1] = cy;
+                            s.pos[2] = player.position[2] + dsn * rad;
+                            s.vel[0] = dcs * 1.5f; s.vel[1] = 0.6f; s.vel[2] = dsn * 1.5f;   // gentle outward+up sparkle
+                            s.color[0] = 0.75f; s.color[1] = 0.92f; s.color[2] = 1.0f;       // bright cyan-white edge
+                            s.age = 0.0f; s.life = 0.26f;
+                            sparks.push_back(s);
+                        }
                     }
                 }
             }
@@ -3549,10 +3575,34 @@ int main(int argc, char** argv) {
                 // Stand OFF the enemy core (don't walk into the tower): stop at its radius + reach.
                 const float stop = march_core ? (CORE_RAD + reach * 0.6f)
                                   : ((!mt.scavenger && tgt) ? reach : 0.4f);
+                a.moving = (d > stop);
                 if (d > stop) {
                     const float smul = in_slime(a.pos[0], a.pos[2]) ? SLIME_SLOW : 1.0f;   // your mobs mired by enemy slime
                     const float step = std::min(dc::game::ALLY_SPEED * a.speed_mul * smul * mt.speed * dt, d - stop);   // mt.speed: knights are slow
                     a.pos[0] += hx * step; a.pos[2] += hz * step;
+                }
+                // Separation (boids): push apart from crowded same-team neighbors so the army
+                // spreads into a loose front instead of collapsing into a single-file line. Fliers
+                // only separate from other fliers (they live at a different height than ground mobs).
+                {
+                    const float SEP_R = 1.7f * a.size_mul;
+                    float sepx = 0.0f, sepz = 0.0f;
+                    for (std::size_t j = 0; j < allies.size(); ++j) {
+                        if (j == i) continue;
+                        if (dc::game::mob_type(allies[j].kind).flies != mt.flies) continue;
+                        const float ox = a.pos[0]-allies[j].pos[0], oz = a.pos[2]-allies[j].pos[2];
+                        const float od2 = ox*ox + oz*oz;
+                        if (od2 < SEP_R*SEP_R && od2 > 1e-5f) {
+                            const float od = std::sqrt(od2), w = (SEP_R - od) / SEP_R;
+                            sepx += (ox/od) * w; sepz += (oz/od) * w;
+                        }
+                    }
+                    const float sm = std::sqrt(sepx*sepx + sepz*sepz);
+                    if (sm > 1e-4f) {
+                        if (sm > 1.0f) { sepx /= sm; sepz /= sm; }   // cap so a dense blob doesn't fling
+                        const float sep_step = dc::game::ALLY_SPEED * a.speed_mul * mt.speed * dt * 0.85f;
+                        a.pos[0] += sepx * sep_step; a.pos[2] += sepz * sep_step;
+                    }
                 }
                 // Fliers (flier/bat) hover; everyone else stands on the ground.
                 a.pos[1] = terrain.height(a.pos[0], a.pos[2]) + dc::world::EYE_HEIGHT + (mt.flies ? 1.6f : 0.0f);
@@ -3675,6 +3725,21 @@ int main(int argc, char** argv) {
         frame_booms.clear();
         std::vector<dc::entity::EnemyHitPlayer> hits;
         if (net.role != dc::net::Role::Client) {
+            // Friendly Insulter aura ALSO lowers nearby enemies' DEFENSE — they take more damage
+            // (mirror of how an enemy Insulter weakens your attacks). Strongest nearby Bill wins.
+            for (auto& e : entities.items) {
+                if (!e.alive || e.type != dc::entity::EntityType::Enemy) continue;
+                float m = 1.0f;
+                for (const auto& a : allies)
+                    if (dc::game::mob_type(a.kind).visual == dc::game::MobVisual::Insulter) {
+                        const float dx = a.pos[0]-e.position[0], dz = a.pos[2]-e.position[2];
+                        if (dx*dx + dz*dz < INSULT_AURA*INSULT_AURA) {
+                            const float mm = std::min(2.2f, 1.40f + 0.08f * a.up);   // +40% base, +8%/upgrade level
+                            if (mm > m) m = mm;
+                        }
+                    }
+                e.dmg_taken_mult = m;
+            }
             dc::entity::update_enemies(entities, *map, flows, players, hits, dt, &frame_deaths, &frame_hits, &tile_heights, &frame_death_xp, &frame_death_gold, enemy_speed_mult);
             // Advance ranged enemies' shots; their hits add into the same `hits`.
             dc::entity::update_projectiles(entities, *map, players, hits, dt, &frame_booms);
@@ -3810,8 +3875,9 @@ int main(int argc, char** argv) {
                                     shot_x = enemy_core_pos[0]; shot_y = enemy_core_pos[1]+1.5f; shot_z = enemy_core_pos[2]; fired = true;
                                 }
                             }
-                            if (fired) {   // visible tracer shell from the muzzle toward the target
-                                TBullet tb; tb.pos[0]=b.pos[0]; tb.pos[1]=b.pos[1]+1.4f; tb.pos[2]=b.pos[2];
+                            if (fired) {   // visible tracer shell from the forward cannon MUZZLE toward the target
+                                const float mca=std::cos(b.yaw), msa=std::sin(b.yaw);
+                                TBullet tb; tb.pos[0]=b.pos[0]+mca*1.7f; tb.pos[1]=b.pos[1]+1.3f; tb.pos[2]=b.pos[2]+msa*1.7f;
                                 float vx=shot_x-tb.pos[0], vy=shot_y-tb.pos[1], vz=shot_z-tb.pos[2];
                                 float vl=std::sqrt(vx*vx+vy*vy+vz*vz); if (vl<1e-3f) vl=1.0f;
                                 const float spd=45.0f; tb.vel[0]=vx/vl*spd; tb.vel[1]=vy/vl*spd; tb.vel[2]=vz/vl*spd; tb.life=1.0f; tb.red=false;
@@ -3880,8 +3946,10 @@ int main(int argc, char** argv) {
                             if (e2 < bd2) { bd2 = e2; tgt = &p; } }
                         if (tgt) {
                             b.fire_cd = BOAT_FIRE_CD;
+                            b.yaw = std::atan2(tgt->pos[2]-b.pos[2], tgt->pos[0]-b.pos[0]);   // train the bow cannon on the target
+                            const float mca=std::cos(b.yaw), msa=std::sin(b.yaw);
                             dc::entity::Projectile pr;
-                            pr.pos[0]=b.pos[0]; pr.pos[1]=b.pos[1]+1.4f; pr.pos[2]=b.pos[2];
+                            pr.pos[0]=b.pos[0]+mca*1.7f; pr.pos[1]=b.pos[1]+1.3f; pr.pos[2]=b.pos[2]+msa*1.7f;   // from the forward muzzle
                             float ex=tgt->pos[0]-pr.pos[0], ey=(tgt->pos[1])-pr.pos[1], ez=tgt->pos[2]-pr.pos[2];
                             float el=std::sqrt(ex*ex+ey*ey+ez*ez); if (el<1e-3f) el=1.0f;
                             const float spd = 24.0f;
@@ -5129,6 +5197,8 @@ int main(int argc, char** argv) {
             const float dur = roll_clip->duration;
             layers.push_back({ roll_clip, (1.0f - roll_t / ROLL_DUR) * dur, -1, false });  // whole body, one-shot
         } else {
+            // Idle breathing/sway as the base layer when standing still (walk replaces it when moving).
+            if (!moving && pmd.idle.valid()) layers.push_back({ &pmd.idle, run_time, -1 });
             if (moving)   layers.push_back({ &pmd.walk,  anim_time,  -1 });
             if (punching) layers.push_back({ &pmd.punch, punch_time, pmd.arm_l_node });
             if (blocking) layers.push_back({ &pmd.block, block_time, pmd.arm_r_node, false });  // right arm, one-shot: play to end and hold (no loop)
@@ -5557,7 +5627,7 @@ int main(int argc, char** argv) {
                                      : is_troll ? troll_model : is_demon ? demon_model : is_insult ? insulter_model : player_model;
             // The troll's weighted swing and the demon's yell animate the whole body, so play
             // their attack UNMASKED; other enemies mask the punch to armL (so they swing while walking).
-            const bool full_body_attack = is_troll || is_demon;
+            const bool full_body_attack = is_troll || is_demon || is_insult;   // insulter raises his RIGHT arm to flip the bird — full body
             std::vector<dc::renderer::AnimLayer> el;
             // Troll: its clip's slam CONTACT is the final keyframe, so sample NORMALIZED against
             // the wind-up — the club hits exactly when the damage lands (no early/late slam).
@@ -5566,6 +5636,7 @@ int main(int argc, char** argv) {
                 punch_sample = (en.attack_time / dc::entity::TROLL_WINDUP) * md.punch.duration;
             if (en.attacking)        el.push_back({ &md.punch, punch_sample, full_body_attack ? -1 : md.arm_l_node });
             else if (en.anim_time > 0.0f) el.push_back({ &md.walk, en.anim_time, -1 });
+            else if (md.idle.valid()) el.push_back({ &md.idle, t_now + en.position[0], -1 });   // standing still: breathe
             dc::renderer::pose_model(md, el, 0.0f, enemy_part_world);
             mat4 eplace;
             glm_mat4_identity(eplace);
@@ -5634,9 +5705,9 @@ int main(int argc, char** argv) {
                 Vt(X1,Y0,Z0,0,0,-1);Vt(X0,Y0,Z0,0,0,-1);Vt(X0,Y1,Z0,0,0,-1); Vt(X1,Y0,Z0,0,0,-1);Vt(X0,Y1,Z0,0,0,-1);Vt(X1,Y1,Z0,0,0,-1);
             };
             for (std::size_t i = 0; i < na; ++i) {
-                float ax, az, ayaw, hfrac, asize, aatk = 0.0f; uint8_t akind = 0, aup = 0;
+                float ax, az, ayaw, hfrac, asize, aatk = 0.0f; uint8_t akind = 0, aup = 0; bool amoving = true;
                 if (cl) { const auto& a = net_allies[i]; ax=a.x; az=a.z; ayaw=a.yaw; hfrac=a.health01; akind=a.kind; asize=a.size; aatk=a.atk; aup=a.up; }
-                else    { const auto& a = allies[i]; ax=a.pos[0]; az=a.pos[2]; ayaw=a.yaw; hfrac=a.max_hp>0?a.health/a.max_hp:0.0f; akind=a.kind; asize=a.size_mul; aatk=a.atk; aup=a.up; }
+                else    { const auto& a = allies[i]; ax=a.pos[0]; az=a.pos[2]; ayaw=a.yaw; hfrac=a.max_hp>0?a.health/a.max_hp:0.0f; akind=a.kind; asize=a.size_mul; aatk=a.atk; aup=a.up; amoving=a.moving; }
                 // The mob's MODEL mirrors the matching enemy: ground=skeleton, mage=mage,
                 // bat=bat, flier=eye, demon=demon, scavenger=scavenger (white-tinted so its own
                 // materials show). Falls back to the skeleton if a model is missing.
@@ -5656,73 +5727,39 @@ int main(int argc, char** argv) {
                 }
                 dc::renderer::ModelData& amd = *amdp; dc::renderer::Model& amdl = *amdlp;
                 std::vector<dc::renderer::AnimLayer> al;
-                al.push_back({ &amd.walk, t_now * 1.8f + static_cast<float>(i), -1 });
+                if (!amoving && amd.idle.valid())   // standing at the front / held: breathe instead of moonwalk
+                    al.push_back({ &amd.idle, t_now + static_cast<float>(i), -1 });
+                else
+                    al.push_back({ &amd.walk, t_now * 1.8f + static_cast<float>(i), -1 });
                 dc::renderer::pose_model(amd, al, 0.0f, enemy_part_world);
                 mat4 apl; glm_mat4_identity(apl);
                 float afy = terrain.height(ax, az) + MODEL_FOOT_LIFT;
                 if (in_water(ax, az)) afy += -0.35f + std::sin(t_now * 3.0f + i) * 0.1f;   // wade + bob
                 if (dc::game::mob_type(akind).flies) afy += 1.6f + std::sin(t_now*2.0f+i)*0.15f;   // hover
                 if (vis == dc::game::MobVisual::Knight) {
-                    // MOUNTED KNIGHT — one procedural model: an armored warhorse + steel rider with a
-                    // raised mace. On attack the whole rig REARS up on its hind legs and SLAMS down.
+                    // MOUNTED KNIGHT — a Tree-Sentinel cavalier model (barded warhorse + lance/shield
+                    // rider). The model's PUNCH clip is the rear-and-slam (its origin is at the hind
+                    // hooves, so the rear pitches about them naturally).
                     const float hca = std::cos(ayaw), hsa = std::sin(ayaw);
                     const float gy = terrain.height(ax, az) + MODEL_FOOT_LIFT;
-                    const float walkp = std::sin(t_now*4.5f + i);
-                    const float rgx = -hsa, rgz = hca;     // beam (right) axis
+                    const float rgx = -hsa, rgz = hca;     // beam (right) axis  (for the slam shockwave)
                     const float F0 = hca, F2 = hsa;        // forward axis (horizontal)
-                    // Rear/slam pitch from the attack clock (aatk: 1 at wind-up -> 0 settled).
-                    const float p = 1.0f - aatk;
-                    float theta = 0.0f;
-                    if (aatk > 0.001f) {
-                        if      (p < 0.30f) theta =  0.85f * (p / 0.30f);                      // rear up
-                        else if (p < 0.55f) theta =  0.85f * (1.0f - (p - 0.30f) / 0.25f * 2.0f);// swing down through 0...
-                        else                theta = -0.85f * std::max(0.0f, 1.0f - (p - 0.55f) / 0.45f); // ...to a slam, then recover
+                    if (mounted_knight_loaded) {
+                        std::vector<dc::renderer::AnimLayer> kl;
+                        if (aatk > 0.001f && mounted_knight_data.punch.valid())
+                            kl.push_back({ &mounted_knight_data.punch, (1.0f - aatk) * mounted_knight_data.punch.duration, -1, false });   // rear -> slam
+                        else if (amoving)
+                            kl.push_back({ &mounted_knight_data.walk, t_now * 1.6f + static_cast<float>(i), -1 });
+                        else if (mounted_knight_data.idle.valid())
+                            kl.push_back({ &mounted_knight_data.idle, t_now + static_cast<float>(i), -1 });
+                        dc::renderer::pose_model(mounted_knight_data, kl, 0.0f, enemy_part_world);
+                        mat4 kpl; glm_mat4_identity(kpl);
+                        vec3 kpos = { ax, gy, az }; glm_translate(kpl, kpos);   // origin = hind hooves on the ground
+                        glm_rotate_y(kpl, -ayaw + MODEL_YAW_OFFSET, kpl);
+                        const float ks = 1.05f * asize; { vec3 ksc = { ks, ks, ks }; glm_scale(kpl, ksc); }
+                        vec3 ktint = { 0.55f, 0.72f, 1.0f };   // ally blue (matches the other friendly mobs)
+                        renderer.draw_model(mounted_knight_model, enemy_part_world, kpl, ktint);
                     }
-                    const float ct = std::cos(theta), st = std::sin(theta);
-                    // pivot at the hind hooves; pitch every part about it in the forward-up plane.
-                    const float pvx = ax - F0*0.85f, pvz = az - F2*0.85f, pvy = gy;
-                    auto pose = [&](float cx, float cy, float cz, float& ox, float& oy, float& oz){
-                        const float vx = cx-pvx, vy = cy-pvy, vz = cz-pvz;
-                        const float vf = vx*F0 + vz*F2;                 // forward component
-                        const float vb = vx*rgx + vz*rgz;              // beam component (unchanged by pitch)
-                        const float nf = vf*ct - vy*st, nu = vf*st + vy*ct;
-                        ox = pvx + F0*nf + rgx*vb; oy = pvy + nu; oz = pvz + F2*nf + rgz*vb;
-                    };
-                    auto HB = [&](std::vector<float>& buf, float cx, float cy, float cz, float hx, float hy, float hz){
-                        float ox,oy,oz; pose(cx,cy,cz,ox,oy,oz); hboxto(buf, ox,oy,oz, hx,hy,hz, hca,hsa);
-                    };
-                    const float by = gy + 1.05f + walkp*0.04f;
-                    // -- armored warhorse (brown body, with barding) --
-                    HB(horse_v, ax,            by,        az,            1.0f, 0.40f, 0.36f);                 // barrel
-                    HB(horse_v, ax + F0*0.55f, by-0.02f,  az + F2*0.55f, 0.55f, 0.42f, 0.40f);               // chest (barded)
-                    HB(horse_v, ax + F0*1.05f, by+0.30f,  az + F2*1.05f, 0.20f, 0.40f, 0.18f);               // arched neck
-                    HB(horse_v, ax + F0*1.30f, by+0.62f,  az + F2*1.30f, 0.22f, 0.20f, 0.18f);               // head
-                    HB(horse_v, ax + F0*1.52f, by+0.58f,  az + F2*1.52f, 0.16f, 0.12f, 0.12f);               // muzzle
-                    HB(horse_v, ax + F0*1.18f, by+0.86f,  az + F2*1.18f, 0.05f, 0.12f, 0.12f);               // ears
-                    for (int s=0;s<3;++s) HB(horse_v, ax + F0*(0.95f-s*0.16f), by+0.5f-s*0.04f, az + F2*(0.95f-s*0.16f), 0.05f, 0.16f, 0.20f); // mane
-                    HB(horse_v, ax - F0*1.08f, by+0.28f,  az - F2*1.08f, 0.10f, 0.36f, 0.06f);               // tail
-                    const float sw = (aatk>0.001f) ? 0.0f : walkp*0.26f;   // legs hold during the rear
-                    auto leg = [&](float fwd, float side, float swing){
-                        HB(horse_v, ax + F0*fwd + rgx*side + F0*swing, gy+0.40f, az + F2*fwd + rgz*side + F2*swing, 0.11f, 0.50f, 0.11f);
-                    };
-                    leg( 0.80f, 0.27f, sw);  leg( 0.80f,-0.27f,-sw);     // front legs (lift when reared)
-                    leg(-0.80f, 0.27f,-sw);  leg(-0.80f,-0.27f, sw);     // hind legs (planted)
-                    // -- RIDER: our actual melee character, seated on the saddle. It pitches with the
-                    // horse (leans back on the rear, drives forward on the slam). --
-                    {
-                        std::vector<dc::renderer::AnimLayer> rl;
-                        rl.push_back({ &model_data.walk, t_now*1.3f + static_cast<float>(i), -1 });
-                        dc::renderer::pose_model(model_data, rl, 0.0f, enemy_part_world);
-                        float sx,sy,sz; pose(ax, by + 0.28f, az, sx, sy, sz);   // saddle seat, run through the pitch
-                        mat4 rpl; glm_mat4_identity(rpl);
-                        vec3 rpos = { sx, sy, sz }; glm_translate(rpl, rpos);
-                        glm_rotate_y(rpl, -ayaw + MODEL_YAW_OFFSET, rpl);
-                        { vec3 xax = { 1.0f, 0.0f, 0.0f }; glm_rotate(rpl, theta, xax); }   // lean with the rear/slam
-                        { vec3 rsc = { 0.92f, 0.92f, 0.92f }; glm_scale(rpl, rsc); }
-                        vec3 rtint = { 0.42f, 0.78f, 0.95f };   // ally blue, matching our other mobs
-                        renderer.draw_model(player_model, enemy_part_world, rpl, rtint);
-                    }
-                    afy += 1.55f;   // (the generic ally model isn't drawn for the knight)
                     // a slam SHOCKWAVE — an expanding ground ring of embers — when the hooves land.
                     if (aatk > 0.04f && aatk < 0.55f) {
                         const auto& R2 = renderer.cam_right; const auto& U2 = renderer.cam_up;
@@ -5749,10 +5786,11 @@ int main(int argc, char** argv) {
                 }
                 const float dscale = (vis == dc::game::MobVisual::Demon || vis == dc::game::MobVisual::Troll) ? 1.7f : 1.0f;   // demons + trolls are big
                 { vec3 asc = { asize*dscale, asize*dscale, asize*dscale }; glm_scale(apl, asc); }
-                // Tint: white for own-material models; a friendly cyan-green for the skeleton grunts.
+                // Tint EVERY ally toward team BLUE (like the skeleton grunts) so they're clearly
+                // distinguishable from the natural-colored enemy mobs.
                 vec3 acol;
-                if (white) { acol[0]=acol[1]=acol[2]=1.0f; }
-                else { acol[0]=0.35f; acol[1]=0.85f; acol[2]=0.9f; }
+                if (white) { acol[0]=0.50f; acol[1]=0.70f; acol[2]=1.0f; }   // own-material mobs shifted blue
+                else { acol[0]=0.35f; acol[1]=0.85f; acol[2]=0.9f; }         // skeleton grunts: cyan-blue
                 if (vis != dc::game::MobVisual::Knight && vis != dc::game::MobVisual::Slime)   // those are fully procedural
                     renderer.draw_model(amdl, enemy_part_world, apl, acol);
                 // BILL constantly rants: a swirl of yellow motes orbits him (camera-facing billboards).
@@ -5845,6 +5883,7 @@ int main(int argc, char** argv) {
                 std::vector<float> bv, sailv, sailv_friend, subv;   // subv = friendly sub hull (yellow)
                 std::vector<float> sub_dark, sub_lens, sub_red;     // sub_dark = navy tower, sub_lens = blue lens, sub_red = ENEMY sub hull+lens
                 std::vector<float> mine_rack;                       // dark iron mine balls on a minelayer's deck
+                std::vector<float> cannon_v;                        // dark steel deck cannons on warships
                 auto boxrb = [&](std::vector<float>& buf, float cx, float cy, float cz, float hx, float hy, float hz, float ca, float sa) {
                     auto Vt = [&](float lx, float ly, float lz, float nx, float ny, float nz) {
                         const float rx = ca*lx - sa*lz, rz = sa*lx + ca*lz;
@@ -5900,13 +5939,21 @@ int main(int argc, char** argv) {
                         }
                         continue;
                     }
-                    if (bkind == 8 || bkind == 9) {   // MINELAYER: a barge with mine racks + a team flag
-                        const float gy = wbase + 0.3f + std::sin(t_now*1.6f + i)*0.1f;
-                        boxrb(bv, bx, gy, bz, 2.2f, 0.45f, 1.05f, ca, sa);          // hull
-                        boxrb(bv, bx, gy+0.5f, bz, 1.9f, 0.16f, 0.9f, ca, sa);      // deck
-                        for (int k=0;k<4;++k){ const float off=(k-1.5f)*0.62f;
-                            boxrb(mine_rack, bx+ca*off, gy+0.82f, bz+sa*off, 0.24f,0.24f,0.24f, ca, sa); }   // mine balls
-                        boxrb(bv, bx-ca*1.6f, gy+1.1f, bz-sa*1.6f, 0.08f, 0.9f, 0.08f, ca, sa);   // flag pole (stern)
+                    if (bkind == 8 || bkind == 9) {   // MINELAYER: the boat MODEL barge with mine racks + a team flag
+                        const float gy = wbase + 0.28f + std::sin(t_now*1.6f + i)*0.08f;
+                        if (boat_loaded) {
+                            std::vector<dc::renderer::AnimLayer> bl; bl.push_back({ &boat_data.idle, t_now + static_cast<float>(i), -1 });   // barge: gentle bob, oars shipped
+                            dc::renderer::pose_model(boat_data, bl, 0.0f, enemy_part_world);
+                            mat4 bpl; glm_mat4_identity(bpl);
+                            vec3 bpos = { bx, gy, bz }; glm_translate(bpl, bpos);
+                            glm_rotate_y(bpl, -byaw + MODEL_YAW_OFFSET, bpl);
+                            { vec3 bsc = { 1.75f, 1.5f, 1.95f }; glm_scale(bpl, bsc); }
+                            vec3 btint; if (bkind==8) { btint[0]=0.82f; btint[1]=0.86f; btint[2]=1.0f; } else { btint[0]=1.0f; btint[1]=0.84f; btint[2]=0.72f; }
+                            renderer.draw_model(boat_model, enemy_part_world, bpl, btint);
+                        }
+                        for (int k=0;k<4;++k){ const float off=(k-1.5f)*0.52f;
+                            boxrb(mine_rack, bx+ca*off, gy+0.62f, bz+sa*off, 0.20f,0.20f,0.20f, ca, sa); }   // mine balls on deck
+                        boxrb(bv, bx-ca*1.6f, gy+1.0f, bz-sa*1.6f, 0.07f, 0.9f, 0.07f, ca, sa);   // flag pole (stern)
                         boxrb(bkind==8 ? sailv_friend : sailv, bx-ca*1.6f, gy+1.7f, bz-sa*1.6f, 0.06f, 0.3f, 0.5f, ca, sa);  // team flag
                         vec3 mid = { bx, gy + 1.8f, bz }; const float hfc = hf<0?0:(hf>1?1:hf);
                         auto bar=[&](float lx,float rx,float r,float g,float bb,float aa){ auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(),{
@@ -5914,33 +5961,54 @@ int main(int argc, char** argv) {
                         bar(-1.0f,1.0f,0.3f,0.05f,0.05f,0.4f); bar(-1.0f,-1.0f+2.0f*hfc,0.3f,0.8f,0.4f,0.85f);
                         continue;
                     }
-                    if (bkind == 10 || bkind == 11) {   // MINESWEEPER: a tiny rowboat with a skeleton aboard
-                        const float gy = wbase + 0.25f + std::sin(t_now*2.2f + i)*0.13f;
-                        boxrb(bv, bx, gy, bz, 1.0f, 0.28f, 0.55f, ca, sa);          // rowboat hull
-                        boxrb(bv, bx, gy+0.28f, bz, 0.85f, 0.08f, 0.45f, ca, sa);   // gunwale
-                        { const float row = std::sin(t_now*6.0f + i)*0.3f;          // two oars sweeping
-                          boxrb(bv, bx+ca*row*0.4f, gy+0.3f, bz+sa*row*0.4f+0.6f, 0.05f, 0.05f, 0.7f, ca, sa);
-                          boxrb(bv, bx+ca*row*0.4f, gy+0.3f, bz+sa*row*0.4f-0.6f, 0.05f, 0.05f, 0.7f, ca, sa); }
-                        if (skeleton_loaded) {
-                            std::vector<dc::renderer::AnimLayer> sl; sl.push_back({ &skeleton_data.walk, t_now*4.0f + i, -1 });
+                    if (bkind == 10 || bkind == 11) {   // MINESWEEPER: the rowboat MODEL with a skeleton rowing it
+                        const float gy = wbase + 0.28f + std::sin(t_now*2.2f + i)*0.10f;   // float at the waterline (model origin = waterline)
+                        if (boat_loaded) {
+                            std::vector<dc::renderer::AnimLayer> bl; bl.push_back({ &boat_data.walk, t_now*1.6f + static_cast<float>(i), -1 });   // oars row
+                            dc::renderer::pose_model(boat_data, bl, 0.0f, enemy_part_world);
+                            mat4 bpl; glm_mat4_identity(bpl);
+                            vec3 bpos = { bx, gy, bz }; glm_translate(bpl, bpos);
+                            glm_rotate_y(bpl, -byaw + MODEL_YAW_OFFSET, bpl);
+                            { vec3 bsc = { 0.85f, 0.85f, 0.85f }; glm_scale(bpl, bsc); }
+                            vec3 btint; if (bkind==10) { btint[0]=0.85f; btint[1]=0.88f; btint[2]=1.0f; } else { btint[0]=1.0f; btint[1]=0.72f; btint[2]=0.6f; }
+                            renderer.draw_model(boat_model, enemy_part_world, bpl, btint);
+                        }
+                        if (skeleton_loaded) {   // a skeleton seated in the hull, working the oars
+                            std::vector<dc::renderer::AnimLayer> sl; sl.push_back({ &skeleton_data.walk, t_now*4.0f + static_cast<float>(i), -1 });
                             dc::renderer::pose_model(skeleton_data, sl, 0.0f, enemy_part_world);
                             mat4 spl; glm_mat4_identity(spl);
-                            vec3 spos = { bx, gy + 0.35f, bz }; glm_translate(spl, spos);
+                            vec3 spos = { bx, gy + 0.18f, bz }; glm_translate(spl, spos);
                             glm_rotate_y(spl, -byaw + MODEL_YAW_OFFSET, spl);
-                            { vec3 ssc = { 0.7f,0.7f,0.7f }; glm_scale(spl, ssc); }
+                            { vec3 ssc = { 0.55f, 0.55f, 0.55f }; glm_scale(spl, ssc); }
                             vec3 sc; if (bkind==10) { sc[0]=0.7f; sc[1]=0.85f; sc[2]=1.0f; } else { sc[0]=1.0f; sc[1]=0.55f; sc[2]=0.5f; }
                             renderer.draw_model(skeleton_model, enemy_part_world, spl, sc);
                         }
                         continue;
                     }
-                    const float gy = wbase + 0.35f + std::sin(t_now * 1.6f + i) * 0.12f;   // bob
-                    // hull (long box along the boat's forward X), deck, mast, two cannons.
-                    boxrb(bv, bx, gy, bz, 2.6f, 0.5f, 1.1f, ca, sa);          // hull
-                    boxrb(bv, bx, gy+0.55f, bz, 2.2f, 0.18f, 0.95f, ca, sa);  // deck
+                    // WARSHIP: the wooden boat MODEL (scaled up) for the hull, with a tall mast +
+                    // square sail and deck CANNONS that point forward. The hull steers to face its
+                    // target (b.yaw aims at it), so the forward cannons are trained on the target and
+                    // their muzzles are where the shells spawn.
+                    const float gy = wbase + 0.30f + std::sin(t_now * 1.6f + i) * 0.10f;   // bob (waterline)
+                    if (boat_loaded) {
+                        std::vector<dc::renderer::AnimLayer> bl; bl.push_back({ &boat_data.walk, t_now*1.1f + static_cast<float>(i), -1 });
+                        dc::renderer::pose_model(boat_data, bl, 0.0f, enemy_part_world);
+                        mat4 bpl; glm_mat4_identity(bpl);
+                        vec3 bpos = { bx, gy, bz }; glm_translate(bpl, bpos);
+                        glm_rotate_y(bpl, -byaw + MODEL_YAW_OFFSET, bpl);
+                        { vec3 bsc = { 2.05f, 1.7f, 2.05f }; glm_scale(bpl, bsc); }   // warship-sized
+                        vec3 btint; if (bkind==4) { btint[0]=0.82f; btint[1]=0.86f; btint[2]=1.0f; } else { btint[0]=1.0f; btint[1]=0.85f; btint[2]=0.74f; }
+                        renderer.draw_model(boat_model, enemy_part_world, bpl, btint);
+                    }
                     boxrb(bv, bx, gy+2.0f, bz, 0.14f, 1.7f, 0.14f, ca, sa);   // tall mast
                     boxrb(bv, bx, gy+3.5f, bz, 0.08f, 0.08f, 1.7f, ca, sa);   // yard (cross spar, spans the beam)
-                    { const float mx=ca*1.2f, mz=sa*1.2f; boxrb(bv, bx+mx, gy+0.7f, bz+mz, 0.7f, 0.2f, 0.2f, ca, sa); } // bow cannon
-                    { const float mx=-ca*1.0f, mz=-sa*1.0f; boxrb(bv, bx+mx, gy+0.7f, bz+mz, 0.6f, 0.2f, 0.2f, ca, sa); } // stern cannon
+                    // Two deck cannons (turret base + forward barrel) at the bow and amidships.
+                    auto cannon = [&](float fwd){
+                        const float cxp = bx + ca*fwd, czp = bz + sa*fwd;
+                        boxrb(cannon_v, cxp, gy+0.95f, czp, 0.22f, 0.22f, 0.26f, ca, sa);                       // turret base
+                        boxrb(cannon_v, cxp + ca*0.5f, gy+1.04f, czp + sa*0.5f, 0.5f, 0.1f, 0.1f, ca, sa);     // barrel (points fwd at the target)
+                    };
+                    cannon(1.1f); cannon(-0.2f);
                     // a big square SAIL hung off the yard (wide across the beam), FIXED to the mast.
                     // Friendly warships fly a BLUE sail; enemies a cream one.
                     boxrb(bkind == 4 ? sailv_friend : sailv, bx, gy+2.5f, bz, 0.06f, 1.0f, 1.5f, ca, sa);
@@ -5999,6 +6067,12 @@ int main(int argc, char** argv) {
                     vec3 iron = { 0.12f, 0.12f, 0.14f };   // dark iron mines on the minelayer deck
                     renderer.draw_terrain(rack_mesh, iron, true);
                 }
+                if (!cannon_v.empty()) {
+                    static dc::renderer::Mesh cannon_mesh;
+                    cannon_mesh.upload(cannon_v);
+                    vec3 steel = { 0.16f, 0.16f, 0.18f };   // dark steel warship cannons
+                    renderer.draw_terrain(cannon_mesh, steel, true);
+                }
             }
         }
 
@@ -6052,6 +6126,7 @@ int main(int argc, char** argv) {
             dc::renderer::ModelData& rmd = class_md(rlook.weapon_class);
             const bool r_baked = class_custom(rlook.weapon_class);
             std::vector<dc::renderer::AnimLayer> rl;
+            if (!rp.moving && rmd.idle.valid()) rl.push_back({ &rmd.idle, run_time + static_cast<float>(rp.id), -1 });   // idle breathing
             if (rp.moving)   rl.push_back({ &rmd.walk,  rp.anim_time,  -1 });
             if (rp.punching) rl.push_back({ &rmd.punch, rp.punch_time, rmd.arm_l_node });
             if (rp.blocking) rl.push_back({ &rmd.block, rp.block_time, rmd.arm_r_node, false });
@@ -6154,8 +6229,10 @@ int main(int argc, char** argv) {
             const float pulse = 0.8f + 0.2f * dc::fx::flicker(t_now * 0.9f);
             vec3 ccol = { (1.0f - frac) * 1.0f * pulse, (0.5f + 0.5f*frac) * pulse, (0.4f + 0.6f*frac) * pulse };
             if (glyph_loaded) {   // detailed runed monolith (emissive glyphs stay lit; stone tinted by health)
-                static std::vector<dc::renderer::Mat4> glyph_pw;
-                if (glyph_pw.empty()) dc::renderer::pose_model(glyph_data, {}, 0.0f, glyph_pw);
+                static std::vector<dc::renderer::Mat4> glyph_pw;   // reused scratch; re-posed each frame for the idle sway + orbiting shards
+                std::vector<dc::renderer::AnimLayer> gil;
+                if (glyph_data.idle.valid()) gil.push_back({ &glyph_data.idle, t_now, -1 });
+                dc::renderer::pose_model(glyph_data, gil, 0.0f, glyph_pw);
                 mat4 gpl; glm_mat4_identity(gpl);
                 vec3 gpos = { core_pos[0], core_pos[1] - 0.5f, core_pos[2] }; glm_translate(gpl, gpos);
                 vec3 gsc = { 1.3f, 1.3f, 1.3f }; glm_scale(gpl, gsc);   // large
@@ -6197,8 +6274,10 @@ int main(int argc, char** argv) {
         // tinted hostile red, with red rising motes + an always-on health bar.
         if (enemy_core_health > 0.0f && glyph_loaded) {
             const float frac = enemy_core_health / CORE_MAX_HEALTH;
-            static std::vector<dc::renderer::Mat4> egl_pw;
-            if (egl_pw.empty()) dc::renderer::pose_model(glyph_data, {}, 0.0f, egl_pw);
+            static std::vector<dc::renderer::Mat4> egl_pw;   // re-posed each frame for idle (offset phase so the two cores aren't in lockstep)
+            std::vector<dc::renderer::AnimLayer> egil;
+            if (glyph_data.idle.valid()) egil.push_back({ &glyph_data.idle, t_now + 1.7f, -1 });
+            dc::renderer::pose_model(glyph_data, egil, 0.0f, egl_pw);
             mat4 gpl; glm_mat4_identity(gpl);
             vec3 gpos = { enemy_core_pos[0], enemy_core_pos[1] - 0.5f, enemy_core_pos[2] }; glm_translate(gpl, gpos);
             vec3 gsc = { 1.3f, 1.3f, 1.3f }; glm_scale(gpl, gsc);
@@ -6557,40 +6636,74 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Wizard staff bolts: a real 3D energy ORB (low-poly sphere) with a soft glow + a subtle
-        // particle trail. Host/standalone draws `bolts` (has direction for the tail); clients draw
-        // the replicated `render_bolts`.
+        // Wizard staff bolts: an OBLONG glowing-blue ORB (a UV sphere stretched along its travel
+        // direction) with a bright bluish-white core, trailed by a fading blue PARTICLE stream.
         {
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
             std::vector<float> bolt_geo;
-            auto sphere_into = [&](float cx, float cy, float cz, float rad) {
+            // A UV sphere stretched by `lenScale` along unit-ish dir (n) -> an ellipsoid pointing
+            // the way the bolt flies. Emits proper ellipsoid normals so draw_glow's depth reads right.
+            auto orb_into = [&](float cx, float cy, float cz, float nx, float ny, float nz, float rad, float lenScale) {
+                float fl = std::sqrt(nx*nx + ny*ny + nz*nz);
+                if (fl < 1e-4f) { nx = 0; ny = 0; nz = 1; fl = 1; }
+                nx /= fl; ny /= fl; nz /= fl;
+                const float upx = (std::fabs(ny) < 0.9f) ? 0.0f : 1.0f, upy = (std::fabs(ny) < 0.9f) ? 1.0f : 0.0f, upz = 0.0f;
+                float ux = upy*nz - upz*ny, uy = upz*nx - upx*nz, uz = upx*ny - upy*nx;   // u = up x n
+                float ul = std::sqrt(ux*ux + uy*uy + uz*uz); ux/=ul; uy/=ul; uz/=ul;
+                const float vx = ny*uz - nz*uy, vy = nz*ux - nx*uz, vz = nx*uy - ny*ux;   // v = n x u
                 const int ST = 4, SL = 7; const float PI = 3.14159265f;
                 auto sp = [](float t, float p, float& x, float& y, float& z){ x = std::sin(t)*std::cos(p); y = std::cos(t); z = std::sin(t)*std::sin(p); };
-                auto V = [&](float x, float y, float z){ bolt_geo.insert(bolt_geo.end(), { cx+x*rad, cy+y*rad, cz+z*rad, x, y, z, 0.f, 0.f, 0.f }); };
+                auto V = [&](float sx, float sy, float sz) {
+                    const float px = cx + (ux*sx + vx*sy)*rad + nx*sz*rad*lenScale;
+                    const float py = cy + (uy*sx + vy*sy)*rad + ny*sz*rad*lenScale;
+                    const float pz = cz + (uz*sx + vz*sy)*rad + nz*sz*rad*lenScale;
+                    const float gnu = sx/rad, gnv = sy/rad, gnn = sz/(rad*lenScale);
+                    float wnx = ux*gnu + vx*gnv + nx*gnn, wny = uy*gnu + vy*gnv + ny*gnn, wnz = uz*gnu + vz*gnv + nz*gnn;
+                    float nl = std::sqrt(wnx*wnx + wny*wny + wnz*wnz); if (nl < 1e-5f) nl = 1;
+                    bolt_geo.insert(bolt_geo.end(), { px, py, pz, wnx/nl, wny/nl, wnz/nl, 0.f, 0.f, 0.f });
+                };
                 for (int i = 0; i < ST; ++i) { const float t0 = PI*i/ST, t1 = PI*(i+1)/ST;
                     for (int j = 0; j < SL; ++j) { const float p0 = 2*PI*j/SL, p1 = 2*PI*(j+1)/SL;
-                        float ax,ay,az,bx,by,bz,cx2,cy2,cz2,dx,dy,dz;
-                        sp(t0,p0,ax,ay,az); sp(t1,p0,bx,by,bz); sp(t1,p1,cx2,cy2,cz2); sp(t0,p1,dx,dy,dz);
-                        V(ax,ay,az);V(bx,by,bz);V(cx2,cy2,cz2); V(ax,ay,az);V(cx2,cy2,cz2);V(dx,dy,dz); } }
+                        float a1,a2,a3,b1,b2,b3,c1,c2,c3,d1,d2,d3;
+                        sp(t0,p0,a1,a2,a3); sp(t1,p0,b1,b2,b3); sp(t1,p1,c1,c2,c3); sp(t0,p1,d1,d2,d3);
+                        V(a1,a2,a3);V(b1,b2,b3);V(c1,c2,c3); V(a1,a2,a3);V(c1,c2,c3);V(d1,d2,d3); } }
             };
-            (void)R; (void)U;
-            // A glowing energy ORB (bright unlit sphere) trailed by a few smaller orbs — all 3D,
-            // so there are no flat squares; the trail fades by shrinking.
             auto draw_bolt = [&](float x, float y, float z, bool big, float dx, float dy, float dz) {
-                const float core = big ? 0.30f : 0.18f;
-                sphere_into(x, y, z, core);
-                const float dl = std::sqrt(dx*dx+dy*dy+dz*dz);
-                if (dl > 1e-3f) { const float nx=dx/dl, ny=dy/dl, nz=dz/dl;
-                    for (int k = 1; k <= 5; ++k) { const float t = k*0.22f;
-                        sphere_into(x-nx*t, y-ny*t, z-nz*t, core*(1.0f - k*0.16f)); } }
+                orb_into(x, y, z, dx, dy, dz, big ? 0.26f : 0.16f, 1.9f);   // stretched ~1.9x along travel
             };
-            if (net.role == dc::net::Role::Client) for (const auto& b : render_bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, 0,0,0);
+            if (net.role == dc::net::Role::Client) for (const auto& b : render_bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, 0, 0, 1);
             else for (const auto& b : bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, b.dir[0], b.dir[1], b.dir[2]);
             if (!bolt_geo.empty()) {
                 static dc::renderer::Mesh bolt_mesh;
                 bolt_mesh.upload(bolt_geo);
-                vec3 bcol = { 0.65f, 1.05f, 1.35f };   // bright glowing cyan energy (unlit)
+                vec3 bcol = { 0.40f, 0.62f, 1.30f };   // glowing blue (draw_glow adds the hot bluish-white core)
                 renderer.draw_glow(bolt_mesh, bcol);
+            }
+            // Fading PARTICLE TRAIL: age + cull existing sparks, spawn fresh ones at each live
+            // bolt's tail, then draw them all as additive blue billboards that fade with age.
+            for (std::size_t s = 0; s < bolt_sparks.size(); ) {
+                bolt_sparks[s].age += dt;
+                if (bolt_sparks[s].age >= bolt_sparks[s].life) { bolt_sparks[s] = bolt_sparks.back(); bolt_sparks.pop_back(); }
+                else ++s;
+            }
+            auto spawn_spark = [&](float x, float y, float z, float dx, float dy, float dz, bool big) {
+                if (bolt_sparks.size() >= 700) return;
+                float dl = std::sqrt(dx*dx + dy*dy + dz*dz); if (dl < 1e-4f) { dx = 0; dy = 0; dz = 1; dl = 1; }
+                const float back = big ? 0.24f : 0.16f;
+                const float jx = std::sin(x*12.9f + z*7.7f), jy = std::sin(y*9.3f + x*4.1f), jz = std::sin(z*6.1f + y*8.8f);
+                BoltSpark spk;
+                spk.pos[0] = x - dx/dl*back + jx*0.05f; spk.pos[1] = y - dy/dl*back + jy*0.05f; spk.pos[2] = z - dz/dl*back + jz*0.05f;
+                spk.life = 0.38f; spk.sz = big ? 0.16f : 0.11f;
+                bolt_sparks.push_back(spk);
+            };
+            if (net.role == dc::net::Role::Client) for (const auto& b : render_bolts) spawn_spark(b.pos[0], b.pos[1], b.pos[2], 0, 0, 1, b.big);
+            else for (const auto& b : bolts) spawn_spark(b.pos[0], b.pos[1], b.pos[2], b.dir[0], b.dir[1], b.dir[2], b.big);
+            for (const auto& spk : bolt_sparks) {
+                const float a = 1.0f - spk.age / spk.life, sz = spk.sz * a;
+                auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
+                    spk.pos[0] + R[0]*u + U[0]*v, spk.pos[1] + R[1]*u + U[1]*v, spk.pos[2] + R[2]*u + U[2]*v,
+                    0.45f*a, 0.65f*a, 1.0f*a, a }); };
+                P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz);
             }
         }
 

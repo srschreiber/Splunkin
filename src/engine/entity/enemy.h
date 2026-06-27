@@ -104,8 +104,8 @@ inline constexpr float BLOCK_KNOCK_ABSORB    = 0.2f;   // knockback kept when a 
 // Soft separation: enemies gently repel nearby enemies so they don't pile onto the
 // same tile. The push grows as they close, out to ~arm's length (so they settle a
 // body-or-so apart rather than spreading out across the room).
-inline constexpr float ENEMY_SEPARATION_DIST  = 1.3f;  // repel when centers are within this
-inline constexpr float ENEMY_SEPARATION_SPEED = 2.2f;  // push strength (units/s at max closeness)
+inline constexpr float ENEMY_SEPARATION_DIST  = 2.5f;  // repel when centers are within this (wide -> they fan into a loose front, not a single-file column)
+inline constexpr float ENEMY_SEPARATION_SPEED = 2.8f;  // push strength (units/s at max closeness)
 
 // Ranged enemy: keeps its distance and shoots spheres. It advances to RANGED_STANDOFF,
 // backs up (still firing) if a target gets closer than standoff - margin, and drops a

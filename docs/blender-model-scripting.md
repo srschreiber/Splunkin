@@ -37,6 +37,30 @@ obj.matrix_parent_inverse = Matrix.Identity(4)   # else Blender bakes an inverse
 obj.location = local_offset_from_bone
 ```
 
+## Sculpting human / realistic models (avoid the uncanny valley)
+
+Hard-won art rules from iterating on the humanoid mobs. The flat per-part shader is unforgiving,
+so procedural faces go creepy *fast*:
+
+- **Human faces: DRAW NO procedural eyes, nose, mouth, or ears.** Small dark spheres for eyes,
+  a protruding nose sphere, a box "mouth", etc. all land squarely in the uncanny valley. Give a
+  human head **just a smooth (single-sphere) cranium + a BEARD and/or HAIR**, plus accessories
+  (hat, monocle, helmet). Character comes from silhouette, facial hair, headwear, and *pose* —
+  not from tiny facial features. (Non-human creatures — demon, eye, bat — can have glowing eyes;
+  the rule is specifically about realistic *human* faces.)
+- **One sphere for a head.** Stacking a "cranium + face + jaw" of overlapping spheres reads as a
+  lumpy mutant. Use a single scaled icosphere; let a beard cover the lower front.
+- **Keep features shallow.** If you must add a feature, minimal +Y protrusion — flush, not bulging.
+- **Don't make shoulders bulbous.** Shoulder/pauldron spheres want to be a notch smaller and tucked
+  slightly in/down — big shoulder balls look like armor pads even on a t-shirt.
+- **Fill the torso with flesh.** A thin box torso reads as a concave "spine showing" husk; add a
+  rounded belly/back sphere so it has real front-to-back volume. No separate "pec" bulbs (boobs).
+- **Mind clip-through:** a collar/neck-mass on the chest bone must sit low enough to clear the head's
+  beard/chin; the robe skirt should flare WIDER at the feet (narrow at the waist) — a narrow skirt +
+  a wide hem brim reads as a "top hat" over the legs.
+- **Hands:** mirror the thumb per side so it points INWARD (`ts = -1 if side=="L" else 1`), and pose
+  matters — a fist vs. a pointing finger vs. an extendable middle-finger bone all sell attitude.
+
 ## Naming the loader keys off (must match exactly)
 
 Bones are matched **by node name** with `find_bone` (which also requires the node has **no
@@ -53,8 +77,14 @@ mesh**, so bone nodes must be Empties / mesh-less):
 Extra bones (`legL`, `legR`, feet, …) are fine — they just animate; the loader doesn't
 special-case them.
 
-Animations are routed **by clip name**: `walk`, `punch`, `block`, `open`, `close`
-(others are ignored). Export with one glTF animation per action:
+Animations are routed **by clip name**: `idle`, `walk`, `punch`, `block`, `open`, `close`,
+`roll`, `rollL`, `rollR` (others are ignored). Export with one glTF animation per action:
+
+`idle` is the looping **base layer the engine plays when a character is standing still**
+(player, allies, enemies, remote players). Give every animated model an `idle` so it
+breathes/sways instead of freezing — `walk` replaces it when the character moves. Tip: put
+a separate **chest** bone above the waist and breathe *that* (translate up a touch + lean),
+so the upper body rises without lifting the planted feet. See `make_skeleton.py`.
 
 ```python
 bpy.ops.export_scene.gltf(filepath=..., export_format='GLB',

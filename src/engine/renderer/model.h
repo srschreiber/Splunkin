@@ -53,6 +53,7 @@ struct PartCPU {
 struct ModelData {
     std::vector<Node>    nodes;
     std::vector<PartCPU> parts;
+    Animation            idle;   // looping breathing/sway when standing still (base layer under walk)
     Animation            walk;
     Animation            punch;
     Animation           block;  // example of a block animation layer that masks no bones

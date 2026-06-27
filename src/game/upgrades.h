@@ -9,7 +9,7 @@
 // chests roll from; the entries AFTER it are level-up-only (unlocks + autocast/throw
 // upgrades) that are gated by `upgrade_eligible`. Appending keeps existing indices
 // stable (chest seeds, inventory[], net casts all index by enum value).
-enum class Upgrade { StaminaCost, Knockback, Damage, SwingArc, Cooldown, DodgeDistance, DodgeIframes,
+enum class Upgrade { StaminaCost, Knockback, Damage, SwingArc, Cooldown,
                      CritChance, CritDamage, Regen, Fire, Ice, Earth, Gunner, Munitions,
                      Trailblazer, Supersonic, DroneRange,
                      // --- level-up only (gated) ---
@@ -17,8 +17,8 @@ enum class Upgrade { StaminaCost, Knockback, Damage, SwingArc, Cooldown, DodgeDi
                      OrbitSword, OrbitTempo, OrbitCooldown,
                      NovaRadius, NovaCooldown,
                      AutocastHaste, MultiThrow };
-inline constexpr int UPGRADE_COUNT = 28;
-inline constexpr int CHEST_UPGRADE_COUNT = 18;   // chests roll only the core [0,18) pool
+inline constexpr int UPGRADE_COUNT = 26;
+inline constexpr int CHEST_UPGRADE_COUNT = 16;   // chests roll only the core [0,16) pool
 
 // Placeholder icon shapes (real icon art comes later). One per upgrade so the stacked
 // items in the top-left HUD are visually distinct. Rendered by main's icon_shape/bb_shape.
