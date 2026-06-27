@@ -102,7 +102,10 @@ int pick_target(const Entity& e, const std::vector<PlayerCombat>& players, float
         if (players[i].weight > 1e8f && d2 <= BASE_LOCK_R2) base_lock = static_cast<int>(i);
         if (d2 > max_d2) continue;                       // out of range -> unavailable
         if (players[i].id == e.target_id) committed = static_cast<int>(i);
-        if (d2 < best) { best = d2; nearest = static_cast<int>(i); }
+        // Effective distance is discounted by the target's aggro PRIORITY, so heroes (and whoever's
+        // pushing furthest into the base) get picked over a same-range mob.
+        const float eff = d2 / (players[i].priority > 0.01f ? players[i].priority : 1.0f);
+        if (eff < best) { best = eff; nearest = static_cast<int>(i); }
         // A taunting Bill in range yanks aggro off everything else (it's just THAT insulting).
         if (players[i].taunt && d2 < best_taunt) { best_taunt = d2; taunter = static_cast<int>(i); }
     }

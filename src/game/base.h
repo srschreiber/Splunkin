@@ -78,7 +78,7 @@ inline constexpr float WATER_SLOW = 0.45f;
 inline constexpr float VACUUM_PULL_SPEED = 5.5f;   // world units/sec the loot drifts toward the core
 
 // Friendly-mob (lane unit) shared tuning.
-inline constexpr int   ALLY_CAP       = 24;    // max friendly mobs alive at once (all barracks)
+inline constexpr int   ALLY_CAP       = 90;    // hard ceiling on friendly mobs (per-type caps gate below this)
 inline constexpr float ALLY_SPEED     = 4.2f;  // march/charge speed
 inline constexpr float ALLY_REACH     = 2.0f;  // melee reach
 inline constexpr float ALLY_ATTACK_CD = 0.8f;  // seconds between swings
@@ -89,7 +89,7 @@ inline constexpr float ALLY_AGGRO     = 16.0f; // engages enemies within this ra
 // every `interval` seconds for `spawn_cost` gold each. The Scavenger doesn't fight the lane —
 // it roams collecting dropped coins into the shared pool (with decent HP for self-defense).
 // Visual/behaviour class of a friendly mob — mirrors the enemy roster.
-enum class MobVisual : uint8_t { Ground = 0, Scavenger = 1, Flier = 2, Bat = 3, Demon = 4, Mage = 5, Insulter = 6, Knight = 7 };
+enum class MobVisual : uint8_t { Ground = 0, Scavenger = 1, Flier = 2, Bat = 3, Demon = 4, Mage = 5, Insulter = 6, Knight = 7, Flame = 8, Troll = 9, Slime = 10 };
 struct MobType {
     const char* name;
     int   unlock_cost;   // one-time gold to unlock this barracks type (0 = free from the start)
@@ -102,23 +102,27 @@ struct MobType {
     MobVisual visual;    // which model + behaviour
     bool  flies;         // hovers + ignores ground (fliers, bats)
     float speed;         // movement multiplier vs ALLY_SPEED (the Mounted Knight is heavy + slow)
+    int   cap;           // how many of THIS mob one barracks keeps alive at once (weak swarmers = high)
 };
-inline constexpr int MOB_TYPE_COUNT = 9;
+inline constexpr int MOB_TYPE_COUNT = 12;
 inline const MobType& mob_type(int i) {
     // Barracks are a one-time PURCHASE (place_cost) that then spawn their mob for FREE on a
     // timer. The roster MIRRORS the enemy types (grunt=skeleton, mage=ranged caster, bat,
     // flier=eye, demon, bill=insulter with a friendly attack-weakening aura), plus the top-tier
     // MOUNTED KNIGHT (a single horse+rider model: very tanky, hits hard, but heavy and slow).
     static const MobType T[MOB_TYPE_COUNT] = {
-        { "Grunt",     0,    100,  0, 3.0f,  90.0f, 18.0f, 2.0f, false, MobVisual::Ground,    false, 1.00f },
-        { "Mage",      150,  150,  0, 4.0f, 110.0f, 26.0f, 9.0f, false, MobVisual::Mage,      false, 1.00f },
-        { "Brute",     250,  250,  0, 6.0f, 430.0f, 62.0f, 2.2f, false, MobVisual::Ground,    false, 0.90f },
-        { "Bat",       80,   60,   0, 3.0f,  55.0f, 12.0f, 2.0f, false, MobVisual::Bat,       true,  1.20f },
-        { "Flier",     120,  90,   0, 4.0f,  70.0f, 16.0f, 9.0f, false, MobVisual::Flier,     true,  1.10f },
-        { "Demon",     500,  500,  0, 8.0f, 800.0f, 80.0f, 9.0f, false, MobVisual::Demon,     false, 1.00f },
-        { "Bill",      200,  200,  0, 11.0f, 1200.0f, 4.0f, 2.0f, false, MobVisual::Insulter,  false, 1.00f },
-        { "Scavenger", 50,   100,  0, 4.5f, 150.0f, 12.0f, 2.0f, true,  MobVisual::Scavenger, false, 1.00f },
-        { "Knight",    700,  700,  0, 10.0f, 1600.0f, 90.0f, 2.8f, false, MobVisual::Knight,   false, 0.72f },
+        { "Grunt",     0,    100,  0, 3.0f,  90.0f, 18.0f, 2.0f, false, MobVisual::Ground,    false, 1.00f, 10 },
+        { "Mage",      150,  150,  0, 4.0f, 110.0f, 26.0f, 9.0f, false, MobVisual::Mage,      false, 1.00f,  7 },
+        { "Brute",     250,  250,  0, 6.0f, 430.0f, 62.0f, 2.2f, false, MobVisual::Ground,    false, 0.90f,  4 },
+        { "Bat",       80,   100,  0, 3.0f,  55.0f, 12.0f, 2.0f, false, MobVisual::Bat,       true,  1.20f, 20 },
+        { "Flier",     120,  90,   0, 4.0f,  70.0f, 16.0f, 9.0f, false, MobVisual::Flier,     true,  1.10f, 10 },
+        { "Demon",     500,  500,  0, 8.0f, 800.0f, 80.0f, 9.0f, false, MobVisual::Demon,     false, 1.00f,  3 },
+        { "Bill",      200,  200,  0, 11.0f, 1200.0f, 4.0f, 2.0f, false, MobVisual::Insulter,  false, 1.00f,  2 },
+        { "Scavenger", 50,   100,  0, 13.5f, 150.0f, 12.0f, 2.0f, true,  MobVisual::Scavenger, false, 1.00f,  4 },
+        { "Knight",    700,  700,  0, 10.0f, 1600.0f, 90.0f, 2.8f, false, MobVisual::Knight,   false, 0.72f,  2 },
+        { "Gnome",     0,    150,  0, 5.0f,  200.0f, 30.0f, 3.5f, false, MobVisual::Flame,    false, 1.00f,  6 },
+        { "Troll",     0,    300,  0, 7.0f,  600.0f, 70.0f, 2.2f, false, MobVisual::Troll,    false, 0.75f,  4 },
+        { "Slime",     0,    130,  0, 4.5f,  550.0f, 14.0f, 2.0f, false, MobVisual::Slime,    false, 0.85f,  6 },
     };
     return T[(i < 0 || i >= MOB_TYPE_COUNT) ? 0 : i];
 }
@@ -135,12 +139,13 @@ inline constexpr float LANDMINE_KNOCK     = 30.0f;   // explosion knockback
 
 // One placed piece, snapped to a tile. rot is 0..3 (×90° about Y).
 // For a BARRACKS, `up[]` holds per-stat upgrade LEVELS that buff only this barracks' troops:
-// up[0]=HP, up[1]=DEF, up[2]=SPEED, up[3]=SPAWN-RATE.
+// up[0]=HP, up[1]=DEF, up[2]=SPEED, up[3]=SPAWN-RATE, up[4]=CAPACITY (more alive at once).
+inline constexpr int BARRACKS_UP_STATS = 5;
 struct BasePiece {
     int16_t col = 0, row = 0;
     uint8_t piece = 0;   // BuildPiece
     uint8_t rot = 0;     // 0..3 (or, for a barracks, the mob TYPE; for a shipyard, the boat type)
-    uint8_t up[4] = {0,0,0,0};   // barracks upgrade levels: HP / DEF / SPEED / RATE
+    uint8_t up[BARRACKS_UP_STATS] = {0,0,0,0,0};   // HP / DEF / SPEED / RATE / CAPACITY
 };
 
 // Barracks upgrades: each stat can be bought up to this many times; cost scales with the level.
@@ -150,7 +155,8 @@ inline float barracks_hp_mult(int lvl)   { return 1.0f + 0.30f * lvl; }   // +30
 inline float barracks_def_mult(int lvl)  { float m = 1.0f; for (int i=0;i<lvl;++i) m *= 0.85f; return m; }  // damage TAKEN ×0.85^lvl
 inline float barracks_spd_mult(int lvl)  { return 1.0f + 0.15f * lvl; }   // +15% move speed per level
 inline float barracks_rate_mult(int lvl) { return 1.0f + 0.22f * lvl; }   // spawns this much faster per level
-inline int   barracks_up_total(const BasePiece& p) { return p.up[0]+p.up[1]+p.up[2]+p.up[3]; }
+inline int   barracks_cap_bonus(int lvl) { return lvl * 4; }              // +4 to the active cap per level
+inline int   barracks_up_total(const BasePiece& p) { int t=0; for (int s=0;s<BARRACKS_UP_STATS;++s) t+=p.up[s]; return t; }
 inline constexpr int BARRACKS_CAP_BASE = 5;   // base barracks capacity (grows with area expansions)
 
 // Buildable-area growth + the cost curve for buying more area (turrets are bought by simply
@@ -176,7 +182,7 @@ struct BaseSave {
     std::vector<BasePiece> pieces;
 };
 
-inline constexpr uint32_t BASE_MAGIC = 0xB0A5E003u;   // bumped: BasePiece now carries barracks upgrades
+inline constexpr uint32_t BASE_MAGIC = 0xB0A5E004u;   // bumped: BasePiece up[] grew to 5 stats (added capacity)
 
 inline bool save_base(const BaseSave& b, const char* path) {
     std::FILE* f = std::fopen(path, "wb");

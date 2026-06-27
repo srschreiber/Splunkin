@@ -185,6 +185,7 @@ struct PlayerCombat {
     float slow_duration = 0.0f;
     float earth_knock   = 0.0f;  // earth: extra knockback added on hit
     bool  taunt = false;         // a Bill/insulter: nearby enemies are goaded into attacking THIS target
+    float priority = 1.0f;       // aggro weight: enemies treat a higher-priority target as if it were CLOSER
 };
 
 inline constexpr float BURN_INTERVAL = 0.5f;   // burn deals damage (+ a number) this often

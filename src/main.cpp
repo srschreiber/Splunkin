@@ -657,6 +657,7 @@ int main(int argc, char** argv) {
     bool   scoreboard = false;               // hold Tab: damage leaderboard + your items
     bool   tab_prev = false;                 // edge-detect Tab
     float run_time = 0.0f;                    // seconds survived this run (top-of-screen timer)
+    float respawn_timer = -1.0f;              // >=0: local player is downed, counting down to revive
     float death_flash = 0.0f;                // red "you died" overlay timer
     float victory_flash = 0.0f;              // gold "VICTORY" overlay timer (enemy base destroyed)
 
@@ -794,7 +795,7 @@ int main(int argc, char** argv) {
     float  enemy_build_radius = 9.0f;  // the enemy's buildable base radius (around its core); EXPAND grows it
     // The enemy fields troops by BUILDING BARRACKS on actual TILES in its base (persistent spawners),
     // just like the player. When it runs out of tiles, the EXPAND advisor spikes to buy more base area.
-    struct EnemyBarracks { uint8_t kind = 0; float cd = 0.0f; float x = 0.0f, z = 0.0f; };   // kind = dc::entity::EnemyKind
+    struct EnemyBarracks { uint8_t kind = 0, up = 0; float cd = 0.0f; float x = 0.0f, z = 0.0f; };   // kind = EnemyKind, up = upgrade level
     std::vector<EnemyBarracks> ebarracks;
     int    ai_target        = -1;      // item the enemy is saving toward (-1 = none)
     float  ai_decide_cd     = 0.0f;    // cadence between AI decisions
@@ -811,7 +812,7 @@ int main(int argc, char** argv) {
                                  "# our$ = our shared gold; ourRate = gold/s we DROP on the ground; eGold/eRate = enemy bank/income.\n"
                                  "# eBoat/eSub/eMine/eTurret/eSpd = enemy forces; pBoat/pSub/pMount = ours the AI sees; core/eCore = base HP.\n");
     // The enemy starts with ONE skeleton barracks on a tile near its core (mirrors our starter barracks).
-    ebarracks.push_back({ static_cast<uint8_t>(skeleton_loaded ? dc::entity::EnemyKind::Skeleton : dc::entity::EnemyKind::Melee), 0.0f,
+    ebarracks.push_back({ static_cast<uint8_t>(skeleton_loaded ? dc::entity::EnemyKind::Skeleton : dc::entity::EnemyKind::Melee), 0, 0.0f,
                           enemy_core_pos[0] - 3.0f*dc::world::TILE, enemy_core_pos[2] });
     // Slime puddles left by slime enemies (host owns; clients render `net_slime_patches`). They
     // slow the player + friendly mobs that wade through them (enemies/slimes are immune).
@@ -848,6 +849,10 @@ int main(int argc, char** argv) {
     float cmd_drag_mx = 0.0f, cmd_drag_my = 0.0f;     // live drag cursor (NDC) for the pin preview
     bool spawn_menu = false;                          // the base "Muster" menu (E near the core)
     bool spawn_digit_prev[10] = {};
+    bool spawn_lmb_prev = false;                      // edge-detect clicks on muster-menu rows
+    bool upgrade_menu = false;                         // barracks UPGRADE menu (E near a barracks)
+    int  upg_col = 0, upg_row = 0;                     // the barracks tile being upgraded
+    bool upg_digit_prev[5] = {};
     bool base_dirty = false;                         // host: base layout changed this frame
     auto piece_full_hp = [](int piece) -> float {
         if (piece == static_cast<int>(dc::game::BuildPiece::Barricade)) return dc::game::BARRICADE_MAX_HP;
@@ -947,7 +952,11 @@ int main(int argc, char** argv) {
     auto host_remove = [&](int col, int row, int& wallet) -> bool {
         const int idx = piece_index_at(col, row);
         if (idx < 0) return false;
-        wallet += dc::game::piece_cost(static_cast<dc::game::BuildPiece>(base.pieces[idx].piece)) / 2;  // half refund
+        // A barracks refunds 75% of its mob type's PLACE cost; other pieces give the usual half back.
+        if (base.pieces[idx].piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks))
+            wallet += (dc::game::mob_type(base.pieces[idx].rot).place_cost * 3) / 4;
+        else
+            wallet += dc::game::piece_cost(static_cast<dc::game::BuildPiece>(base.pieces[idx].piece)) / 2;
         base.pieces[idx] = base.pieces.back(); base.pieces.pop_back();
         if (static_cast<std::size_t>(idx) < piece_hp.size()) { piece_hp[idx] = piece_hp.back(); piece_hp.pop_back(); }
         base_dirty = true; return true;
@@ -961,16 +970,14 @@ int main(int argc, char** argv) {
         shield_radius = base.build_radius;
         base_dirty = true; return true;
     };
-    auto host_unlock = [&](int tier, int& wallet) -> bool {
+    auto host_unlock = [&](int tier, int&) -> bool {
         if (tier < 0 || tier >= dc::game::MOB_TYPE_COUNT) return false;
         if (barracks_unlocked & (1u << tier)) return false;            // already unlocked
-        const int cost = dc::game::mob_type(tier).unlock_cost;
-        if (wallet < cost) return false;
-        wallet -= cost; barracks_unlocked |= (1u << tier); return true;
+        barracks_unlocked |= (1u << tier); return true;               // unlocking is FREE now (place cost still applies)
     };
     // Upgrade ONE barracks' troops in a stat (0=HP,1=DEF,2=SPEED,3=RATE). Cost scales with the level.
     auto host_upgrade_barracks = [&](int col, int row, int stat, int& wallet) -> bool {
-        if (stat < 0 || stat > 3) return false;
+        if (stat < 0 || stat >= dc::game::BARRACKS_UP_STATS) return false;
         const int idx = piece_index_at(col, row);
         if (idx < 0 || base.pieces[idx].piece != static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) return false;
         if (base.pieces[idx].up[stat] >= dc::game::BARRACKS_UP_MAX) return false;
@@ -1106,6 +1113,7 @@ int main(int argc, char** argv) {
         double damage_dealt = 0.0;                       // running total dealt to enemies (scoreboard)
         float  minion_fire_cd = 0.0f;                    // host: this client's gunner volley timer
         bool   board_prev = false;                       // host-side edge detect for this client's board key
+        float  respawn_timer = -1.0f;                    // >=0: downed, counting down to revive
         vec3   prev_pos = {0,0,0};                       // last frame's position (for shot-leading velocity)
         // Specials are host-run from the client's reliable *Cast events: the host owns
         // the motion + damage on its clock and broadcasts the state. (Same model as bash.)
@@ -1231,7 +1239,7 @@ int main(int argc, char** argv) {
         enemy_speed_mult = 1.0f; enemy_troop_cap = 14; enemy_build_radius = 9.0f; ai_target = -1; ai_decide_cd = 0.0f; ai_resample_cd = 0.0f;
         for (int i = 0; i < 16; ++i) ai_unmet[i] = 0.0f;
         ebarracks.clear();
-        ebarracks.push_back({ static_cast<uint8_t>(skeleton_loaded ? dc::entity::EnemyKind::Skeleton : dc::entity::EnemyKind::Melee), 0.0f,
+        ebarracks.push_back({ static_cast<uint8_t>(skeleton_loaded ? dc::entity::EnemyKind::Skeleton : dc::entity::EnemyKind::Melee), 0, 0.0f,
                               enemy_core_pos[0] - 3.0f*dc::world::TILE, enemy_core_pos[2] });
         enemy_turret_n = 1;
         slime_patches.clear(); net_slime_patches.clear(); slime_track.clear();   // clear slime
@@ -1284,6 +1292,7 @@ int main(int argc, char** argv) {
         for (int& n : inventory) n = 0;   // empty the item stacks
         currency = START_GOLD;
         host_damage = 0.0; my_damage = 0.0f;   // reset the damage leaderboard
+        respawn_timer = -1.0f;
         // Revive + reset every connected client (clears wallet, refills health, sends
         // them back to spawn). The full-health bodies go out in the next snapshot, so
         // ghosts come back to life on their own screens.
@@ -2200,6 +2209,8 @@ int main(int argc, char** argv) {
                 cmd_map = false; cmd_drag = -1; window.set_relative_mouse(true);
             } else if (spawn_menu) {           // Esc closes the muster menu
                 spawn_menu = false; window.set_relative_mouse(true);
+            } else if (upgrade_menu) {         // Esc closes the barracks upgrade menu
+                upgrade_menu = false; window.set_relative_mouse(true);
             } else if (building_mode) {        // Esc cancels build mode
                 building_mode = false;
             } else if (menu_chest >= 0) {
@@ -2240,7 +2251,7 @@ int main(int argc, char** argv) {
                 { cmd_map = !cmd_map; window.set_relative_mouse(!cmd_map); cmd_drag = -1; }
             cmd_m_prev = m_now;
         }
-        const bool ui_open = menu_chest >= 0 || paused || scoreboard || levelup_open || spawn_menu || cmd_map;
+        const bool ui_open = menu_chest >= 0 || paused || scoreboard || levelup_open || spawn_menu || upgrade_menu || cmd_map;
 
         // Command minimap: drag each mob TYPE's pin along the lane strip to set a hold line; drag
         // it OFF the strip (left into the AUTO bay, or below its row) to put that type back on
@@ -2291,22 +2302,46 @@ int main(int argc, char** argv) {
         if (spawn_menu) {
             // 1-8 UNLOCK a locked mob type (pay) or SELECT an unlocked one (jumps into build mode
             // with that barracks). Defenses are placed via build mode (B). 9 = expand build area.
+            // Select a mob type k: unlock it (free) if locked, else jump into build mode with it.
+            auto select_mob = [&](int k) {
+                if (k < 0 || k >= dc::game::MOB_TYPE_COUNT) return;
+                if (barracks_unlocked & (1u << k)) {
+                    build_sel = static_cast<int>(dc::game::BuildPiece::Barracks);
+                    build_tier = k; building_mode = true; spawn_menu = false;
+                    window.set_relative_mouse(true);
+                    for (int j = 0; j < 6; ++j) digit_prev[j] = true;
+                } else if (net.role == dc::net::Role::Client) {
+                    unsigned char buf[2] = { static_cast<unsigned char>(dc::net::MsgType::BuyUnlock), static_cast<unsigned char>(k) };
+                    net.send_to_host(buf, 2, true);
+                } else host_unlock(k, currency);
+            };
+            // Keys 1-9 are shortcuts for the first nine types; the rest (and all of them) are
+            // reachable by CLICKING the row.
             const int kscan[9] = { SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4,
                                    SDL_SCANCODE_5, SDL_SCANCODE_6, SDL_SCANCODE_7, SDL_SCANCODE_8, SDL_SCANCODE_9 };
             for (int k = 0; k < dc::game::MOB_TYPE_COUNT && k < 9; ++k) {
                 const bool d = input.key_down(kscan[k]);
-                if (d && !spawn_digit_prev[k]) {
-                    if (barracks_unlocked & (1u << k)) {            // unlocked -> select for building
-                        build_sel = static_cast<int>(dc::game::BuildPiece::Barracks);
-                        build_tier = k; building_mode = true; spawn_menu = false;
-                        window.set_relative_mouse(true);
-                        for (int j = 0; j < 6; ++j) digit_prev[j] = true;   // swallow the digit
-                    } else if (net.role == dc::net::Role::Client) { // locked -> request unlock
-                        unsigned char buf[2] = { static_cast<unsigned char>(dc::net::MsgType::BuyUnlock), static_cast<unsigned char>(k) };
-                        net.send_to_host(buf, 2, true);
-                    } else host_unlock(k, currency);
-                }
+                if (d && !spawn_digit_prev[k]) select_mob(k);
                 spawn_digit_prev[k] = d;
+            }
+            // Mouse click on a menu row (works for every type + the expand-area row).
+            {
+                int ww, wh; window.framebuffer_size(ww, wh);
+                float mx, my; input.mouse_pos(mx, my);
+                const float mxn = mx / ww * 2.0f - 1.0f, myn = 1.0f - my / wh * 2.0f;
+                const bool lmb = input.mouse_down(SDL_BUTTON_LEFT);
+                if (lmb && !spawn_lmb_prev && mxn > -0.62f && mxn < 0.62f) {
+                    for (int k = 0; k < dc::game::MOB_TYPE_COUNT; ++k) {
+                        const float ry = 0.40f - k * 0.072f;
+                        if (myn > ry - 0.035f && myn < ry + 0.045f) { select_mob(k); break; }
+                    }
+                    const float ry8 = 0.40f - dc::game::MOB_TYPE_COUNT * 0.072f;
+                    if (myn > ry8 - 0.035f && myn < ry8 + 0.045f) {
+                        if (net.role == dc::net::Role::Client) { unsigned char b = static_cast<unsigned char>(dc::net::MsgType::BuyBaseArea); net.send_to_host(&b, 1, true); }
+                        else host_buy_area(currency);
+                    }
+                }
+                spawn_lmb_prev = lmb;
             }
             // 0 buys a buildable-AREA expansion — more room to add spawns + defenses.
             {
@@ -2318,6 +2353,41 @@ int main(int argc, char** argv) {
                 spawn_digit_prev[9] = d;
             }
             if (input.key_down(SDL_SCANCODE_E) && !e_prev) { spawn_menu = false; window.set_relative_mouse(true); }
+        }
+
+        // Barracks UPGRADE menu (E near a barracks): 1-4 buy HP/DEF/SPEED/RATE for THIS barracks,
+        // S sells it for 50% back, E/Esc closes. Closes itself if the barracks is gone.
+        if (upgrade_menu) {
+            const int bidx = piece_index_at(upg_col, upg_row);
+            if (bidx < 0 || base.pieces[bidx].piece != static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) {
+                upgrade_menu = false; window.set_relative_mouse(true);
+            } else {
+                const int uscan[5] = { SDL_SCANCODE_1, SDL_SCANCODE_2, SDL_SCANCODE_3, SDL_SCANCODE_4, SDL_SCANCODE_5 };
+                for (int s = 0; s < dc::game::BARRACKS_UP_STATS; ++s) {
+                    const bool d = input.key_down(uscan[s]);
+                    if (d && !upg_digit_prev[s]) {
+                        if (net.role == dc::net::Role::Client) {
+                            unsigned char buf[4] = { static_cast<unsigned char>(dc::net::MsgType::BuyBarracksUp),
+                                static_cast<unsigned char>(s), static_cast<unsigned char>(upg_col & 0xFF), static_cast<unsigned char>(upg_row & 0xFF) };
+                            net.send_to_host(buf, 4, true);
+                        } else host_upgrade_barracks(upg_col, upg_row, s, currency);
+                    }
+                    upg_digit_prev[s] = d;
+                }
+                // S = sell this barracks (50% refund).
+                static bool sell_prev = false;
+                const bool sd = input.key_down(SDL_SCANCODE_S);
+                if (sd && !sell_prev) {
+                    if (net.role == dc::net::Role::Client) {
+                        dc::net::BuildEdit be{}; be.col = static_cast<int16_t>(upg_col); be.row = static_cast<int16_t>(upg_row);
+                        unsigned char buf[1 + sizeof be]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::BuildRemove);
+                        std::memcpy(buf + 1, &be, sizeof be); net.send_to_host(buf, sizeof buf, true);
+                    } else host_remove(upg_col, upg_row, currency);
+                    upgrade_menu = false; window.set_relative_mouse(true);
+                }
+                sell_prev = sd;
+                if (input.key_down(SDL_SCANCODE_E) && !e_prev) { upgrade_menu = false; window.set_relative_mouse(true); }
+            }
         }
 
         // --- Build mode (B): place/remove base pieces with the crosshair --------------------
@@ -2479,7 +2549,7 @@ int main(int argc, char** argv) {
         if (!ui_open) player.add_look(input.mouse_dx, input.mouse_dy);   // freeze look in any menu
         // You can still WALK during a level-up pick (look stays frozen so the cursor can click
         // cards); other menus still lock movement.
-        const bool move_lock = (menu_chest >= 0 || paused || scoreboard || spawn_menu);
+        const bool move_lock = (menu_chest >= 0 || paused || scoreboard || spawn_menu || upgrade_menu);
         float forward = move_lock ? 0.0f : (input.key_down(SDL_SCANCODE_W) ? 1.0f : 0.0f)
                                          - (input.key_down(SDL_SCANCODE_S) ? 1.0f : 0.0f);
         float strafe  = move_lock ? 0.0f : (input.key_down(SDL_SCANCODE_D) ? 1.0f : 0.0f)
@@ -2639,7 +2709,7 @@ int main(int argc, char** argv) {
             }
             return false;
         };
-        const float ORBIT_TRIGGER = 6.0f;   // orbit autocasts when an enemy is this close
+        const float ORBIT_TRIGGER = (my_look.weapon_class == 1) ? 11.0f : 7.0f;   // wizards trigger orbit from further (they kite)
 
         // Force Nova autocast: once unlocked it occupies a spell slot and fires on its own
         // cooldown whenever an enemy is inside its blast radius. Costs no stamina; the
@@ -2845,6 +2915,18 @@ int main(int argc, char** argv) {
             const bool at_core = (dcx*dcx + dcz*dcz <= (CORE_RAD + 4.5f)*(CORE_RAD + 4.5f));
             if (at_core) { spawn_menu = true; window.set_relative_mouse(false); }
             else {
+            // Standing at one of YOUR barracks: E opens its upgrade menu.
+            int ubest = -1; float ubest2 = 9.0f;   // within ~3 tiles
+            for (std::size_t i = 0; i < base.pieces.size(); ++i) {
+                if (base.pieces[i].piece != static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) continue;
+                const float bx = (base.pieces[i].col + 0.5f) * dc::world::TILE, bz = (base.pieces[i].row + 0.5f) * dc::world::TILE;
+                const float dx = bx - player.position[0], dz = bz - player.position[2], d2 = dx*dx + dz*dz;
+                if (d2 < ubest2) { ubest2 = d2; ubest = static_cast<int>(i); }
+            }
+            if (ubest >= 0) {
+                upgrade_menu = true; upg_col = base.pieces[ubest].col; upg_row = base.pieces[ubest].row;
+                window.set_relative_mouse(false);
+            } else {
             // Drone vendor in reach takes priority over a chest: pay DRONE_COST -> +1 minion.
             int dbest = -1; float dbest2 = CHEST_REACH * CHEST_REACH;
             for (std::size_t i = 0; i < drone_vendors.size(); ++i) {
@@ -2884,6 +2966,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            }   // end !barracks
             }   // end !at_core
         }
         e_prev = e_now;
@@ -3144,8 +3227,9 @@ int main(int argc, char** argv) {
                 else for (auto& hc : host_clients) if (hc.id == b.owner) { hc.damage_dealt += dealt; break; }
             }
             for (std::size_t i = 0; i < bolts.size();) {
-                if (bolts[i].traveled > BOLT_RANGE) { bolts[i] = bolts.back(); bolts.pop_back(); }
-                else ++i;
+                if (bolts[i].traveled > BOLT_RANGE || bolts[i].hit_ids.size() >= 3) {   // fizzles after 3 hits
+                    bolts[i] = bolts.back(); bolts.pop_back();
+                } else ++i;
             }
         }
 
@@ -3300,12 +3384,18 @@ int main(int argc, char** argv) {
         // The friendly BILL mob's aura: weakens ENEMY attacks by 33% near it (mirror of the
         // enemy Insulter). Applied to the damage YOUR units take below.
         auto bill_mult = [&](float x, float z) -> float {
+            // Strongest nearby Bill wins; his DEF/upgrade level deepens the damage cut: -33% base,
+            // -8% more per upgrade level (down to ~-73%).
+            float best = 1.0f;
             for (const auto& a : allies)
                 if (dc::game::mob_type(a.kind).visual == dc::game::MobVisual::Insulter) {
                     const float dx = a.pos[0]-x, dz = a.pos[2]-z;
-                    if (dx*dx + dz*dz < INSULT_AURA*INSULT_AURA) return 0.67f;
+                    if (dx*dx + dz*dz < INSULT_AURA*INSULT_AURA) {
+                        const float m = std::max(0.27f, 0.67f - 0.08f * a.up);
+                        if (m < best) best = m;
+                    }
                 }
-            return 1.0f;
+            return best;
         };
         // Apply upgrade modifiers (red damage, blue longer+wider swing) + the insult debuff.
         pc.strike_damage *= player.damage_mult * insult_mult(player.position[0], player.position[2]);
@@ -3326,6 +3416,7 @@ int main(int argc, char** argv) {
         pc.burn_dps = player.fire_dps; pc.burn_duration = player.fire_duration;
         pc.slow_factor = player.ice_slow; pc.slow_duration = player.ice_duration;
         pc.earth_knock = player.earth_knock;
+        pc.priority = 2.5f;   // enemies prefer the HERO over a same-range mob
         players.push_back(pc);
 
         // Boat boarding intent: F toggles riding a nearby friendly boat (when not in a UI/build).
@@ -3399,6 +3490,7 @@ int main(int argc, char** argv) {
             cc.burn_dps = hc.input.fire_dps; cc.burn_duration = hc.input.fire_duration;
             cc.slow_factor = hc.input.slow_factor; cc.slow_duration = hc.input.slow_duration;
             cc.earth_knock = hc.input.earth_knock;
+            cc.priority = 2.5f;   // client heroes are preferred targets too
             players.push_back(cc);
         }
 
@@ -3545,6 +3637,19 @@ int main(int argc, char** argv) {
                 players.push_back(cc);
                 boat_combat_ids.push_back(b.id);
             }
+        }
+
+        // Whoever is pushing FURTHEST into the enemy base (highest x, excluding the immovable core)
+        // pulls extra aggro — and especially so if it's the hero. Satisfies "target me when I'm
+        // closest to their base" + "prefer the player".
+        if (net.role != dc::net::Role::Client) {
+            const int num_heroes = 1 + static_cast<int>(host_clients.size());
+            int front = -1; float frontx = -1e30f;
+            for (std::size_t i = 0; i < players.size(); ++i) {
+                if (!players[i].alive || players[i].weight > 1e8f) continue;   // skip the core
+                if (players[i].pos[0] > frontx) { frontx = players[i].pos[0]; front = static_cast<int>(i); }
+            }
+            if (front >= 0) players[front].priority = (front < num_heroes) ? 6.0f : 2.0f;
         }
 
         // One flow field per player (parallel to `players`), so an enemy can path to
@@ -4025,8 +4130,15 @@ int main(int argc, char** argv) {
                     const float up_def = dc::game::barracks_def_mult(bp.up[1]);
                     const float up_spd = dc::game::barracks_spd_mult(bp.up[2]);
                     const float up_rate = dc::game::barracks_rate_mult(bp.up[3]);
+                    // Per-TYPE active cap: each barracks keeps cap(kind)+capacity-upgrade alive; pooled
+                    // across all barracks of this kind (and never beyond the global ALLY_CAP).
+                    int kind_cap = 0, alive_kind = 0;
+                    for (const auto& q : base.pieces)
+                        if (q.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks) && q.rot == bp.rot)
+                            kind_cap += mt.cap + dc::game::barracks_cap_bonus(q.up[4]);
+                    for (const auto& a : allies) if (a.kind == bp.rot) ++alive_kind;
                     if (piece_hp[pi] > 0.0f) piece_hp[pi] -= dt;
-                    if (piece_hp[pi] <= 0.0f && static_cast<int>(allies.size()) < dc::game::ALLY_CAP) {
+                    if (piece_hp[pi] <= 0.0f && alive_kind < kind_cap && static_cast<int>(allies.size()) < dc::game::ALLY_CAP) {
                         piece_hp[pi] = mt.interval / up_rate;   // upgraded barracks spawn faster
                         ally_rng = ally_rng * 1664525u + 1013904223u;
                         const float jx = ((ally_rng >> 9) % 100) / 100.0f - 0.5f;
@@ -4615,15 +4727,38 @@ int main(int argc, char** argv) {
             net.broadcast(buf.data(), buf.size(), false);
         }
 
-        // Game over only when EVERYONE is down (co-op). The host decides and resets;
-        // the revive goes out in the snapshot, so clients come back to life on their
-        // own. Clients never reset themselves — they ghost and wait for the host.
-        // (Standalone: host_clients is empty, so this is just "you died".)
+        // Death is NOT permanent: a downed player ghosts for RESPAWN_DELAY seconds, then revives at
+        // full health back at base. The run only ENDS when a CORE falls (win = enemy's, loss = ours).
         if (net.role != dc::net::Role::Client && death_flash <= 0.0f) {
-            bool all_dead = player.health <= 0.0f;
-            for (auto& hc : host_clients) all_dead = all_dead && hc.body.health <= 0.0f;
-            if (enemy_core_health <= 0.0f) { LOGLINE(">>> WIN: enemy core destroyed <<<"); reset_run(); victory_flash = 2.0f; }       // WIN: enemy base destroyed
-            else if (all_dead || core_health <= 0.0f) { LOGLINE(core_health <= 0.0f ? ">>> LOSS: our core fell <<<" : ">>> LOSS: party wiped <<<"); reset_run(); death_flash = 1.2f; }   // wipe OR base destroyed
+            const float RESPAWN_DELAY = 20.0f;
+            // local host player
+            if (player.health <= 0.0f) {
+                if (respawn_timer < 0.0f) respawn_timer = RESPAWN_DELAY;
+                respawn_timer -= dt;
+                if (respawn_timer <= 0.0f) {
+                    player.health = player.stats.max_health;
+                    player.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
+                    player.position[1] = dc::world::EYE_HEIGHT;
+                    player.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
+                    respawn_timer = -1.0f;
+                }
+            } else respawn_timer = -1.0f;
+            // each connected client revives the same way
+            for (auto& hc : host_clients) {
+                if (hc.body.health <= 0.0f) {
+                    if (hc.respawn_timer < 0.0f) hc.respawn_timer = RESPAWN_DELAY;
+                    hc.respawn_timer -= dt;
+                    if (hc.respawn_timer <= 0.0f) {
+                        hc.body.health = hc.body.stats.max_health;
+                        hc.body.position[0] = (map->spawn_col + 0.5f) * dc::world::TILE;
+                        hc.body.position[1] = dc::world::EYE_HEIGHT;
+                        hc.body.position[2] = (map->spawn_row + 0.5f) * dc::world::TILE;
+                        hc.respawn_timer = -1.0f;
+                    }
+                } else hc.respawn_timer = -1.0f;
+            }
+            if (enemy_core_health <= 0.0f) { LOGLINE(">>> WIN: enemy core destroyed <<<"); reset_run(); victory_flash = 2.0f; }
+            else if (core_health <= 0.0f) { LOGLINE(">>> LOSS: our core fell <<<"); reset_run(); death_flash = 1.2f; }
         }
         if (death_flash > 0.0f) death_flash -= dt;
         if (victory_flash > 0.0f) victory_flash -= dt;
@@ -4678,14 +4813,27 @@ int main(int argc, char** argv) {
             // the rest are one-off / upgrade purchases. Costs are gold (one-time). --
             using EK = dc::entity::EnemyKind;
             enum { IT_BAR_SKEL, IT_BAR_RANGED, IT_BAR_BAT, IT_BAR_FLIER, IT_BAR_FLAME, IT_BAR_TROLL,
-                   IT_BAR_DEMON, IT_BAR_INSULT, IT_BAR_SLIME, IT_BOAT, IT_SWEEPER, IT_LAYER, IT_TURRET, IT_CAVALRY, IT_EXPAND, IT_N };
-            const float COST[IT_N] = { 80,110,90,130,150,240,400,160,130,  260,90,150,150,170,250 };
+                   IT_BAR_DEMON, IT_BAR_INSULT, IT_BAR_SLIME, IT_BOAT, IT_SWEEPER, IT_LAYER, IT_TURRET, IT_CAVALRY, IT_UPGRADE, IT_N };
+            const float COST[IT_N] = { 80,110,90,130,150,240,400,160,130,  260,90,150,150,170,90 };
             static const char* const NAME[IT_N] = { "Bks:Skel","Bks:Rangd","Bks:Bat","Bks:Flier","Bks:Flame","Bks:Troll",
-                                                    "Bks:Demon","Bks:Inslt","Bks:Slime","Boat","Sweeper","Minelayr","Turret","Cavalry","Expand" };
+                                                    "Bks:Demon","Bks:Inslt","Bks:Slime","Boat","Sweeper","Minelayr","Turret","Cavalry","Upgrade" };
             const EK BARKIND[9] = { EK::Skeleton, EK::Ranged, EK::Bat, EK::Flying, EK::Flamethrower, EK::Troll, EK::Demon, EK::Insulter, EK::Slime };
+            auto ekcap = [](EK k) -> int { switch (k) { case EK::Bat: return 20; case EK::Ranged: return 7;
+                case EK::Flamethrower: return 6; case EK::Slime: return 6; case EK::Troll: return 4;
+                case EK::Demon: return 3; case EK::Insulter: return 2; default: return 10; } };
             // how many barracks of each kind the enemy already owns
             int barcount[9] = {};
             for (auto& b : ebarracks) for (int t=0;t<9;++t) if (b.kind == (uint8_t)BARKIND[t]) { barcount[t]++; break; }
+            // Capacity race: if WE out-swarm the enemy (more total active-unit capacity), it leans
+            // toward high-capacity barracks types (and upgrades) to catch up.
+            int enemy_total_cap = 0; for (auto& b : ebarracks) enemy_total_cap += ekcap((EK)b.kind) + dc::game::barracks_cap_bonus(b.up);
+            int player_total_cap = 0;
+            for (auto& q : base.pieces) if (q.piece == (uint8_t)dc::game::BuildPiece::Barracks)
+                player_total_cap += dc::game::mob_type(q.rot).cap + dc::game::barracks_cap_bonus(q.up[4]);
+            const float swarm_need = std::min(3.5f, std::max(0.0f, (player_total_cap - enemy_total_cap) / 28.0f));
+            // The laggard barracks (lowest level, below max) — the next upgrade target.
+            int lag_idx = -1, lag_lvl = 99;
+            for (std::size_t i = 0; i < ebarracks.size(); ++i) if (ebarracks[i].up < dc::game::BARRACKS_UP_MAX && ebarracks[i].up < lag_lvl) { lag_lvl = ebarracks[i].up; lag_idx = (int)i; }
             // Find a free TILE in the enemy's base (Open, within the build radius, clear of the core +
             // other barracks). The enemy places barracks on tiles just like we do; when none are free,
             // it must EXPAND. Returns whether a tile exists (and where).
@@ -4709,11 +4857,16 @@ int main(int argc, char** argv) {
                 return found;
             };
             float etile_x = 0.0f, etile_z = 0.0f;
-            const bool room = find_enemy_tile(etile_x, etile_z);   // is there an open base tile to build on?
+            bool room = find_enemy_tile(etile_x, etile_z);   // is there an open base tile to build on?
+            // CHEAT: the enemy never runs out of room — it just grows its base FOR FREE until a tile
+            // opens up (no capacity limit, unlike the player).
+            for (int grow = 0; !room && grow < 6 && enemy_build_radius < 40.0f; ++grow) {
+                enemy_build_radius += 3.0f; room = find_enemy_tile(etile_x, etile_z);
+            }
             const bool avail[IT_N] = {
                 room, room, room && bat_loaded, room, room, room && troll_loaded, room && demon_loaded, room && insulter_loaded, room,
                 true, true /*sweeper*/, true /*minelayer*/, enemy_turret_n < ENEMY_TURRET_MAX, enemy_speed_mult < 2.2f,
-                (!room && enemy_build_radius < 22.0f)   // EXPAND only matters once the base is FULL of barracks
+                lag_idx >= 0   // UPGRADE: available when some barracks can still be leveled up
             };
             auto dayramp = [&](int start, float per){ float v=(day_num - start + 1)*per; return v<0?0.0f:v; };
 
@@ -4722,6 +4875,7 @@ int main(int argc, char** argv) {
             auto raw_score = [&](int it) -> float {
                 float s = 0.0f;
                 switch (it) {
+                    // barracks types: base want + (when out-swarmed) a boost toward HIGH-CAPACITY kinds.
                     case IT_BAR_SKEL:   s = 4.0f - barcount[0]*3.5f; break;                       // always want a skeleton line
                     case IT_BAR_RANGED: s = 2.5f + 0.12f*day_num - barcount[1]*3.5f; break;
                     case IT_BAR_BAT:    s = dayramp(2,0.5f) - barcount[2]*3.5f; break;
@@ -4736,8 +4890,11 @@ int main(int argc, char** argv) {
                     case IT_SWEEPER: s = (player_mines>0 ? 1.5f + player_mines*1.3f : 0.0f) - e_sweepers*1.5f; break;             // clear our mines
                     case IT_TURRET: s = (front_frac>0.75f ? 5.0f + (front_frac-0.75f)*20.0f : front_frac*1.5f) - std::max(0,enemy_turret_n-1)*0.7f; break;
                     case IT_CAVALRY:s = (our_speed > their_speed*1.05f ? (our_speed/their_speed - 1.0f)*12.0f : 0.0f) - (enemy_speed_mult-1.0f)*7.0f; break;
-                    case IT_EXPAND: s = 10.0f; break;   // out of tiles (only avail when full) -> MUST expand to keep building
+                    // self-upgrade the laggard barracks: wanted more as days pass + when out-swarmed.
+                    case IT_UPGRADE: s = (lag_idx >= 0) ? (2.0f + 0.3f*day_num + swarm_need*1.5f - lag_lvl*0.8f) : 0.0f; break;
                 }
+                // When the player out-swarms us, favour HIGH-CAPACITY barracks types to keep up.
+                if (it <= IT_BAR_SLIME && swarm_need > 0.0f) s += swarm_need * ekcap(BARKIND[it]) / 7.0f;
                 return s;
             };
             // overdue ramp + the rare 10. A persistently-unmet strong need climbs toward "critical".
@@ -4766,7 +4923,7 @@ int main(int argc, char** argv) {
                         b.pos[0]=enemy_core_pos[0]-10.0f; b.pos[2]=channel_center(b.pos[0]); b.pos[1]=terrain.height(b.pos[0],b.pos[2]); b.yaw=3.14159f; boats.push_back(b); } break;
                     case IT_TURRET:  if (enemy_turret_n < ENEMY_TURRET_MAX) enemy_turret_n++; break;
                     case IT_CAVALRY: enemy_speed_mult = std::min(2.2f, enemy_speed_mult + 0.18f); break;
-                    case IT_EXPAND:  enemy_build_radius = std::min(22.0f, enemy_build_radius + 3.0f); break;   // grow the base for more tiles
+                    case IT_UPGRADE: if (lag_idx >= 0 && lag_idx < (int)ebarracks.size() && ebarracks[lag_idx].up < dc::game::BARRACKS_UP_MAX) ebarracks[lag_idx].up++; break;   // level the laggard barracks
                 }
             };
 
@@ -4826,20 +4983,34 @@ int main(int argc, char** argv) {
                         default: return 3.2f;   // skeleton / ranged / bat
                     }
                 };
-                // CHEAT: the closer we push to their base, the faster every barracks pumps out
-                // troops — up to +50% spawn rate AND +50% concurrent cap at their doorstep (a free,
-                // gold-less panic boost).
+                auto kcap = [](uint8_t k) -> int {   // per-barracks active cap by kind (weak swarmers high)
+                    switch ((dc::entity::EnemyKind)k) {
+                        case dc::entity::EnemyKind::Bat: return 20;
+                        case dc::entity::EnemyKind::Ranged: return 7;
+                        case dc::entity::EnemyKind::Flamethrower: return 6;
+                        case dc::entity::EnemyKind::Slime: return 6;
+                        case dc::entity::EnemyKind::Troll: return 4;
+                        case dc::entity::EnemyKind::Demon: return 3;
+                        case dc::entity::EnemyKind::Insulter: return 2;
+                        default: return 10;   // skeleton / melee / flying
+                    }
+                };
+                // CHEAT: the closer we push, the faster + the higher each barracks' cap (panic boost).
                 const float panic = 1.0f + 0.5f * front_frac;
-                const int panic_cap = static_cast<int>(enemy_troop_cap * panic);
                 for (auto& b : ebarracks) {
                     b.cd -= dt;
                     if (b.cd > 0.0f) continue;
-                    if (live >= panic_cap) { b.cd = 1.0f; continue; }   // at the (panicked) cap: hold, retry shortly
+                    // Per-TYPE active cap (pooled across same-kind barracks, + this barracks' cap upgrade).
+                    int type_cap = 0;
+                    for (const auto& q : ebarracks) if (q.kind == b.kind) type_cap += kcap(q.kind) + dc::game::barracks_cap_bonus(q.up);
+                    if (live >= 200 || aliveK[b.kind] >= static_cast<int>(type_cap * panic)) { b.cd = 1.0f; continue; }
                     b.cd = barint(b.kind) / panic;
                     const float jx = (rand01(ai_rng)-0.5f)*1.5f, jz = (rand01(ai_rng)-0.5f)*1.5f;
                     auto& e = entities.spawn_enemy(b.x+jx, b.z+jz, (dc::entity::EnemyKind)b.kind, false);
-                    if (stat_mult != 1.0f){ e.stats.max_health*=stat_mult; e.health=e.stats.max_health; e.stats.attack_damage*=stat_mult; }
-                    ++live;
+                    // escalation × this barracks' UPGRADE level (+30% HP / +20% damage per level).
+                    const float um = stat_mult * (1.0f + 0.30f * b.up), ud = stat_mult * (1.0f + 0.20f * b.up);
+                    e.stats.max_health *= um; e.health = e.stats.max_health; e.stats.attack_damage *= ud;
+                    ++live; ++aliveK[b.kind];
                 }
             }
 
@@ -5181,13 +5352,13 @@ int main(int argc, char** argv) {
                 vec3 opos = { player.position[0] + std::cos(a) * w.orbit_radius,
                               (player.position[1] - dc::world::EYE_HEIGHT) + 1.2f,   // ride the player's ground
                               player.position[2] + std::sin(a) * w.orbit_radius };
-                if (wiz) {   // wizard: a purple glowing ORB instead of a sword
+                if (wiz) {   // wizard: a fat purple glowing ORB instead of a sword
                     const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
-                    for (int g = 0; g < 3; ++g) {
-                        const float sz = 0.34f - g * 0.09f, br = 1.0f - g * 0.22f;
+                    for (int g = 0; g < 4; ++g) {
+                        const float sz = 0.52f - g * 0.11f, br = 1.0f - g * 0.18f;
                         auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
                             opos[0]+R[0]*u+U[0]*v, opos[1]+R[1]*u+U[1]*v, opos[2]+R[2]*u+U[2]*v,
-                            0.62f*br, 0.30f*br, 1.0f*br, 1.0f }); };
+                            0.66f*br, 0.34f*br, 1.0f*br, 1.0f }); };
                         P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz);
                     }
                 } else {
@@ -5397,7 +5568,7 @@ int main(int argc, char** argv) {
             const bool cl = (net.role == dc::net::Role::Client);
             const std::size_t na = cl ? net_allies.size() : allies.size();
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
-            std::vector<float> horse_v, knight_v;   // Mounted Knight: brown horse + steel rider (drawn after the loop)
+            std::vector<float> horse_v, knight_v, ally_slime;   // Knight: horse+rider; ally_slime: green blobs (drawn after the loop)
             auto hboxto = [&](std::vector<float>& buf, float cx, float cy, float cz, float hx, float hy, float hz, float ca, float sa) {
                 auto Vt = [&](float lx, float ly, float lz, float nx, float ny, float nz) {
                     const float rx = ca*lx - sa*lz, rz = sa*lx + ca*lz;
@@ -5429,7 +5600,9 @@ int main(int argc, char** argv) {
                     case dc::game::MobVisual::Flier:     if (eye_loaded)       { amdp=&eye_data; amdlp=&eye_model; white=true; } break;
                     case dc::game::MobVisual::Demon:     if (demon_loaded)     { amdp=&demon_data; amdlp=&demon_model; white=true; } break;
                     case dc::game::MobVisual::Insulter:  if (insulter_loaded)  { amdp=&insulter_data; amdlp=&insulter_model; white=true; } break;
-                    default: break;
+                    case dc::game::MobVisual::Flame:     if (gnome_loaded)     { amdp=&gnome_data; amdlp=&gnome_model; white=true; } break;
+                    case dc::game::MobVisual::Troll:     if (troll_loaded)     { amdp=&troll_data; amdlp=&troll_model; white=true; } break;
+                    default: break;   // Slime is procedural (handled below)
                 }
                 dc::renderer::ModelData& amd = *amdp; dc::renderer::Model& amdl = *amdlp;
                 std::vector<dc::renderer::AnimLayer> al;
@@ -5517,13 +5690,20 @@ int main(int argc, char** argv) {
                 vec3 apos = { ax, afy, az };
                 glm_translate(apl, apos);
                 glm_rotate_y(apl, -ayaw + MODEL_YAW_OFFSET, apl);
-                const float dscale = (vis == dc::game::MobVisual::Demon) ? 1.7f : 1.0f;   // demons are big
+                // SLIME ally: a wobbling green blob, no humanoid model.
+                if (vis == dc::game::MobVisual::Slime) {
+                    const float gy = terrain.height(ax, az) + MODEL_FOOT_LIFT;
+                    const float wob = 1.0f + 0.12f * std::sin(t_now*4.0f + ax), w = 0.8f * asize;
+                    hboxto(ally_slime, ax, gy + 0.55f/wob, az, w*wob, 0.55f/wob, w*wob, 1.0f, 0.0f);
+                    hboxto(ally_slime, ax, gy + 0.95f/wob, az, w*0.55f*wob, 0.4f/wob, w*0.55f*wob, 1.0f, 0.0f);
+                }
+                const float dscale = (vis == dc::game::MobVisual::Demon || vis == dc::game::MobVisual::Troll) ? 1.7f : 1.0f;   // demons + trolls are big
                 { vec3 asc = { asize*dscale, asize*dscale, asize*dscale }; glm_scale(apl, asc); }
                 // Tint: white for own-material models; a friendly cyan-green for the skeleton grunts.
                 vec3 acol;
                 if (white) { acol[0]=acol[1]=acol[2]=1.0f; }
                 else { acol[0]=0.35f; acol[1]=0.85f; acol[2]=0.9f; }
-                if (vis != dc::game::MobVisual::Knight)   // the knight is fully procedural (horse+rider above)
+                if (vis != dc::game::MobVisual::Knight && vis != dc::game::MobVisual::Slime)   // those are fully procedural
                     renderer.draw_model(amdl, enemy_part_world, apl, acol);
                 // BILL constantly rants: a swirl of yellow motes orbits him (camera-facing billboards).
                 if (dc::game::mob_type(akind).visual == dc::game::MobVisual::Insulter) {
@@ -5573,6 +5753,12 @@ int main(int argc, char** argv) {
                 knight_mesh.upload(knight_v);
                 vec3 knight_col = { 0.62f, 0.66f, 0.72f };   // burnished steel
                 renderer.draw_terrain(knight_mesh, knight_col, true);
+            }
+            if (!ally_slime.empty()) {   // friendly slimes (green goo)
+                static dc::renderer::Mesh aslime_mesh;
+                aslime_mesh.upload(ally_slime);
+                vec3 goo = { 0.35f, 0.85f, 0.30f };
+                renderer.draw_terrain(aslime_mesh, goo, true);
             }
             // Rally flag: a glowing cyan banner where you've ordered the mobs to hold.
             if (rally_active) {
@@ -6321,23 +6507,44 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Wizard staff bolts: bright cyan energy orbs (host/standalone draws `bolts`,
-        // clients draw the replicated `render_bolts`).
+        // Wizard staff bolts: a real 3D energy ORB (low-poly sphere) with a soft glow + a subtle
+        // particle trail. Host/standalone draws `bolts` (has direction for the tail); clients draw
+        // the replicated `render_bolts`.
         {
             const auto& R = renderer.cam_right; const auto& U = renderer.cam_up;
-            auto draw_bolt = [&](float x, float y, float z, bool big) {
-                const float core = big ? 0.34f : 0.18f, glow = big ? 0.62f : 0.34f;
-                auto Q = [&](float sz, float r, float g, float b, float a) {
-                    vec3 c = { x, y, z };
-                    auto P = [&](float u, float v) { particle_verts.insert(particle_verts.end(), {
-                        c[0]+R[0]*u+U[0]*v, c[1]+R[1]*u+U[1]*v, c[2]+R[2]*u+U[2]*v, r, g, b, a }); };
-                    P(-sz,-sz); P(sz,-sz); P(sz,sz); P(-sz,-sz); P(sz,sz); P(-sz,sz);
-                };
-                Q(glow, 0.25f, 0.6f, 1.0f, 0.7f);   // soft outer glow
-                Q(core, 0.7f, 0.92f, 1.0f, 1.0f);   // bright core
+            std::vector<float> bolt_geo;
+            auto sphere_into = [&](float cx, float cy, float cz, float rad) {
+                const int ST = 4, SL = 7; const float PI = 3.14159265f;
+                auto sp = [](float t, float p, float& x, float& y, float& z){ x = std::sin(t)*std::cos(p); y = std::cos(t); z = std::sin(t)*std::sin(p); };
+                auto V = [&](float x, float y, float z){ bolt_geo.insert(bolt_geo.end(), { cx+x*rad, cy+y*rad, cz+z*rad, x, y, z, 0.f, 0.f, 0.f }); };
+                for (int i = 0; i < ST; ++i) { const float t0 = PI*i/ST, t1 = PI*(i+1)/ST;
+                    for (int j = 0; j < SL; ++j) { const float p0 = 2*PI*j/SL, p1 = 2*PI*(j+1)/SL;
+                        float ax,ay,az,bx,by,bz,cx2,cy2,cz2,dx,dy,dz;
+                        sp(t0,p0,ax,ay,az); sp(t1,p0,bx,by,bz); sp(t1,p1,cx2,cy2,cz2); sp(t0,p1,dx,dy,dz);
+                        V(ax,ay,az);V(bx,by,bz);V(cx2,cy2,cz2); V(ax,ay,az);V(cx2,cy2,cz2);V(dx,dy,dz); } }
             };
-            if (net.role == dc::net::Role::Client) for (const auto& b : render_bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big);
-            else for (const auto& b : bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big);
+            auto draw_bolt = [&](float x, float y, float z, bool big, float dx, float dy, float dz) {
+                const float core = big ? 0.28f : 0.16f, glow = big ? 0.6f : 0.34f;
+                sphere_into(x, y, z, core);   // the dimensional orb
+                // soft outer glow (one camera-facing quad behind the sphere) + a fading comet tail.
+                auto quad = [&](float ox,float oy,float oz,float sz,float r,float g,float b,float a){
+                    auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
+                        ox+R[0]*u+U[0]*v, oy+R[1]*u+U[1]*v, oz+R[2]*u+U[2]*v, r,g,b,a }); };
+                    P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz); };
+                quad(x,y,z, glow, 0.25f,0.6f,1.0f, 0.45f);
+                const float dl = std::sqrt(dx*dx+dy*dy+dz*dz);
+                if (dl > 1e-3f) { const float nx=dx/dl, ny=dy/dl, nz=dz/dl;
+                    for (int k = 1; k <= 4; ++k) { const float t = k*0.28f, fade = 1.0f - k*0.22f;
+                        quad(x-nx*t, y-ny*t, z-nz*t, core*(1.0f-k*0.18f), 0.45f,0.78f,1.0f, 0.35f*fade); } }
+            };
+            if (net.role == dc::net::Role::Client) for (const auto& b : render_bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, 0,0,0);
+            else for (const auto& b : bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, b.dir[0], b.dir[1], b.dir[2]);
+            if (!bolt_geo.empty()) {
+                static dc::renderer::Mesh bolt_mesh;
+                bolt_mesh.upload(bolt_geo);
+                vec3 bcol = { 0.55f, 0.9f, 1.0f };   // glowing cyan energy
+                renderer.draw_terrain(bolt_mesh, bcol, true);
+            }
         }
 
         // Wizard magic shields: a glowing translucent hexagon barrier facing the block dir.
@@ -7287,7 +7494,7 @@ int main(int argc, char** argv) {
             };
             // Cursor in NDC, but only while a menu is open (otherwise the mouse drives the
             // first-person look and is captured). Used for hover-to-describe.
-            const bool cursor_free = (menu_chest >= 0 || paused || scoreboard || levelup_open);
+            const bool cursor_free = (menu_chest >= 0 || paused || scoreboard || levelup_open || upgrade_menu);
             float mxn = -2.0f, myn = -2.0f;
             if (cursor_free) {
                 float mx, my; input.mouse_pos(mx, my);
@@ -7500,13 +7707,21 @@ int main(int argc, char** argv) {
                 hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.6f);        // dim
                 hud_rect(-0.66f, -0.62f, 0.66f, 0.56f, 0.08f, 0.09f, 0.13f, 0.97f); // panel (larger)
                 for (int k = 0; k < dc::game::MOB_TYPE_COUNT; ++k) {               // mob-type rows
-                    const float ry = 0.40f - k * 0.092f;
+                    const float ry = 0.40f - k * 0.072f;
                     const bool unlocked = (barracks_unlocked & (1u << k)) != 0;
                     if (unlocked) hud_rect(-0.62f, ry - 0.035f, 0.62f, ry + 0.045f, 0.14f, 0.22f, 0.32f, 0.9f);
                     else          hud_rect(-0.62f, ry - 0.035f, 0.62f, ry + 0.045f, 0.20f, 0.12f, 0.10f, 0.9f);
                 }
-                const float ry8 = 0.40f - dc::game::MOB_TYPE_COUNT * 0.092f;       // expand-area row
+                const float ry8 = 0.40f - dc::game::MOB_TYPE_COUNT * 0.072f;       // expand-area row
                 hud_rect(-0.62f, ry8 - 0.035f, 0.62f, ry8 + 0.045f, 0.22f, 0.18f, 0.10f, 0.9f);
+            }
+            // Barracks upgrade menu panel.
+            if (upgrade_menu) {
+                hud_rect(-1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.55f);
+                hud_rect(-0.5f, -0.28f, 0.5f, 0.42f, 0.08f, 0.10f, 0.14f, 0.97f);
+                for (int k = 0; k < 5; ++k) { const float ry = 0.24f - k * 0.085f;
+                    hud_rect(-0.46f, ry - 0.035f, 0.46f, ry + 0.04f, 0.14f, 0.20f, 0.30f, 0.9f); }
+                hud_rect(-0.46f, -0.255f, 0.46f, -0.185f, 0.28f, 0.14f, 0.12f, 0.9f);   // sell row
             }
 
             // Command minimap: a lane strip per unlocked mob type with a draggable HOLD pin.
@@ -7531,6 +7746,35 @@ int main(int argc, char** argv) {
                     const float px = (cmd_drag == t) ? cmd_drag_mx : cm_pinx(t);
                     const float py = (cmd_drag == t) ? cmd_drag_my : ry;
                     hud_rect(px - 0.016f, py - 0.03f, px + 0.016f, py + 0.03f, 0.35f, 1.0f, 0.7f, 1.0f);  // pin (cyan)
+                    // LIVE UNIT DOTS on this row: white = your mobs of this type, red = the matching
+                    // enemy kind. Small, to keep it readable.
+                    const float lanelen = (enemy_core_pos[0] - core_pos[0]);
+                    auto dot = [&](float wx, float r, float g, float b) {
+                        float f = lanelen > 1.0f ? (wx - core_pos[0]) / lanelen : 0.0f; f = clamp01(f);
+                        const float dx = CM_SX0 + f * (CM_SX1 - CM_SX0);
+                        hud_rect(dx - 0.004f, ry - 0.009f, dx + 0.004f, ry + 0.009f, r, g, b, 0.95f);
+                    };
+                    const bool is_cl = (net.role == dc::net::Role::Client);
+                    if (is_cl) { for (const auto& a : net_allies) if (a.kind == t) dot(a.x, 1.0f, 1.0f, 1.0f); }
+                    else       { for (const auto& a : allies)     if (a.kind == t) dot(a.pos[0], 1.0f, 1.0f, 1.0f); }
+                    // matching enemy kind for this player type's role (host has live entities).
+                    int ek = -1;
+                    switch (dc::game::mob_type(t).visual) {
+                        case dc::game::MobVisual::Ground:   ek = (int)dc::entity::EnemyKind::Skeleton; break;
+                        case dc::game::MobVisual::Mage:     ek = (int)dc::entity::EnemyKind::Ranged;   break;
+                        case dc::game::MobVisual::Bat:      ek = (int)dc::entity::EnemyKind::Bat;      break;
+                        case dc::game::MobVisual::Flier:    ek = (int)dc::entity::EnemyKind::Flying;   break;
+                        case dc::game::MobVisual::Demon:    ek = (int)dc::entity::EnemyKind::Demon;    break;
+                        case dc::game::MobVisual::Insulter: ek = (int)dc::entity::EnemyKind::Insulter; break;
+                        case dc::game::MobVisual::Flame:    ek = (int)dc::entity::EnemyKind::Flamethrower; break;
+                        case dc::game::MobVisual::Troll:    ek = (int)dc::entity::EnemyKind::Troll;    break;
+                        case dc::game::MobVisual::Slime:    ek = (int)dc::entity::EnemyKind::Slime;    break;
+                        default: break;
+                    }
+                    if (!is_cl && ek >= 0) for (const auto& e : entities.items)
+                        if (e.alive && e.type == dc::entity::EntityType::Enemy &&
+                            ((int)e.kind == ek || (ek == (int)dc::entity::EnemyKind::Skeleton && e.kind == dc::entity::EnemyKind::Melee)))
+                            dot(e.position[0], 1.0f, 0.25f, 0.2f);
                 }
             }
 
@@ -7667,6 +7911,15 @@ int main(int argc, char** argv) {
                 const float vpx = 64.0f, w = renderer.text_width("VICTORY!", vpx, fbw);
                 renderer.draw_text("VICTORY!", -w * 0.5f, 0.05f, vpx, gold, clamp01(victory_flash / 2.0f), fbw, fbh);
             }
+            // Downed: big respawn countdown (you ghost meanwhile and can spectate).
+            if (respawn_timer > 0.0f) {
+                vec3 red = { 1.0f, 0.4f, 0.35f }, dim = { 0.85f, 0.85f, 0.9f };
+                const float dw = renderer.text_width("YOU DIED", 56.0f, fbw);
+                renderer.draw_text("YOU DIED", -dw * 0.5f, 0.12f, 56.0f, red, 1.0f, fbw, fbh);
+                char rc[48]; std::snprintf(rc, sizeof rc, "respawning in %d", (int)std::ceil(respawn_timer));
+                const float cw = renderer.text_width(rc, 26.0f, fbw);
+                renderer.draw_text(rc, -cw * 0.5f, 0.02f, 26.0f, dim, 1.0f, fbw, fbh);
+            }
             // Command minimap labels.
             if (cmd_map) {
                 vec3 gold = {1.0f,0.85f,0.3f}, white = {0.9f,0.95f,1.0f}, dim = {0.55f,0.6f,0.66f};
@@ -7685,13 +7938,13 @@ int main(int argc, char** argv) {
                 for (int k = 0; k < dc::game::MOB_TYPE_COUNT; ++k) {
                     const dc::game::MobType& mt = dc::game::mob_type(k);
                     const bool unlocked = (barracks_unlocked & (1u << k)) != 0;
-                    const float ry = 0.40f - k * 0.092f;
+                    const float ry = 0.40f - k * 0.072f;
                     char line[128];
                     if (unlocked)
                         std::snprintf(line, sizeof line, "[%d] %-9s buy $%d   /%.0fs  (%.0fhp %.0fdmg)",
                                       k+1, mt.name, mt.place_cost, mt.interval, mt.hp, mt.damage);
                     else
-                        std::snprintf(line, sizeof line, "[%d] %-9s LOCKED  -  unlock $%d", k+1, mt.name, mt.unlock_cost);
+                        std::snprintf(line, sizeof line, "[%d] %-9s  press to UNLOCK (free)", k+1, mt.name);
                     renderer.draw_text(line, -0.60f, ry - 0.005f, 12.0f, unlocked ? white : grey, 1.0f, fbw, fbh);
                 }
                 {   // expand-area row
@@ -7699,8 +7952,29 @@ int main(int argc, char** argv) {
                     if (base.build_radius < dc::game::BASE_AREA_MAX)
                         std::snprintf(line, sizeof line, "[0] Expand build area  buy $%d", dc::game::base_area_cost(base.build_radius));
                     else std::snprintf(line, sizeof line, "[9] Build area MAXED");
-                    const float ry = 0.40f - dc::game::MOB_TYPE_COUNT * 0.092f;
+                    const float ry = 0.40f - dc::game::MOB_TYPE_COUNT * 0.072f;
                     renderer.draw_text(line, -0.60f, ry - 0.005f, 12.0f, gold, 1.0f, fbw, fbh);
+                }
+            }
+            // Barracks upgrade menu labels.
+            if (upgrade_menu) {
+                const int bidx = piece_index_at(upg_col, upg_row);
+                if (bidx >= 0 && base.pieces[bidx].piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) {
+                    const auto& bp = base.pieces[bidx];
+                    vec3 gold = {1.0f,0.85f,0.3f}, white = {0.95f,0.95f,0.95f}, red = {1.0f,0.55f,0.45f}, dimc = {0.6f,0.65f,0.72f};
+                    char hdr[80]; std::snprintf(hdr, sizeof hdr, "UPGRADE  %s barracks   (Lv %d, cap %d)", dc::game::mob_type(bp.rot).name, dc::game::barracks_up_total(bp), dc::game::mob_type(bp.rot).cap + dc::game::barracks_cap_bonus(bp.up[4]));
+                    renderer.draw_text(hdr, -0.46f, 0.34f, 13.0f, gold, 1.0f, fbw, fbh);
+                    const char* nm[5] = { "Health", "Defense", "Speed", "Spawn Rate", "Capacity" };
+                    for (int s = 0; s < 5; ++s) {
+                        const float ry = 0.24f - s * 0.085f;
+                        char line[96];
+                        if (bp.up[s] >= dc::game::BARRACKS_UP_MAX) std::snprintf(line, sizeof line, "[%d] %-10s  L%d  MAX", s+1, nm[s], bp.up[s]);
+                        else std::snprintf(line, sizeof line, "[%d] %-10s  L%d -> L%d   $%d", s+1, nm[s], bp.up[s], bp.up[s]+1, dc::game::barracks_upgrade_cost(bp.up[s]));
+                        renderer.draw_text(line, -0.44f, ry - 0.005f, 12.0f, white, 1.0f, fbw, fbh);
+                    }
+                    char sell[64]; std::snprintf(sell, sizeof sell, "[S] Sell barracks  (+$%d)", (dc::game::mob_type(bp.rot).place_cost * 3) / 4);
+                    renderer.draw_text(sell, -0.44f, -0.235f, 12.0f, red, 1.0f, fbw, fbh);
+                    renderer.draw_text("E / Esc  close", -0.10f, 0.37f, 10.0f, dimc, 1.0f, fbw, fbh);
                 }
             }
             // Build-mode palette: current piece + (for barracks) the mob type + key hints.
