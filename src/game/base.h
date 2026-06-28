@@ -23,7 +23,7 @@ enum class BuildPiece : uint8_t { Barricade = 0, Landmine = 1, Turret = 2, Barra
 // MORTAR (base artillery): a costly, very-slow siege piece that lobs shells far down the lane
 // (out to ~mid-map) and detonates in a big AoE for massive damage. Counters enemy blobs at range.
 inline constexpr float MORTAR_RANGE      = 130.0f;  // reaches roughly to the middle of the map
-inline constexpr float MORTAR_MIN_RANGE  = 14.0f;   // can't hit point-blank (lob arcs over the near area)
+inline constexpr float MORTAR_MIN_RANGE  = 7.0f;    // can't hit right at its feet (lobs over the near area)
 inline constexpr float MORTAR_BLAST      = 6.0f;    // splash radius
 inline constexpr float MORTAR_DAMAGE     = 320.0f;  // massive (clears blobs)
 inline constexpr float MORTAR_CD         = 7.0f;    // seconds between shots — VERY slow

@@ -37,6 +37,9 @@ Entity& EntityList::spawn_enemy(float x, float z, EnemyKind kind, bool elite) {
         e.stats = { 600.0f, 0.0f, 2.0f, ENEMY_WEIGHT * 2.0f };
         e.health = e.stats.max_health;
     }
+    // Uniform toughness: every enemy is moderately tankier so the lane pushes back harder and
+    // forward progress is steadier (the fragile one-shot flyer keeps its 1-HP gimmick).
+    if (kind != EnemyKind::Flying) { e.stats.max_health *= 1.4f; e.health = e.stats.max_health; }
     if (elite) {
         e.elite = true;
         // Elite flyers get a real health pool (not the one-shot 1.0) so they're a threat.

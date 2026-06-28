@@ -6,3 +6,6 @@
 __pycache__/
 *.o
 .DS_Store
+
+# Piper TTS engine + voice are provisioned by scripts/setup_piper.sh, not committed.
+assets/piper/

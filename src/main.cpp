@@ -8533,36 +8533,13 @@ int main(int argc, char** argv) {
                 renderer.draw_text(txt, ndcx - w * 0.5f, ndcy, 17.0f, yellow, 1.0f - t.age / TAUNT_LIFE, fbw, fbh);
             }
 
-            // Floating "E" prompt over the nearest thing you can interact with (only when in
-            // reach) — core -> barracks -> drone vendor -> chest, matching the E-key priority.
+            // Floating "E" prompt over whatever you're in reach of AND aiming at (same picker the
+            // E key uses, so the prompt always matches what you'd actually interact with).
             if (!ui_open && !dead && player.health > 0.0f) {
-                vec3 ip = {0,0,0}; const char* label = nullptr;
-                const float dcx = core_pos[0]-player.position[0], dcz = core_pos[2]-player.position[2];
-                if (dcx*dcx + dcz*dcz <= (CORE_RAD+4.5f)*(CORE_RAD+4.5f)) {
-                    ip[0]=core_pos[0]; ip[1]=core_pos[1]+3.4f; ip[2]=core_pos[2]; label="E  Muster";
-                } else {
-                    int ub=-1; float ub2=9.0f, bx=0, bz=0;
-                    for (const auto& p : base.pieces) if (p.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) {
-                        const float px=(p.col+0.5f)*dc::world::TILE, pz=(p.row+0.5f)*dc::world::TILE;
-                        const float dx=px-player.position[0], dz=pz-player.position[2], d2=dx*dx+dz*dz;
-                        if (d2<ub2){ub2=d2; bx=px; bz=pz; ub=1;}
-                    }
-                    if (ub>=0) { ip[0]=bx; ip[1]=terrain.height(bx,bz)+2.6f; ip[2]=bz; label="E  Upgrade"; }
-                    else {
-                        float best2 = CHEST_REACH*CHEST_REACH;
-                        for (const auto& dv : drone_vendors) if (!dv.bought) {
-                            const float dx=dv.x-player.position[0], dz=dv.z-player.position[2], d2=dx*dx+dz*dz;
-                            if (d2<best2){best2=d2; ip[0]=dv.x; ip[1]=terrain.height(dv.x,dv.z)+1.9f; ip[2]=dv.z; label="E  Buy Drone";}
-                        }
-                        for (const auto& ch : chests) if (ch.remaining() > 0) {
-                            const float cxp=(ch.col+0.5f)*dc::world::TILE, czp=(ch.row+0.5f)*dc::world::TILE;
-                            const float dx=cxp-player.position[0], dz=czp-player.position[2], d2=dx*dx+dz*dz;
-                            if (d2<best2){best2=d2; ip[0]=cxp; ip[1]=terrain.height(cxp,czp)+1.7f; ip[2]=czp; label="E  Open";}
-                        }
-                    }
-                }
+                InteractTarget it = pick_interact();
+                const char* label = (it.kind >= 0) ? it.label : nullptr;
                 if (label) {
-                    vec4 wp = { ip[0], ip[1] + 0.18f*std::sin(t_now*3.0f), ip[2], 1.0f }, clip;
+                    vec4 wp = { it.x, it.y + 0.18f*std::sin(t_now*3.0f), it.z, 1.0f }, clip;
                     glm_mat4_mulv(renderer.viewproj, wp, clip);
                     if (clip[3] > 0.05f) {
                         const float ndcx = clip[0]/clip[3], ndcy = clip[1]/clip[3];
