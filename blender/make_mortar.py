@@ -174,9 +174,10 @@ def main():
         iron_parts.append(sphere("axlecap%d" % sx, 0.06, (sx * 0.56, -0.12, 0.32), iron, subdiv=1))
     assemble("iron", root, iron_parts)
 
-    # ---------------- BORE: near-black hollow muzzle disk (recessed at the mouth) ----------------
+    # ---------------- BORE: a deep, near-black HOLLOW cavity bored down into the muzzle ----------------
     assemble("bore", root, [
-        cyl("muzzlehole", 0.175, 0.165, 0.06, along(BLEN * 0.5 - 0.06), bore, rot=rotX, segs=24),
+        cyl("muzzlehole", 0.185, 0.175, 0.55, along(BLEN * 0.5 - 0.27), bore, rot=rotX, segs=28),  # deep tube cavity
+        cyl("borefloor",  0.175, 0.02,  0.10, along(BLEN * 0.5 - 0.55), bore, rot=rotX, segs=24),   # tapered dark floor
     ])
 
     # ---------------- BRASS: trunnion pivot caps + a loaded shell on the bed ----------------

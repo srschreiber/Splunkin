@@ -285,6 +285,10 @@ int main(int argc, char** argv) {
     const bool dragon_loaded = dc::renderer::read_model("assets/models/dragon.glb", dragon_data);
     if (!dragon_loaded) std::fprintf(stderr, "note: assets/models/dragon.glb not found; run blender/make_dragon.py\n");
 
+    dc::renderer::ModelData slime_model_data;   // jiggly green slime blob (origin at ground, idle/walk wobble)
+    const bool slime_model_loaded = dc::renderer::read_model("assets/models/slime.glb", slime_model_data);
+    if (!slime_model_loaded) std::fprintf(stderr, "note: assets/models/slime.glb not found; run blender/make_slime.py\n");
+
     dc::renderer::ModelData skeleton_data;
     const bool skeleton_loaded = dc::renderer::read_model("assets/models/skeleton.glb", skeleton_data);
     if (!skeleton_loaded) std::fprintf(stderr, "note: assets/models/skeleton.glb not found; run blender/make_skeleton.py to enable skeletons\n");
@@ -361,6 +365,8 @@ int main(int argc, char** argv) {
     if (mortar_loaded) mortar_model.upload(mortar_data);
     dc::renderer::Model dragon_model;
     if (dragon_loaded) dragon_model.upload(dragon_data);
+    dc::renderer::Model slime_model;
+    if (slime_model_loaded) slime_model.upload(slime_model_data);
     dc::renderer::Model bat_model;
     if (bat_loaded) bat_model.upload(bat_data);
     dc::renderer::Model gnome_model;
@@ -909,12 +915,13 @@ int main(int argc, char** argv) {
                           enemy_core_pos[0] - 3.0f*dc::world::TILE, enemy_core_pos[2] });
     // Slime puddles left by slime enemies (host owns; clients render `net_slime_patches`). They
     // slow the player + friendly mobs that wade through them (enemies/slimes are immune).
-    struct SlimePatch { vec3 pos; float radius = 1.0f, life = 0.0f, max_life = 1.0f; };
+    struct SlimePatch { vec3 pos; float radius = 1.0f, life = 0.0f, max_life = 1.0f; uint8_t team = 0; };  // team 0 = enemy slime (slows you), 1 = ally slime (slows enemies)
     std::vector<SlimePatch> slime_patches;
     std::vector<dc::net::SlimePatchState> net_slime_patches;
     struct SlimeTrack { float cd, x, z; };
     std::unordered_map<uint32_t, SlimeTrack> slime_track;   // host: per-slime drop timer + last pos
-    const float SLIME_SLOW = 0.5f;
+    float ally_slime_drop_cd = 0.0f;                        // host: shared timer for ally-slime trail drops
+    const float SLIME_SLOW = 0.35f;                         // significant slow (was 0.5)
     const float BOAT_MAX_HP = 700.0f, BOAT_SPEED = 1.8f, BOAT_RANGE = 38.0f, BOAT_FIRE_CD = 2.6f;   // long range is the point
     const float BOARD_RANGE = 6.0f;   // press F this close to a friendly boat to climb aboard
     const float FRIENDLY_BOAT_HP = 7000.0f;   // your warships are VERY tanky — they wade through a swarm
@@ -993,7 +1000,7 @@ int main(int argc, char** argv) {
         if (net.role == dc::net::Role::Client) {
             for (const auto& s : net_slime_patches) { const float dx=s.x-wx, dz=s.z-wz; if (dx*dx+dz*dz < s.radius*s.radius) return true; }
         } else {
-            for (const auto& s : slime_patches) { const float dx=s.pos[0]-wx, dz=s.pos[2]-wz; if (dx*dx+dz*dz < s.radius*s.radius) return true; }
+            for (const auto& s : slime_patches) if (s.team == 0) { const float dx=s.pos[0]-wx, dz=s.pos[2]-wz; if (dx*dx+dz*dz < s.radius*s.radius) return true; }  // only enemy slime mires you
         }
         return false;
     };
@@ -3665,7 +3672,10 @@ int main(int argc, char** argv) {
                 // rotate the heading by a slow per-mob sine while traveling (not when a target's in reach).
                 float shx = hx, shz = hz;
                 if (!tgt || d > reach + 1.0f) {
-                    const float wob = std::sin(t_now*1.0f + static_cast<float>(i)*2.399f) * 0.30f
+                    // Slimes strafe HARD (wide weave to cover the battlefield with their trail); others drift gently.
+                    const float wamp = (mt.visual == dc::game::MobVisual::Slime) ? 0.95f : 0.30f;
+                    const float wfrq = (mt.visual == dc::game::MobVisual::Slime) ? 1.7f : 1.0f;
+                    const float wob = std::sin(t_now*wfrq + static_cast<float>(i)*2.399f) * wamp
                                     + std::sin(t_now*0.37f + static_cast<float>(i)) * 0.12f;
                     const float cw = std::cos(wob), sw = std::sin(wob);
                     shx = hx*cw - hz*sw; shz = hx*sw + hz*cw;
@@ -4090,16 +4100,31 @@ int main(int argc, char** argv) {
                     auto it = slime_track.find(e.id);
                     float cd = (it != slime_track.end()) ? it->second.cd - dt : 0.0f;
                     if (cd <= 0.0f) {
-                        slime_patches.push_back({ { e.position[0], terrain.height(e.position[0], e.position[2]), e.position[2] }, 2.6f, 7.0f, 7.0f });
-                        cd = 0.45f;
+                        slime_patches.push_back({ { e.position[0], terrain.height(e.position[0], e.position[2]), e.position[2] }, 2.6f, 15.0f, 15.0f, 0 });   // enemy slime: slows you, lingers 15s
+                        cd = 0.40f;
                     }
                     next[e.id] = { cd, e.position[0], e.position[2] };
                 }
                 // Deaths: slimes tracked last frame but gone now -> big burst at their last spot.
                 for (auto& kv : slime_track)
                     if (next.find(kv.first) == next.end())
-                        slime_patches.push_back({ { kv.second.x, terrain.height(kv.second.x, kv.second.z), kv.second.z }, 5.5f, 12.0f, 12.0f });
+                        slime_patches.push_back({ { kv.second.x, terrain.height(kv.second.x, kv.second.z), kv.second.z }, 5.5f, 15.0f, 15.0f, 0 });
                 slime_track.swap(next);
+                // YOUR slimes ooze a team-1 trail (slows ENEMIES) — a steady puddle drop as they move.
+                ally_slime_drop_cd -= dt;
+                if (ally_slime_drop_cd <= 0.0f) {
+                    for (const auto& a : allies) if (dc::game::mob_type(a.kind).visual == dc::game::MobVisual::Slime)
+                        slime_patches.push_back({ { a.pos[0], terrain.height(a.pos[0], a.pos[2]), a.pos[2] }, 2.6f, 15.0f, 15.0f, 1 });
+                    ally_slime_drop_cd = 0.40f;
+                }
+                // Slow every ENEMY standing in an ally (team-1) slime patch (reuses the ice-slow fields).
+                for (auto& e : entities.items) {
+                    if (e.type != dc::entity::EntityType::Enemy || !e.alive) continue;
+                    for (const auto& s : slime_patches) if (s.team == 1) {
+                        const float dx=s.pos[0]-e.position[0], dz=s.pos[2]-e.position[2];
+                        if (dx*dx + dz*dz < s.radius*s.radius) { e.slow_time = 0.25f; e.slow_factor = SLIME_SLOW; break; }
+                    }
+                }
                 // Age out + cap.
                 for (std::size_t i = 0; i < slime_patches.size();) {
                     slime_patches[i].life -= dt;
@@ -5498,7 +5523,7 @@ int main(int argc, char** argv) {
                 for (std::size_t i = 0; i < ns; ++i) {
                     float cx, cz, rad;
                     if (cl) { const auto& s = net_slime_patches[i]; cx=s.x; cz=s.z; rad=s.radius; }
-                    else    { const auto& s = slime_patches[i]; cx=s.pos[0]; cz=s.pos[2]; rad=s.radius; }
+                    else    { const auto& s = slime_patches[i]; cx=s.pos[0]; cz=s.pos[2]; rad=s.radius * std::min(1.0f, s.life / 3.5f); }  // shrink away over its last ~3.5s
                     for (int k = 0; k < SEG; ++k) {
                         const float a0 = 6.2831853f*k/SEG, a1 = 6.2831853f*(k+1)/SEG;
                         V(cx, cz); V(cx+std::cos(a0)*rad, cz+std::sin(a0)*rad); V(cx+std::cos(a1)*rad, cz+std::sin(a1)*rad);
@@ -5914,6 +5939,7 @@ int main(int argc, char** argv) {
                     case dc::game::MobVisual::Troll:     if (troll_loaded)     { amdp=&troll_data; amdlp=&troll_model; white=true; } break;
                     case dc::game::MobVisual::Drone:     if (drone_loaded)     { amdp=&drone_data; amdlp=&drone_model; white=true; } break;
                     case dc::game::MobVisual::Dragon:    if (dragon_loaded)    { amdp=&dragon_data; amdlp=&dragon_model; white=true; } break;
+                    case dc::game::MobVisual::Slime:     if (slime_model_loaded) { amdp=&slime_model_data; amdlp=&slime_model; white=true; } break;
                     default: break;   // Slime is procedural (handled below)
                 }
                 dc::renderer::ModelData& amd = *amdp; dc::renderer::Model& amdl = *amdlp;
@@ -5924,7 +5950,7 @@ int main(int argc, char** argv) {
                     al.push_back({ &amd.walk, t_now * 1.8f + static_cast<float>(i), -1 });
                 dc::renderer::pose_model(amd, al, 0.0f, enemy_part_world);
                 mat4 apl; glm_mat4_identity(apl);
-                float afy = terrain.height(ax, az) + (vis == dc::game::MobVisual::Dragon ? 0.0f : MODEL_FOOT_LIFT);   // dragon origin is at its feet
+                float afy = terrain.height(ax, az) + ((vis == dc::game::MobVisual::Dragon || vis == dc::game::MobVisual::Slime) ? 0.0f : MODEL_FOOT_LIFT);   // dragon/slime origin is at ground
                 if (in_water(ax, az)) afy += -0.35f + std::sin(t_now * 3.0f + i) * 0.1f;   // wade + bob
                 if (dc::game::mob_type(akind).flies) afy += 1.6f + std::sin(t_now*2.0f+i)*0.15f;   // hover
                 if (vis == dc::game::MobVisual::Knight) {
@@ -5968,8 +5994,8 @@ int main(int argc, char** argv) {
                 vec3 apos = { ax, afy, az };
                 glm_translate(apl, apos);
                 glm_rotate_y(apl, -ayaw + MODEL_YAW_OFFSET, apl);
-                // SLIME ally: a wobbling green blob, no humanoid model.
-                if (vis == dc::game::MobVisual::Slime) {
+                // SLIME ally without a model: a wobbling green box blob (fallback).
+                if (vis == dc::game::MobVisual::Slime && !slime_model_loaded) {
                     const float gy = terrain.height(ax, az) + MODEL_FOOT_LIFT;
                     const float wob = 1.0f + 0.12f * std::sin(t_now*4.0f + ax), w = 0.8f * asize;
                     hboxto(ally_slime, ax, gy + 0.55f/wob, az, w*wob, 0.55f/wob, w*wob, 1.0f, 0.0f);
@@ -5981,29 +6007,53 @@ int main(int argc, char** argv) {
                 // Tint EVERY ally toward team BLUE (like the skeleton grunts) so they're clearly
                 // distinguishable from the natural-colored enemy mobs.
                 vec3 acol;
-                if (white) { acol[0]=0.50f; acol[1]=0.70f; acol[2]=1.0f; }   // own-material mobs shifted blue
-                else { acol[0]=0.35f; acol[1]=0.85f; acol[2]=0.9f; }         // skeleton grunts: cyan-blue
-                if (vis != dc::game::MobVisual::Knight && vis != dc::game::MobVisual::Slime)   // those are fully procedural
+                if (vis == dc::game::MobVisual::Slime) { acol[0]=0.45f; acol[1]=1.0f; acol[2]=0.55f; }   // slime stays GREEN
+                else if (white) { acol[0]=0.50f; acol[1]=0.70f; acol[2]=1.0f; }   // own-material mobs shifted blue
+                else { acol[0]=0.35f; acol[1]=0.85f; acol[2]=0.9f; }              // skeleton grunts: cyan-blue
+                if (vis != dc::game::MobVisual::Knight && !(vis == dc::game::MobVisual::Slime && !slime_model_loaded))   // knight + model-less slime are procedural
                     renderer.draw_model(amdl, enemy_part_world, apl, acol);
-                // DRAGON fire breath: a sweeping cone of flame from the muzzle, panning L->R as it attacks.
+                // DRAGON fire breath: a big stationary CONE of flame fanning forward from the muzzle
+                // out to its reach, widening with distance (no head sweep — just a wide blast zone).
                 if (vis == dc::game::MobVisual::Dragon && aatk > 0.001f) {
                     const float gy = terrain.height(ax, az);
                     const float ca2 = std::cos(ayaw), sa2 = std::sin(ayaw);
                     const float mx = ax + ca2*2.4f, mz = az + sa2*2.4f, my = gy + 2.9f;   // muzzle (front-top)
-                    const float p = 1.0f - aatk;                         // 0 at wind-up -> 1 settled
-                    const float fa = ayaw + (p*2.0f - 1.0f) * 0.9f;      // breath direction sweeps -0.9..+0.9 rad
-                    const float fx = std::cos(fa), fz = std::sin(fa);
                     const auto& R2 = renderer.cam_right; const auto& U2 = renderer.cam_up;
-                    for (int k = 0; k < 26; ++k) {
-                        const float tt = k / 26.0f;
-                        const float dist = 0.5f + tt * 6.5f;
-                        const float jit = std::sin(t_now*30.0f + k*2.1f) * 0.25f * tt;
-                        const float px = mx + fx*dist - sa2*jit, pz = mz + fz*dist + ca2*jit;
-                        const float py = my - tt*1.8f + std::sin(t_now*20.0f + k)*0.15f;   // arcs down toward the ground
-                        const float sz = 0.25f + tt*0.75f, r = 1.0f, g = 0.78f - tt*0.45f, b = 0.16f*(1.0f-tt), aa = 1.0f - tt*0.55f;
-                        auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
-                            px+R2[0]*u+U2[0]*v, py+R2[1]*u+U2[1]*v, pz+R2[2]*u+U2[2]*v, r,g,b,aa }); };
-                        P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz);
+                    const float HALF = 0.85f;          // cone half-angle (wide)
+                    const int RINGS = 7, PERRING = 9;
+                    for (int ri = 0; ri < RINGS; ++ri) {
+                        const float tt = (ri + 1) / static_cast<float>(RINGS);
+                        const float dist = tt * 7.2f;
+                        for (int a = 0; a < PERRING; ++a) {
+                            const float ang = ayaw + ((a / static_cast<float>(PERRING - 1)) * 2.0f - 1.0f) * HALF;
+                            const float fx = std::cos(ang), fz = std::sin(ang);
+                            const float px = mx + fx*dist, pz = mz + fz*dist;
+                            const float py = my - tt*2.0f + std::sin(t_now*18.0f + a + ri*1.7f)*0.18f;   // descends onto the ground
+                            const float sz = 0.30f + tt*0.75f;
+                            const float r = 1.0f, g = 0.80f - tt*0.45f, b = 0.16f*(1.0f-tt), aa = 1.0f - tt*0.5f;
+                            auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
+                                px+R2[0]*u+U2[0]*v, py+R2[1]*u+U2[1]*v, pz+R2[2]*u+U2[2]*v, r,g,b,aa }); };
+                            P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz);
+                        }
+                    }
+                }
+                // DRONE: rapid cyan LASER tracers zapping the nearest enemy in range (flickering).
+                if (vis == dc::game::MobVisual::Drone && net.role != dc::net::Role::Client) {
+                    float bd2 = 9.0f*9.0f, tx=0, ty=0, tz=0; bool have=false;
+                    for (const auto& e : entities.items) if (e.alive && e.type == dc::entity::EntityType::Enemy) {
+                        const float dx=e.position[0]-ax, dz=e.position[2]-az, d2=dx*dx+dz*dz;
+                        if (d2<bd2){ bd2=d2; tx=e.position[0]; ty=e.position[1]+0.4f; tz=e.position[2]; have=true; }
+                    }
+                    if (have && std::sin(t_now*26.0f + ax*3.1f) > 0.3f) {   // rapid pulse
+                        const float ddx=ax, ddy=afy+0.4f, ddz=az;   // drone muzzle
+                        const auto& R2 = renderer.cam_right; const auto& U2 = renderer.cam_up;
+                        const int N = 9;
+                        for (int k=0;k<=N;++k){ const float tt=k/static_cast<float>(N);
+                            const float px=ddx+(tx-ddx)*tt, py=ddy+(ty-ddy)*tt, pz=ddz+(tz-ddz)*tt, sz=0.05f;
+                            auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
+                                px+R2[0]*u+U2[0]*v, py+R2[1]*u+U2[1]*v, pz+R2[2]*u+U2[2]*v, 0.5f, 1.0f, 1.0f, 0.95f }); };
+                            P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz);
+                        }
                     }
                 }
                 // BILL constantly rants: a swirl of yellow motes orbits him (camera-facing billboards).
@@ -8319,10 +8369,10 @@ int main(int argc, char** argv) {
                 hud_rect(px, top - ph, px + pw, top, 0.06f, 0.06f, 0.09f, 0.96f);                                    // panel
             }
 
-            // Persistent BASE HP bar (top-left) so your core's health is always visible.
+            // Persistent BASE HP bar (top-right, clear of the top-left gold counter).
             {
                 const float frac = core_health > 0.0f ? core_health / CORE_MAX_HEALTH : 0.0f;
-                const float bx0 = -0.97f, bx1 = -0.62f, by0 = 0.895f, by1 = 0.925f;
+                const float bx0 = 0.60f, bx1 = 0.96f, by0 = 0.90f, by1 = 0.928f;
                 hud_rect(bx0-0.007f, by0-0.007f, bx1+0.007f, by1+0.007f, 0.04f, 0.05f, 0.07f, 0.9f);   // border
                 hud_rect(bx0, by0, bx1, by1, 0.10f, 0.10f, 0.12f, 0.92f);                              // track
                 const float fillx = bx0 + (bx1-bx0)*frac;
@@ -8336,7 +8386,7 @@ int main(int argc, char** argv) {
             {
                 char bh[28]; std::snprintf(bh, sizeof bh, "BASE  %d", (int)(core_health < 0 ? 0 : core_health));
                 vec3 bc = { 0.92f, 0.95f, 1.0f };
-                renderer.draw_text(bh, -0.965f, 0.955f, 14.0f, bc, 1.0f, fbw, fbh);
+                renderer.draw_text(bh, 0.60f, 0.955f, 14.0f, bc, 1.0f, fbw, fbh);
             }
             // Day/time clock (top-center, just under the compass strip): e.g. "Day 2  7:14 PM".
             // Tinted warm by day, cool blue at night so the phase reads at a glance.

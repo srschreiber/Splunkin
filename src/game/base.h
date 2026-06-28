@@ -135,7 +135,7 @@ inline const MobType& mob_type(int i) {
         { "Gnome",     0,    150,  0, 5.0f,  200.0f, 30.0f, 3.5f, false, MobVisual::Flame,    false, 1.00f,  6 },
         { "Troll",     0,    300,  0, 7.0f,  600.0f, 70.0f, 2.2f, false, MobVisual::Troll,    false, 0.75f,  4 },
         { "Slime",     0,    130,  0, 4.5f,  550.0f, 14.0f, 2.0f, false, MobVisual::Slime,    false, 0.85f,  6 },
-        { "Drone",     100,  120,  0, 1.4f,  10.0f,  5.0f,  2.0f, false, MobVisual::Drone,    true,  1.30f, 15 },   // cheap low-HP swarm to distract; cap 15
+        { "Drone",     100,  120,  0, 1.4f,  10.0f,  5.0f,  9.0f, false, MobVisual::Drone,    true,  1.30f, 15 },   // cheap low-HP swarm; zaps lasers from afar to distract; cap 15
         { "Dragon",    800, 1500,  0, 9.0f, 2400.0f, 60.0f, 7.0f, false, MobVisual::Dragon,   false, 0.60f,  1 },   // top-tier: slow, huge HP, SWEEPING fire breath over a wide arc; cap 1
     };
     return T[(i < 0 || i >= MOB_TYPE_COUNT) ? 0 : i];
