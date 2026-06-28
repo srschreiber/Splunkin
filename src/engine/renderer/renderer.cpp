@@ -41,6 +41,7 @@ bool Renderer::init() {
     world_campos_loc       = glGetUniformLocation(world_program, "u_cam_pos");
     world_fog_loc          = glGetUniformLocation(world_program, "u_fog_color");
     world_time_loc         = glGetUniformLocation(world_program, "u_time");
+    world_sundir_loc       = glGetUniformLocation(world_program, "u_sun_dir");
     world_light_count_loc  = glGetUniformLocation(world_program, "u_light_count");
     world_light_pos_loc    = glGetUniformLocation(world_program, "u_light_pos");
     world_light_color_loc  = glGetUniformLocation(world_program, "u_light_color");
@@ -56,6 +57,7 @@ bool Renderer::init() {
     model_ambient_loc      = glGetUniformLocation(model_program, "u_ambient");
     model_campos_loc       = glGetUniformLocation(model_program, "u_cam_pos");
     model_fog_loc          = glGetUniformLocation(model_program, "u_fog_color");
+    model_sundir_loc       = glGetUniformLocation(model_program, "u_sun_dir");
     model_light_count_loc  = glGetUniformLocation(model_program, "u_light_count");
     model_light_pos_loc    = glGetUniformLocation(model_program, "u_light_pos");
     model_light_color_loc  = glGetUniformLocation(model_program, "u_light_color");
@@ -64,6 +66,20 @@ bool Renderer::init() {
     particle_program = load_program("assets/shaders/particle.vert", "assets/shaders/particle.frag");
     if (!particle_program) { shutdown(); return false; }
     particle_viewproj_loc = glGetUniformLocation(particle_program, "u_viewproj");
+
+    // Procedural sky (sun/moon/stars/clouds). Optional — if it fails to compile, the flat
+    // fog clear still shows, so we don't hard-fail.
+    sky_program = load_program("assets/shaders/sky.vert", "assets/shaders/sky.frag");
+    if (sky_program) {
+        sky_invvp_loc   = glGetUniformLocation(sky_program, "u_inv_viewproj");
+        sky_campos_loc  = glGetUniformLocation(sky_program, "u_cam_pos");
+        sky_time_loc    = glGetUniformLocation(sky_program, "u_time");
+        sky_ambient_loc = glGetUniformLocation(sky_program, "u_ambient");
+        sky_fog_loc     = glGetUniformLocation(sky_program, "u_fog");
+        sky_sundir_loc  = glGetUniformLocation(sky_program, "u_sun_dir");
+        sky_moondir_loc = glGetUniformLocation(sky_program, "u_moon_dir");
+        glGenVertexArrays(1, &sky_vao);   // empty VAO; the vertex shader generates positions
+    }
 
     // Dynamic VBO rebuilt every frame from the live particles. Layout: 7 floats
     // per vertex = pos(3) at loc 0, rgba(4) at loc 1.
@@ -158,6 +174,7 @@ void Renderer::begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Play
     camera.view_matrix(view, player, map, dt);
     camera.proj_matrix(proj, aspect);
     glm_mat4_mul(proj, view, viewproj);
+    glm_mat4_inv(viewproj, inv_viewproj);   // for the sky's per-pixel view-ray reconstruction
 
     // Camera right/up in world space = first two rows of the view rotation
     // (column-major: view[col][row]). Used to billboard particles toward the camera.
@@ -186,10 +203,43 @@ void Renderer::begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Play
     glUniform3fv(model_fog_loc, 1, fog);
 }
 
+void Renderer::draw_sky() {
+    if (!sky_program) return;
+    const float a = ambient_state < 0.0f ? 0.0f : (ambient_state > 1.0f ? 1.0f : ambient_state);
+    const float t = a * a * (3.0f - 2.0f * a);
+    vec3 fog = { 0.03f + t * 0.53f, 0.05f + t * 0.58f, 0.17f + t * 0.54f };   // matches begin_frame
+    glUseProgram(sky_program);
+    glUniformMatrix4fv(sky_invvp_loc, 1, GL_FALSE, reinterpret_cast<const float*>(inv_viewproj));
+    glUniform3fv(sky_campos_loc, 1, cam_pos);
+    glUniform1f(sky_time_loc, time_state);
+    glUniform1f(sky_ambient_loc, ambient_state);
+    glUniform3fv(sky_fog_loc, 1, fog);
+    // Draw the fullscreen triangle at the far plane: keep depth TEST (so it sits behind geo via
+    // z=1) but don't write depth, so world geometry still depth-sorts normally over it.
+    glDepthMask(GL_FALSE);
+    glDisable(GL_DEPTH_TEST);
+    glBindVertexArray(sky_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+}
+
 void Renderer::set_ambient(float ambient) {
     ambient_state = ambient;   // begin_frame derives the fog/sky color from this
     glUseProgram(world_program); glUniform1f(world_ambient_loc, ambient);
     glUseProgram(model_program); glUniform1f(model_ambient_loc, ambient);
+}
+
+void Renderer::set_sky_dirs(const vec3 sun, const vec3 moon) {
+    glm_vec3_copy(const_cast<float*>(sun), sun_dir);
+    glm_vec3_copy(const_cast<float*>(moon), moon_dir);
+    glUseProgram(world_program); if (world_sundir_loc >= 0) glUniform3fv(world_sundir_loc, 1, sun_dir);
+    glUseProgram(model_program); if (model_sundir_loc >= 0) glUniform3fv(model_sundir_loc, 1, sun_dir);
+    if (sky_program) {
+        glUseProgram(sky_program);
+        if (sky_sundir_loc  >= 0) glUniform3fv(sky_sundir_loc, 1, sun_dir);
+        if (sky_moondir_loc >= 0) glUniform3fv(sky_moondir_loc, 1, moon_dir);
+    }
 }
 
 void Renderer::set_lights(int count, const float* pos, const float* color, const float* radius) {

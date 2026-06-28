@@ -16,6 +16,14 @@ struct Renderer {
     uint32_t world_program = 0;   // textured map
     uint32_t model_program = 0;   // flat-lit model
     uint32_t particle_program = 0;// additive billboards
+    uint32_t sky_program = 0;     // procedural sky dome (sun/moon/stars/clouds)
+    uint32_t sky_vao = 0;         // empty VAO for the fullscreen sky triangle
+    int sky_invvp_loc = -1, sky_campos_loc = -1, sky_time_loc = -1, sky_ambient_loc = -1, sky_fog_loc = -1;
+    int sky_sundir_loc = -1, sky_moondir_loc = -1;
+    int world_sundir_loc = -1, model_sundir_loc = -1;   // shared traversing sun direction
+    mat4 inv_viewproj;            // computed each frame for the sky's view-ray reconstruction
+    vec3 sun_dir = {0.5f, 0.7f, 0.4f};   // current sun direction (arcs with the day clock)
+    vec3 moon_dir = {-0.4f, 0.6f, -0.4f};
     uint32_t texture = 0;         // GL_TEXTURE_2D_ARRAY for the map
     int world_viewproj_loc = -1, world_use_solid_loc = -1, world_solid_loc = -1;
     int model_viewproj_loc = -1, model_model_loc = -1, model_color_loc = -1, model_emissive_loc = -1, model_alpha_loc = -1;
@@ -50,6 +58,8 @@ struct Renderer {
     bool init();
     // Set viewport, clear color+depth, compute the frame's view-projection + camera basis.
     void begin_frame(dc::world::Map& map, Camera& camera, dc::entity::Player& player, float dt, int fb_w, int fb_h);
+    // Draw the procedural sky behind everything (call right after begin_frame, before world geo).
+    void draw_sky();
     // Max dynamic lights the shaders sum per fragment (must match the shader array size).
     static constexpr int MAX_LIGHTS = 12;
     // Upload this frame's point lights to both lit programs. `pos`/`color` are tightly
@@ -57,6 +67,9 @@ struct Renderer {
     void set_lights(int count, const float* pos, const float* color, const float* radius);
     // Day/night ambient scale on both lit programs (1 = the dim baseline, higher = daylight).
     void set_ambient(float ambient);
+    // The sun/moon directions for this frame (driven by the day/night clock) — shared by the
+    // sky, terrain, water, and models so lighting + reflections all agree.
+    void set_sky_dirs(const vec3 sun, const vec3 moon);
     // Draw the textured wall mesh.
     void draw_map(const Mesh& mesh);
     // Draw the solid-color terrain floor mesh (same world program, no texture). `plain`

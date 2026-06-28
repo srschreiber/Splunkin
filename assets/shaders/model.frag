@@ -12,6 +12,7 @@ uniform float u_alpha;        // 1 = opaque; <1 for ghosts (dead players)
 uniform float u_ambient;      // day/night ambient scale
 uniform vec3  u_cam_pos;      // camera world position (rim + fog)
 uniform vec3  u_fog_color;    // atmospheric horizon color (matches the sky)
+uniform vec3  u_sun_dir;      // traversing sun direction (shared with the sky/terrain)
 out vec4 frag_color;
 
 void main() {
@@ -25,7 +26,7 @@ void main() {
     vec3 ambient = mix(grnd, sky, n.y * 0.5 + 0.5) * (0.42 * a + 0.06);
 
     // Warm directional SUN with a soft half-Lambert wrap (kinder to low-poly facets).
-    vec3 sun_dir = normalize(vec3(0.5, 0.82, 0.34));
+    vec3 sun_dir = normalize(u_sun_dir);
     vec3 sun_col = vec3(1.18, 1.04, 0.82);
     float ndl = dot(n, sun_dir);
     float wrap = ndl * 0.5 + 0.5; wrap *= wrap;

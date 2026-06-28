@@ -66,22 +66,31 @@ static void speak_async(const std::string& text) {
         if (const char* pm = std::getenv("DUNGEON_PIPER_MODEL"); pm && *pm) model = pm;
         else { std::ifstream f("assets/piper/voice.onnx"); if (f.good()) model = "assets/piper/voice.onnx"; }
         if (!model.empty()) {
-            // Resolve the piper binary: $DUNGEON_PIPER_BIN, else ~/.local/bin/piper (pipx/pip --user
-            // install location), else bare "piper" off PATH.
-            std::string bin = "piper";
-            if (const char* pb = std::getenv("DUNGEON_PIPER_BIN"); pb && *pb) bin = pb;
-            else if (const char* home = std::getenv("HOME"); home) {
-                std::string local = std::string(home) + "/.local/bin/piper";
-                std::ifstream pf(local); if (pf.good()) bin = local;
-            }
+            // Resolve the piper binary, preferring the SELF-CONTAINED engine vendored in the game
+            // (assets/piper/runtime/piper — what ships for Steam, zero player setup), then
+            // $DUNGEON_PIPER_BIN, then ~/.local/bin/piper, then bare "piper" off PATH.
+            std::string bin = "piper", libenv;
+            { std::ifstream rb("assets/piper/runtime/piper");
+              if (rb.good()) {
+                  bin = "assets/piper/runtime/piper";
+#if defined(__APPLE__)
+                  libenv = "DYLD_LIBRARY_PATH=assets/piper/runtime ";
+#elif defined(__linux__)
+                  libenv = "LD_LIBRARY_PATH=assets/piper/runtime ";
+#endif
+              } else if (const char* pb = std::getenv("DUNGEON_PIPER_BIN"); pb && *pb) bin = pb;
+              else if (const char* home = std::getenv("HOME"); home) {
+                  std::string local = std::string(home) + "/.local/bin/piper";
+                  std::ifstream pf(local); if (pf.good()) bin = local;
+              } }
 #if defined(__APPLE__)
             // macOS has no simple raw-PCM player, so synth to a unique wav then afplay it.
             const std::string wav = "/tmp/dc_tts_" + std::to_string(seq) + ".wav";
-            cmd = "printf '%s' \"" + safe + "\" | " + bin + " --model \"" + model + "\" --output_file " + wav
+            cmd = "printf '%s' \"" + safe + "\" | " + libenv + bin + " --model \"" + model + "\" --output_file " + wav
                 + " >/dev/null 2>&1 && afplay " + wav + " >/dev/null 2>&1; rm -f " + wav;
 #elif defined(__linux__)
             // Stream raw PCM straight into a player (piper voices are 16-bit mono @ 22050).
-            cmd = "printf '%s' \"" + safe + "\" | " + bin + " --model \"" + model + "\" --output-raw 2>/dev/null | "
+            cmd = "printf '%s' \"" + safe + "\" | " + libenv + bin + " --model \"" + model + "\" --output-raw 2>/dev/null | "
                   "(aplay -q -r 22050 -f S16_LE -t raw - 2>/dev/null || ffplay -nodisp -autoexit -f s16le -ar 22050 -i - >/dev/null 2>&1)";
 #elif defined(_WIN32)
             const std::string wav = std::string(std::getenv("TEMP") ? std::getenv("TEMP") : ".") + "\\dc_tts_" + std::to_string(seq) + ".wav";
@@ -730,7 +739,6 @@ int main(int argc, char** argv) {
     };
     constexpr int START_GOLD = 150;  // both sides open with this (was 100 — a little more buffer)
     int   currency = START_GOLD;
-    double team_passive_accum = 0.0;         // gentle passive gold trickle (enemy AI doesn't measure it)
     double host_damage = 0.0;                // host/standalone: this player's total damage dealt (scoreboard)
     float  my_damage = 0.0f;                 // client: our own total, read back from the snapshot
     bool   scoreboard = false;               // hold Tab: damage leaderboard + your items
@@ -1843,13 +1851,13 @@ int main(int argc, char** argv) {
             // Text labels.
             vec3 white = {0.95f,0.95f,1.0f}, gold = {1.0f,0.85f,0.3f};
             renderer.draw_text("CHOOSE YOUR CLASS", -0.45f, 0.74f, 24.0f, gold, 1.0f, fbw, fbh);
-            renderer.draw_text("KNIGHT", -0.50f, 0.30f, 26.0f, white, 1.0f, fbw, fbh);
-            renderer.draw_text("sword + shield", -0.50f, 0.15f, 13.0f, white, 1.0f, fbw, fbh);
-            renderer.draw_text("WIZARD", 0.22f, 0.30f, 26.0f, white, 1.0f, fbw, fbh);
-            renderer.draw_text("staff bolts", 0.22f, 0.15f, 13.0f, white, 1.0f, fbw, fbh);
-            renderer.draw_text("drag to spin", -0.12f, -0.30f, 13.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("KNIGHT", -0.50f, 0.30f, 28.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("sword + shield", -0.50f, 0.15f, 16.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("WIZARD", 0.22f, 0.30f, 28.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("staff bolts", 0.22f, 0.15f, 16.0f, white, 1.0f, fbw, fbh);
+            renderer.draw_text("drag to spin", -0.12f, -0.30f, 15.0f, white, 1.0f, fbw, fbh);
             // Custom insult fields.
-            renderer.draw_text("Custom insults (enemies say these)", -0.28f, -0.42f, 13.0f, gold, 1.0f, fbw, fbh);
+            renderer.draw_text("Custom insults (enemies say these)", -0.30f, -0.42f, 16.0f, gold, 1.0f, fbw, fbh);
             {
                 char* boxes[2] = { my_look.custom1, my_look.custom2 };
                 vec3 grey = { 0.5f, 0.5f, 0.55f };
@@ -1857,8 +1865,8 @@ int main(int argc, char** argv) {
                     char shown[64]; std::snprintf(shown, sizeof shown, "%s%s", boxes[bi], (active_box == bi) ? "_" : "");
                     const char* disp = boxes[bi][0] ? shown : (active_box == bi ? "_" : "type here...");
                     const bool lit = boxes[bi][0] || active_box == bi;
-                    renderer.draw_text(disp, BOX_X0 + 0.015f, box_y[bi] + 0.022f, 14.0f, lit ? white : grey, 1.0f, fbw, fbh);
-                    renderer.draw_text("Play", PLAY_X0 + 0.005f, box_y[bi] + 0.022f, 11.0f, white, 1.0f, fbw, fbh);
+                    renderer.draw_text(disp, BOX_X0 + 0.015f, box_y[bi] + 0.024f, 16.0f, lit ? white : grey, 1.0f, fbw, fbh);
+                    renderer.draw_text("Play", PLAY_X0 + 0.008f, box_y[bi] + 0.024f, 14.0f, white, 1.0f, fbw, fbh);
                 }
             }
             if (net.role == dc::net::Role::Client) {
@@ -3021,68 +3029,59 @@ int main(int argc, char** argv) {
             if (player.health > player.stats.max_health) player.health = player.stats.max_health;
         }
 
-        // Interact (E, edge-triggered): open the nearest chest's purchase menu if it has
-        // items left and isn't in use (one player at a time).
+        // Interact target: of everything in reach, the one you're AIMING at (highest alignment of
+        // your look direction with the direction to it). So overlapping reaches resolve by aim.
+        struct InteractTarget { int kind = -1; float x=0, y=0, z=0; int col=0, row=0, idx=-1; const char* label=""; };
+        auto pick_interact = [&]() -> InteractTarget {
+            InteractTarget best; float bestAlign = 0.30f;   // your aim must be within ~73 deg of it
+            vec3 aimv; player.front(aimv);
+            const float al = std::sqrt(aimv[0]*aimv[0] + aimv[2]*aimv[2]);
+            const float ax = (al > 1e-4f) ? aimv[0]/al : 1.0f, az = (al > 1e-4f) ? aimv[2]/al : 0.0f;
+            auto consider = [&](float tx, float tz, float radius, int kind, int col, int row, int idx, const char* label, float yoff) {
+                const float dx = tx-player.position[0], dz = tz-player.position[2], d2 = dx*dx + dz*dz;
+                if (d2 > radius*radius) return;
+                const float dl = std::sqrt(d2);
+                const float align = (dl > 0.4f) ? (ax*dx/dl + az*dz/dl) : 1.0f;   // dot(aim, dir-to-target); on top of it = always aligned
+                if (align > bestAlign) { bestAlign = align; best.kind=kind; best.x=tx; best.z=tz; best.y=terrain.height(tx,tz)+yoff; best.col=col; best.row=row; best.idx=idx; best.label=label; }
+            };
+            consider(core_pos[0], core_pos[2], CORE_RAD + 2.0f, 0, 0, 0, -1, "E  Muster", 3.4f);   // smaller muster radius
+            for (std::size_t i = 0; i < base.pieces.size(); ++i) if (base.pieces[i].piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks))
+                consider((base.pieces[i].col+0.5f)*dc::world::TILE, (base.pieces[i].row+0.5f)*dc::world::TILE, 3.0f, 1, base.pieces[i].col, base.pieces[i].row, (int)i, "E  Upgrade", 2.6f);
+            for (std::size_t i = 0; i < drone_vendors.size(); ++i) if (!drone_vendors[i].bought)
+                consider(drone_vendors[i].x, drone_vendors[i].z, CHEST_REACH, 2, 0, 0, (int)i, "E  Buy Drone", 1.9f);
+            for (std::size_t i = 0; i < chests.size(); ++i) if (chests[i].remaining() > 0)
+                consider((chests[i].col+0.5f)*dc::world::TILE, (chests[i].row+0.5f)*dc::world::TILE, CHEST_REACH, 3, chests[i].col, chests[i].row, (int)i, "E  Open", 1.7f);
+            return best;
+        };
+
+        // Interact (E, edge-triggered): act on whatever you're in reach of AND aiming at.
         bool e_now = input.key_down(SDL_SCANCODE_E);
         if (e_now && !e_prev && !ui_open && !dead) {
-            // Standing at your base core: E opens the MUSTER menu (unlock/select mob types).
-            const float dcx = core_pos[0] - player.position[0], dcz = core_pos[2] - player.position[2];
-            const bool at_core = (dcx*dcx + dcz*dcz <= (CORE_RAD + 4.5f)*(CORE_RAD + 4.5f));
-            if (at_core) { spawn_menu = true; window.set_relative_mouse(false); }
-            else {
-            // Standing at one of YOUR barracks: E opens its upgrade menu.
-            int ubest = -1; float ubest2 = 9.0f;   // within ~3 tiles
-            for (std::size_t i = 0; i < base.pieces.size(); ++i) {
-                if (base.pieces[i].piece != static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) continue;
-                const float bx = (base.pieces[i].col + 0.5f) * dc::world::TILE, bz = (base.pieces[i].row + 0.5f) * dc::world::TILE;
-                const float dx = bx - player.position[0], dz = bz - player.position[2], d2 = dx*dx + dz*dz;
-                if (d2 < ubest2) { ubest2 = d2; ubest = static_cast<int>(i); }
-            }
-            if (ubest >= 0) {
-                upgrade_menu = true; upg_col = base.pieces[ubest].col; upg_row = base.pieces[ubest].row;
-                window.set_relative_mouse(false);
-            } else {
-            // Drone vendor in reach takes priority over a chest: pay DRONE_COST -> +1 minion.
-            int dbest = -1; float dbest2 = CHEST_REACH * CHEST_REACH;
-            for (std::size_t i = 0; i < drone_vendors.size(); ++i) {
-                if (drone_vendors[i].bought) continue;
-                const float dx = drone_vendors[i].x - player.position[0], dz = drone_vendors[i].z - player.position[2];
-                const float d2 = dx*dx + dz*dz;
-                if (d2 < dbest2) { dbest2 = d2; dbest = static_cast<int>(i); }
-            }
-            if (dbest >= 0) {   // standing at a drone vendor: try to buy (don't also open a chest)
-                if (currency >= DRONE_COST && player.minion_count < 4) {
-                    if (net.role == dc::net::Role::Client) {       // host validates + grants -> we add the drone
-                        uint32_t idx = static_cast<uint32_t>(dbest);
-                        unsigned char buf[1 + 4]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::BuyDrone);
-                        std::memcpy(buf + 1, &idx, 4); net.send_to_host(buf, sizeof buf, true);
-                    } else {                                       // host/standalone: buy now
-                        currency -= DRONE_COST; drone_vendors[dbest].bought = true; player.minion_count++;
+            InteractTarget it = pick_interact();
+            switch (it.kind) {
+                case 0: spawn_menu = true; window.set_relative_mouse(false); break;   // core: Muster
+                case 1: upgrade_menu = true; upg_col = it.col; upg_row = it.row; window.set_relative_mouse(false); break;  // barracks: Upgrade
+                case 2:   // drone vendor: buy
+                    if (currency >= DRONE_COST && player.minion_count < 4) {
+                        if (net.role == dc::net::Role::Client) {
+                            uint32_t idx = static_cast<uint32_t>(it.idx);
+                            unsigned char buf[1 + 4]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::BuyDrone);
+                            std::memcpy(buf + 1, &idx, 4); net.send_to_host(buf, sizeof buf, true);
+                        } else { currency -= DRONE_COST; drone_vendors[it.idx].bought = true; player.minion_count++; }
                     }
-                }
-            } else {
-                int best = -1; float best_d2 = CHEST_REACH * CHEST_REACH;
-                for (std::size_t i = 0; i < chests.size(); ++i) {
-                    if (chests[i].remaining() == 0) continue;        // depleted: nothing to buy
-                    const float cx = (chests[i].col + 0.5f) * dc::world::TILE;
-                    const float cz = (chests[i].row + 0.5f) * dc::world::TILE;
-                    const float dx = cx - player.position[0], dz = cz - player.position[2];
-                    const float d2 = dx * dx + dz * dz;
-                    if (d2 < best_d2) { best_d2 = d2; best = static_cast<int>(i); }
-                }
-                if (best >= 0) {
-                    if (net.role == dc::net::Role::Client) {         // host grants the lock -> ChestGranted opens our menu
-                        uint32_t idx = static_cast<uint32_t>(best);
+                    break;
+                case 3:   // chest: open
+                    if (net.role == dc::net::Role::Client) {
+                        uint32_t idx = static_cast<uint32_t>(it.idx);
                         unsigned char buf[1 + 4]; buf[0] = static_cast<unsigned char>(dc::net::MsgType::OpenChest);
                         std::memcpy(buf + 1, &idx, 4); net.send_to_host(buf, sizeof buf, true);
-                    } else if (chests[best].locked_by == NO_LOCK) {  // host/standalone: open now (lock to id 0)
-                        chests[best].opened = true; chests[best].locked_by = 0; chests[best].lock_time = CHEST_LOCK_TIME;
-                        menu_chest = best; window.set_relative_mouse(false);
+                    } else if (chests[it.idx].locked_by == NO_LOCK) {
+                        chests[it.idx].opened = true; chests[it.idx].locked_by = 0; chests[it.idx].lock_time = CHEST_LOCK_TIME;
+                        menu_chest = it.idx; window.set_relative_mouse(false);
                     }
-                }
+                    break;
+                default: break;
             }
-            }   // end !barracks
-            }   // end !at_core
         }
         e_prev = e_now;
 
@@ -4617,6 +4616,7 @@ int main(int argc, char** argv) {
                 int gold = (k < frame_death_gold.size()) ? static_cast<int>(std::round(frame_death_gold[k])) : 3;
                 if (gold < 2) gold = 2;
                 gold_drop_accum += gold;   // the enemy AI sizes its OWN income off the gold we farm
+                // Gold is ONLY earned by picking the coins up (you, or a scavenger) — no auto-credit.
                 int ncoins = (gold + 2) / 3; if (ncoins < 1) ncoins = 1; if (ncoins > 12) ncoins = 12;
                 const float per = static_cast<float>(gold) / ncoins;
                 for (int g = 0; g < ncoins; ++g) {
@@ -5002,10 +5002,6 @@ int main(int argc, char** argv) {
             }
             enemy_rate = our_gold_rate * 0.90f + (0.9f + 0.45f * (day_num - 1));   // enemy earns ~our rate + a gentler per-day floor (was 1.2x + 1.5+0.7/day)
             enemy_gold += enemy_rate * dt;
-            // Passive base income for the player team — smooths cash flow so it doesn't fully
-            // depend on kills. NOT counted in gold_drop_accum, so the enemy AI can't scale off it.
-            team_passive_accum += 1.6 * dt;
-            while (team_passive_accum >= 1.0) { currency += 1; team_passive_accum -= 1.0; }
 
             // -- sensing: our forces vs theirs --
             int aliveK[10] = {}; int troops_alive = 0;
@@ -5383,6 +5379,47 @@ int main(int argc, char** argv) {
         renderer.begin_frame(*map, camera, player, dt, w, h);
         // Day/night ambient: bright noon -> dim night (the dynamic lights carry the night).
         renderer.set_ambient(0.5f + 3.0f * daylight01());
+        // Sun + moon arc across the sky on the day clock: the sun rises east -> zenith -> west
+        // over the day (below the horizon at night); the moon does the same over the night. The
+        // sky, terrain, water + models all share these so lighting + reflections agree.
+        {
+            const float PI = 3.14159265f;
+            const float du = std::min(std::max(tod / DAY_LEN, 0.0f), 1.0f);
+            const float nu = std::min(std::max((tod - DAY_LEN) / NIGHT_LEN, 0.0f), 1.0f);
+            const float sunEl = (tod < DAY_LEN) ? std::sin(du * PI) : -0.35f;
+            const float moonEl = (tod >= DAY_LEN) ? std::sin(nu * PI) : -0.35f;
+            vec3 sun_dir  = { std::cos(du * PI),  sunEl * 1.1f + 0.05f,  0.34f };
+            vec3 moon_dir = { -std::cos(nu * PI), moonEl * 1.0f + 0.05f, -0.34f };
+            glm_vec3_normalize(sun_dir); glm_vec3_normalize(moon_dir);
+            renderer.set_sky_dirs(sun_dir, moon_dir);
+        }
+        renderer.draw_sky();   // sun/clouds by day, moon + stars by night (behind all geometry)
+        // --- BIRDS: a flock of dark silhouettes flapping in lazy circles high over the lane. ---
+        {
+            std::vector<float> birds;
+            auto BV = [&](float x, float y, float z){ birds.insert(birds.end(), { x, y, z, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f }); };
+            const float laneCx = (map->width * 0.5f) * dc::world::TILE, laneCz = (map->height * 0.5f) * dc::world::TILE;
+            const int NB = 16;
+            for (int i = 0; i < NB; ++i) {
+                const float rad = 16.0f + (i % 5) * 10.0f;
+                const float cx = laneCx + std::cos(i * 1.7f) * 70.0f, cz = laneCz + std::sin(i * 2.3f) * 26.0f;
+                const float hy = 24.0f + (i % 4) * 6.0f + std::sin(t_now * 0.5f + i) * 2.0f;
+                const float ang = t_now * (0.11f + 0.035f * (i % 3)) + i * 3.88f;
+                const float bx = cx + std::cos(ang) * rad, bz = cz + std::sin(ang) * rad;
+                const float fx = -std::sin(ang), fz = std::cos(ang);   // flight tangent
+                const float rx =  std::cos(ang), rz = std::sin(ang);   // wing axis (radial)
+                const float span = 1.7f, len = 1.3f;
+                const float flap = std::sin(t_now * 7.0f + i * 1.3f) * 1.0f;   // wing raise
+                const float backx = bx - fx*len, backz = bz - fz*len;
+                const float ltx = bx + rx*span, lty = hy + flap, ltz = bz + rz*span;   // left wingtip
+                const float rtx = bx - rx*span, rty = hy + flap, rtz = bz - rz*span;   // right wingtip
+                BV(bx, hy, bz); BV(ltx, lty, ltz); BV(backx, hy, backz);
+                BV(bx, hy, bz); BV(backx, hy, backz); BV(rtx, rty, rtz);
+            }
+            static dc::renderer::Mesh bird_mesh; bird_mesh.upload(birds);
+            vec3 birdcol = { 0.09f, 0.09f, 0.11f };   // dark silhouette against the sky
+            renderer.draw_terrain(bird_mesh, birdcol, true);
+        }
         renderer.draw_map(mesh);
         renderer.draw_terrain(terrain_mesh, terrain_color);
         // --- GRASS: single-color POINTY blades on flat grassy ground around the player. Blades
@@ -6478,9 +6515,17 @@ int main(int argc, char** argv) {
             if (mortar_loaded && !mortar_pos.empty()) {
                 static std::vector<dc::renderer::Mat4> mortar_pw;
                 if (mortar_pw.empty()) dc::renderer::pose_model(mortar_data, {}, 0.0f, mortar_pw);
-                for (const auto& mp : mortar_pos) {
+                for (std::size_t mi = 0; mi < mortar_pos.size(); ++mi) {
+                    const auto& mp = mortar_pos[mi];
+                    // RECOIL: right after a shot it rolls back (toward the base) then settles.
+                    float recoil = 0.0f;
+                    if (mi < mortar_cd.size()) {
+                        const float since = dc::game::MORTAR_CD - mortar_cd[mi];   // 0 at the instant of firing
+                        if (since >= 0.0f && since < 0.45f) { float u = 1.0f - since / 0.45f; recoil = u * u; }
+                    }
                     mat4 mpl; glm_mat4_identity(mpl);
-                    vec3 mpos = { mp.x, mp.y, mp.z }; glm_translate(mpl, mpos);
+                    vec3 mpos = { mp.x - recoil * 0.6f, mp.y + recoil * 0.05f, mp.z };   // kicks back -x + a small hop
+                    glm_translate(mpl, mpos);
                     glm_rotate_y(mpl, MODEL_YAW_OFFSET, mpl);
                     vec3 mtint = { 0.85f, 0.85f, 0.92f };
                     renderer.draw_model(mortar_model, mortar_pw, mpl, mtint);
@@ -8195,7 +8240,7 @@ int main(int argc, char** argv) {
 
             // Tooltip panel (sized to the wider of name/description, clamped on-screen).
             // Its rects go into the HUD now; the text is drawn just after draw_hud.
-            const float tip_px = 15.0f;
+            const float tip_px = 17.0f;
             float tip_panel_x = 0.0f, tip_panel_top = 0.0f, tip_lineh = 0.0f;
             if (tip) {
                 const float wn = renderer.text_width(tip->name, tip_px, fbw);
@@ -8437,12 +8482,27 @@ int main(int argc, char** argv) {
             // Level-up menu text: title (with the new level) + each card's name.
             if (levelup_open) {
                 vec3 white = {0.97f, 0.97f, 1.0f}, cyanc = {0.45f, 0.85f, 1.0f};
-                char title[32]; std::snprintf(title, sizeof title, "LEVEL %d", player.level);
-                renderer.draw_text(title, -renderer.text_width(title, 24.0f, fbw) * 0.5f, CARD_TOP + 0.10f, 24.0f, cyanc, 1.0f, fbw, fbh);
+                char title[40]; std::snprintf(title, sizeof title, "LEVEL %d  -  choose an upgrade", player.level);
+                renderer.draw_text(title, -renderer.text_width(title, 26.0f, fbw) * 0.5f, CARD_TOP + 0.11f, 26.0f, cyanc, 1.0f, fbw, fbh);
+                vec3 desccol = {0.78f, 0.82f, 0.9f};
                 for (int s = 0; s < levelup_card_count; ++s) {
                     const float cxc = card_x0(s) + CARD_W * 0.5f;
                     const UpgradeDef& d = upgrade_def(levelup_cards[s]);
-                    renderer.draw_text(d.name, cxc - renderer.text_width(d.name, 15.0f, fbw) * 0.5f, -0.02f, 15.0f, white, 1.0f, fbw, fbh);
+                    renderer.draw_text(d.name, cxc - renderer.text_width(d.name, 19.0f, fbw) * 0.5f, 0.00f, 19.0f, white, 1.0f, fbw, fbh);
+                    // word-wrap the description across the card so it's readable.
+                    std::string desc = d.desc; std::string line; float ly = -0.085f;
+                    auto flush = [&]() { if (!line.empty()) { renderer.draw_text(line.c_str(), cxc - renderer.text_width(line.c_str(), 13.0f, fbw) * 0.5f, ly, 13.0f, desccol, 1.0f, fbw, fbh); ly -= 0.052f; line.clear(); } };
+                    std::string word; std::size_t wi = 0;
+                    while (wi <= desc.size()) {
+                        if (wi == desc.size() || desc[wi] == ' ') {
+                            std::string trial = line.empty() ? word : line + " " + word;
+                            if (renderer.text_width(trial.c_str(), 13.0f, fbw) > CARD_W - 0.03f && !line.empty()) { flush(); line = word; }
+                            else line = trial;
+                            word.clear();
+                        } else word += desc[wi];
+                        ++wi;
+                    }
+                    flush();
                 }
             }
 
@@ -8471,6 +8531,49 @@ int main(int argc, char** argv) {
                 const float w = renderer.text_width(txt, 17.0f, fbw);
                 vec3 yellow = { 1.0f, 0.92f, 0.15f };
                 renderer.draw_text(txt, ndcx - w * 0.5f, ndcy, 17.0f, yellow, 1.0f - t.age / TAUNT_LIFE, fbw, fbh);
+            }
+
+            // Floating "E" prompt over the nearest thing you can interact with (only when in
+            // reach) — core -> barracks -> drone vendor -> chest, matching the E-key priority.
+            if (!ui_open && !dead && player.health > 0.0f) {
+                vec3 ip = {0,0,0}; const char* label = nullptr;
+                const float dcx = core_pos[0]-player.position[0], dcz = core_pos[2]-player.position[2];
+                if (dcx*dcx + dcz*dcz <= (CORE_RAD+4.5f)*(CORE_RAD+4.5f)) {
+                    ip[0]=core_pos[0]; ip[1]=core_pos[1]+3.4f; ip[2]=core_pos[2]; label="E  Muster";
+                } else {
+                    int ub=-1; float ub2=9.0f, bx=0, bz=0;
+                    for (const auto& p : base.pieces) if (p.piece == static_cast<uint8_t>(dc::game::BuildPiece::Barracks)) {
+                        const float px=(p.col+0.5f)*dc::world::TILE, pz=(p.row+0.5f)*dc::world::TILE;
+                        const float dx=px-player.position[0], dz=pz-player.position[2], d2=dx*dx+dz*dz;
+                        if (d2<ub2){ub2=d2; bx=px; bz=pz; ub=1;}
+                    }
+                    if (ub>=0) { ip[0]=bx; ip[1]=terrain.height(bx,bz)+2.6f; ip[2]=bz; label="E  Upgrade"; }
+                    else {
+                        float best2 = CHEST_REACH*CHEST_REACH;
+                        for (const auto& dv : drone_vendors) if (!dv.bought) {
+                            const float dx=dv.x-player.position[0], dz=dv.z-player.position[2], d2=dx*dx+dz*dz;
+                            if (d2<best2){best2=d2; ip[0]=dv.x; ip[1]=terrain.height(dv.x,dv.z)+1.9f; ip[2]=dv.z; label="E  Buy Drone";}
+                        }
+                        for (const auto& ch : chests) if (ch.remaining() > 0) {
+                            const float cxp=(ch.col+0.5f)*dc::world::TILE, czp=(ch.row+0.5f)*dc::world::TILE;
+                            const float dx=cxp-player.position[0], dz=czp-player.position[2], d2=dx*dx+dz*dz;
+                            if (d2<best2){best2=d2; ip[0]=cxp; ip[1]=terrain.height(cxp,czp)+1.7f; ip[2]=czp; label="E  Open";}
+                        }
+                    }
+                }
+                if (label) {
+                    vec4 wp = { ip[0], ip[1] + 0.18f*std::sin(t_now*3.0f), ip[2], 1.0f }, clip;
+                    glm_mat4_mulv(renderer.viewproj, wp, clip);
+                    if (clip[3] > 0.05f) {
+                        const float ndcx = clip[0]/clip[3], ndcy = clip[1]/clip[3];
+                        if (ndcx>-1.1f && ndcx<1.1f && ndcy>-1.1f && ndcy<1.1f) {
+                            const float w = renderer.text_width(label, 20.0f, fbw);
+                            vec3 dk = {0,0,0}, gd = {1.0f, 0.9f, 0.4f};
+                            renderer.draw_text(label, ndcx - w*0.5f + 0.004f, ndcy - 0.006f, 20.0f, dk, 0.7f, fbw, fbh);  // shadow
+                            renderer.draw_text(label, ndcx - w*0.5f, ndcy, 20.0f, gd, 1.0f, fbw, fbh);
+                        }
+                    }
+                }
             }
 
             // Debug overlay text (toggle with V): on-screen readout via the glyph renderer.

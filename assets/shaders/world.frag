@@ -15,6 +15,7 @@ uniform float u_ambient;      // day/night ambient scale (bright by day, dim at 
 uniform vec3  u_cam_pos;      // camera world position (fog distance)
 uniform vec3  u_fog_color;    // atmospheric horizon color
 uniform float u_time;         // seconds, for animated water
+uniform vec3  u_sun_dir;      // traversing sun direction (shared with the sky)
 out vec4 frag_color;
 
 // --- cheap value noise for color mottling (gives the flat-shaded ground some depth) ---
@@ -94,18 +95,21 @@ void main() {
         g += (vec2(fbm2(p * 0.9 + t * 0.20), fbm2(p * 0.9 - t * 0.20 + 7.0)) - 0.5) * 0.24;
         vec3 wn = normalize(vec3(-g.x, 1.0, -g.y));
 
-        // Reflect the view across the surface and sample a SKY GRADIENT (hazy horizon -> blue zenith).
+        // Reflect the view across the surface and sample the ACTUAL SKY (same day/night gradient
+        // the sky shader uses, driven by the sun's elevation) so the water mirrors the real sky.
         vec3 Rv = reflect(-V, wn);
         float up = clamp(Rv.y, 0.0, 1.0);
-        vec3 horizon = u_fog_color * 1.08;
-        vec3 zenith  = vec3(0.24, 0.42, 0.68);
-        vec3 skyref  = mix(horizon, zenith, pow(up, 0.6));
+        float day = smoothstep(-0.04, 0.22, u_sun_dir.y);
+        vec3 dayHor = mix(u_fog_color, vec3(0.66, 0.78, 0.95), 0.5), dayZen = vec3(0.17, 0.40, 0.78);
+        vec3 ntHor  = vec3(0.04, 0.06, 0.14),  ntZen = vec3(0.010, 0.020, 0.075);
+        vec3 horizon = mix(ntHor, dayHor, day);
+        vec3 zenith  = mix(ntZen, dayZen, day);
+        vec3 skyref  = mix(horizon, zenith, pow(up, 0.55));
 
-        // Reflected SUN: a sharp disc (the bright glitter streak) + a softer surrounding shimmer.
-        vec3 sun_dir = normalize(vec3(0.55, 0.6, 0.55));
+        // Reflected SUN glints (day only — the sun is below the horizon at night) at its real position.
         vec3 sun_col = vec3(1.5, 1.36, 1.05);
-        float rs = max(dot(Rv, sun_dir), 0.0);
-        skyref += sun_col * (pow(rs, 240.0) * 2.2 + pow(rs, 26.0) * 0.22) * a;
+        float rs = max(dot(Rv, normalize(u_sun_dir)), 0.0);
+        skyref += day * sun_col * (pow(rs, 240.0) * 2.2 + pow(rs, 26.0) * 0.22);
 
         // Schlick FRESNEL (water F0 ~= 0.02): mostly transmissive looking down, mirror at grazing.
         float fres = 0.02 + 0.98 * pow(1.0 - max(dot(wn, V), 0.0), 5.0);
@@ -155,11 +159,19 @@ void main() {
     vec3 grnd = vec3(0.36, 0.30, 0.23);
     vec3 ambient = mix(grnd, sky, n.y * 0.5 + 0.5) * (0.40 * a + 0.07);
 
-    vec3 sun_dir = normalize(vec3(0.55, 0.6, 0.55));
+    vec3 sun_dir = normalize(u_sun_dir);   // traverses the sky with the day clock
     vec3 sun_col = vec3(1.18, 1.06, 0.84);
     float ndl = dot(n, sun_dir);
     float wrap = ndl * 0.5 + 0.5; wrap *= wrap;
-    vec3 shade = ambient + sun_col * wrap * (0.55 * a);
+    // CLOUD SHADOWS: drifting fbm overhead (same scroll as the sky clouds) dapples the sunlight.
+    float cloudShadow = 1.0;
+    {
+        float dayf = smoothstep(-0.04, 0.22, u_sun_dir.y);
+        vec2 cp = v_worldpos.xz * 0.012 + vec2(u_time * 0.010, u_time * 0.006);
+        float c = fbm2(cp * 3.0);
+        cloudShadow = 1.0 - dayf * smoothstep(0.55, 0.95, c) * 0.45;   // up to -45% under a cloud
+    }
+    vec3 shade = ambient + sun_col * wrap * (0.55 * a) * cloudShadow;
 
     // Sum every dynamic point light (torches, flamethrowers, glowing projectiles).
     vec3 point = vec3(0.0);
@@ -180,7 +192,14 @@ void main() {
     else
         base = texture(u_tex, vec3(v_uv, v_layer)).rgb;
 
-    vec3 lit = base * (shade + point);
+    // Soft sun SPECULAR on the ground so rock/slopes catch a glint (cheap fake reflections).
+    float spec = 0.0;
+    if (u_use_solid == 1) {
+        vec3 H = normalize(sun_dir + V);
+        float slope = clamp(1.0 - n.y, 0.0, 1.0);
+        spec = pow(max(dot(n, H), 0.0), 30.0) * (0.08 + 0.22 * slope) * a;
+    }
+    vec3 lit = base * (shade + point) + sun_col * spec;
 
     // Distance FOG -> the ground melts into the horizon haze far down the lane.
     float d = length(u_cam_pos - v_worldpos);

@@ -4,7 +4,7 @@
     "quality": "medium"
   },
   "espeak": {
-    "voice": "en-us"
+    "voice": "en-gb-x-rp"
   },
   "inference": {
     "noise_scale": 0.667,
@@ -482,12 +482,12 @@
   "speaker_id_map": {},
   "piper_version": "1.0.0",
   "language": {
-    "code": "en_US",
+    "code": "en_GB",
     "family": "en",
-    "region": "US",
+    "region": "GB",
     "name_native": "English",
     "name_english": "English",
-    "country_english": "United States"
+    "country_english": "Great Britain"
   },
-  "dataset": "lessac"
+  "dataset": "alan"
 }
