@@ -101,7 +101,7 @@ inline constexpr float ALLY_AGGRO     = 16.0f; // engages enemies within this ra
 // every `interval` seconds for `spawn_cost` gold each. The Scavenger doesn't fight the lane —
 // it roams collecting dropped coins into the shared pool (with decent HP for self-defense).
 // Visual/behaviour class of a friendly mob — mirrors the enemy roster.
-enum class MobVisual : uint8_t { Ground = 0, Scavenger = 1, Flier = 2, Bat = 3, Demon = 4, Mage = 5, Insulter = 6, Knight = 7, Flame = 8, Troll = 9, Slime = 10, Drone = 11 };
+enum class MobVisual : uint8_t { Ground = 0, Scavenger = 1, Flier = 2, Bat = 3, Demon = 4, Mage = 5, Insulter = 6, Knight = 7, Flame = 8, Troll = 9, Slime = 10, Drone = 11, Dragon = 12 };
 struct MobType {
     const char* name;
     int   unlock_cost;   // one-time gold to unlock this barracks type (0 = free from the start)
@@ -116,7 +116,7 @@ struct MobType {
     float speed;         // movement multiplier vs ALLY_SPEED (the Mounted Knight is heavy + slow)
     int   cap;           // how many of THIS mob one barracks keeps alive at once (weak swarmers = high)
 };
-inline constexpr int MOB_TYPE_COUNT = 13;
+inline constexpr int MOB_TYPE_COUNT = 14;
 inline const MobType& mob_type(int i) {
     // Barracks are a one-time PURCHASE (place_cost) that then spawn their mob for FREE on a
     // timer. The roster MIRRORS the enemy types (grunt=skeleton, mage=ranged caster, bat,
@@ -136,6 +136,7 @@ inline const MobType& mob_type(int i) {
         { "Troll",     0,    300,  0, 7.0f,  600.0f, 70.0f, 2.2f, false, MobVisual::Troll,    false, 0.75f,  4 },
         { "Slime",     0,    130,  0, 4.5f,  550.0f, 14.0f, 2.0f, false, MobVisual::Slime,    false, 0.85f,  6 },
         { "Drone",     100,  120,  0, 1.4f,  10.0f,  5.0f,  2.0f, false, MobVisual::Drone,    true,  1.30f, 15 },   // cheap low-HP swarm to distract; cap 15
+        { "Dragon",    800, 1500,  0, 9.0f, 2400.0f, 60.0f, 7.0f, false, MobVisual::Dragon,   false, 0.60f,  1 },   // top-tier: slow, huge HP, SWEEPING fire breath over a wide arc; cap 1
     };
     return T[(i < 0 || i >= MOB_TYPE_COUNT) ? 0 : i];
 }

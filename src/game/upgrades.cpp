@@ -29,6 +29,8 @@ const UpgradeDef& upgrade_def(Upgrade u) {
         { "Nova Cycle",   "Force Nova recharges 15% faster per stack.",        IconShape::Burst,    0.70f, 0.80f, 1.00f },  // nova
         { "Overclock",    "All autocasts recharge 9% faster per stack.",       IconShape::Slot,     0.45f, 0.75f, 1.00f },  // global
         { "Swordstorm",   "Throw an extra sword at once (up to 3).",           IconShape::Streak,   0.90f, 0.85f, 0.95f },  // throw
+        { "Twin Bolts",   "Your staff fires +1 bolt per shot (up to 4).",      IconShape::IceShard, 0.45f, 0.62f, 1.00f },  // wizard primary
+        { "Rapid Cast",   "Staff fires 15% faster per stack.",                 IconShape::Clock,    0.40f, 0.70f, 1.00f },  // wizard fire-rate
     };
     return defs[static_cast<int>(u)];
 }
@@ -64,6 +66,8 @@ void apply_upgrade(dc::entity::Player& p, Upgrade u) {
         case Upgrade::NovaCooldown:     p.forcefield_cd_mult *= 0.85f;        break;  // targeted -15%
         case Upgrade::AutocastHaste:    p.autocast_cd_mult *= (1.0f - 0.15f * 0.6f); break;  // global: 3/5 of targeted
         case Upgrade::MultiThrow:       if (p.throw_count < dc::entity::THROW_MAX) p.throw_count++; break;
+        case Upgrade::MultiBolt:        if (p.bolt_count < 4) p.bolt_count++; break;      // +1 staff bolt per shot (cap 4)
+        case Upgrade::BoltHaste:        p.bolt_cd_mult *= 0.85f; break;                  // faster primary fire
     }
 }
 
@@ -83,6 +87,8 @@ bool upgrade_eligible(const dc::entity::Player& p, Upgrade u) {
         case Upgrade::NovaCooldown:     return p.forcefield_unlocked;
         case Upgrade::AutocastHaste:    return p.orbit_unlocked || p.forcefield_unlocked;
         case Upgrade::MultiThrow:       return p.weapon.has_value() && p.throw_count < dc::entity::THROW_MAX;
+        case Upgrade::MultiBolt:        return p.bolt_count < 4;   // up to 4 staff bolts per shot
+        case Upgrade::BoltHaste:        return true;               // always offer faster casting (wizard-gated below)
         // Drone upgrades require owning a drone; getting the first comes from Gunner.
         case Upgrade::Gunner:           return p.minion_count < 4;
         case Upgrade::Munitions:
@@ -93,6 +99,7 @@ bool upgrade_eligible(const dc::entity::Player& p, Upgrade u) {
 }
 
 bool upgrade_for_class(Upgrade u, uint8_t weapon_class) {
+    if (u == Upgrade::MultiBolt || u == Upgrade::BoltHaste) return weapon_class == 1;   // wizard-only staff upgrades
     if (weapon_class != 1) return true;   // Knight (sword): everything is fair game
     // Wizard (staff): exclude the sword-swing / melee-on-hit / sword-throw upgrades. Its
     // offense comes from staff bolts (scaled by Whetstone damage + Adrenaline cooldown +

@@ -16,8 +16,9 @@ enum class Upgrade { StaminaCost, Knockback, Damage, SwingArc, Cooldown,
                      UnlockOrbit, UnlockForcefield, ExtraSpellSlot,
                      OrbitSword, OrbitTempo, OrbitCooldown,
                      NovaRadius, NovaCooldown,
-                     AutocastHaste, MultiThrow };
-inline constexpr int UPGRADE_COUNT = 26;
+                     AutocastHaste, MultiThrow,
+                     MultiBolt, BoltHaste };
+inline constexpr int UPGRADE_COUNT = 28;
 inline constexpr int CHEST_UPGRADE_COUNT = 16;   // chests roll only the core [0,16) pool
 
 // Placeholder icon shapes (real icon art comes later). One per upgrade so the stacked

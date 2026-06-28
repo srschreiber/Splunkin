@@ -148,6 +148,8 @@ struct Player {
     float orbit_spin_mult    = 1.0f;           // orbit tempo: faster revolve + per-sword spin
     float orbit_tick_mult    = 1.0f;           // orbit tempo: shorter damage re-tick (<1 = faster)
     int   throw_count        = 1;              // multi-throw: swords released per throw (cap THROW_MAX)
+    int   bolt_count         = 1;              // wizard: staff bolts fired per primary shot (cap 4)
+    float bolt_cd_mult       = 1.0f;           // wizard: primary fire-rate scale (<1 = faster)
     std::optional<Shield> shield = Shield{};   // equipped shield (nullopt = none)
     std::optional<Weapon> weapon = Weapon{};   // equipped weapon (nullopt = fists)
     vec3  knock_vel = {0.0f, 0.0f, 0.0f};  // horizontal knockback velocity (decays in update)

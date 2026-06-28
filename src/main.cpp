@@ -281,6 +281,10 @@ int main(int argc, char** argv) {
     const bool mortar_loaded = dc::renderer::read_model("assets/models/mortar.glb", mortar_data);
     if (!mortar_loaded) std::fprintf(stderr, "note: assets/models/mortar.glb not found; run blender/make_mortar.py\n");
 
+    dc::renderer::ModelData dragon_data;   // top-tier dragon (head bone sweeps for the fire breath; muzzle ~(0,1.77,1.62))
+    const bool dragon_loaded = dc::renderer::read_model("assets/models/dragon.glb", dragon_data);
+    if (!dragon_loaded) std::fprintf(stderr, "note: assets/models/dragon.glb not found; run blender/make_dragon.py\n");
+
     dc::renderer::ModelData skeleton_data;
     const bool skeleton_loaded = dc::renderer::read_model("assets/models/skeleton.glb", skeleton_data);
     if (!skeleton_loaded) std::fprintf(stderr, "note: assets/models/skeleton.glb not found; run blender/make_skeleton.py to enable skeletons\n");
@@ -355,6 +359,8 @@ int main(int argc, char** argv) {
     if (barracks_loaded) barracks_model.upload(barracks_data);
     dc::renderer::Model mortar_model;
     if (mortar_loaded) mortar_model.upload(mortar_data);
+    dc::renderer::Model dragon_model;
+    if (dragon_loaded) dragon_model.upload(dragon_data);
     dc::renderer::Model bat_model;
     if (bat_loaded) bat_model.upload(bat_data);
     dc::renderer::Model gnome_model;
@@ -1403,6 +1409,7 @@ int main(int argc, char** argv) {
         player.orbit_cd_mult = 1.0f; player.forcefield_cd_mult = 1.0f; player.autocast_cd_mult = 1.0f;
         player.orbit_spin_mult = 1.0f; player.orbit_tick_mult = 1.0f;
         player.throw_count = 1;
+        player.bolt_count = 1; player.bolt_cd_mult = 1.0f;
         if (player.weapon) player.weapon->orbit_count = base_orbit_count;
         if (player.shield) player.shield->bash_radius = base_bash_radius;
         pending_levelups = 0; xp_orbs.clear(); levelup_open = false;
@@ -2881,7 +2888,7 @@ int main(int argc, char** argv) {
         // bolt damages enemies as it flies. Host/standalone sims it; a client casts to the host.
         auto fire_bolts = [&](bool big) {
             vec3 f; player.front(f);
-            const int n = big ? std::max(1, player.throw_count) : 1;
+            const int n = big ? std::max(1, player.throw_count) : std::max(1, player.bolt_count);   // Twin Bolts fans the primary
             const float spread = 0.13f;
             const float rad = (big ? 1.0f : 0.5f) * player.sword_scale;
             const float dmg = (big ? 46.0f : 18.0f) * player.damage_mult;
@@ -2911,7 +2918,7 @@ int main(int argc, char** argv) {
                               && (input.mouse_down(SDL_BUTTON_LEFT) || input.mouse_down(SDL_BUTTON_MIDDLE));
         if (wizard && !ui_open && !dead && !building_mode) {
             if (input.mouse_down(SDL_BUTTON_MIDDLE) && throw_cd <= 0.0f) { fire_bolts(true);  throw_cd = 1.7f * player.cooldown_mult; }
-            else if (input.mouse_down(SDL_BUTTON_LEFT) && bolt_cd <= 0.0f) { fire_bolts(false); bolt_cd = 0.44f * player.cooldown_mult; }
+            else if (input.mouse_down(SDL_BUTTON_LEFT) && bolt_cd <= 0.0f) { fire_bolts(false); bolt_cd = 0.44f * player.cooldown_mult * player.bolt_cd_mult; }
         }
         // Knight: start a melee swing (LMB) or a sword throw (MMB) — both play the punch clip;
         // the difference is resolved at the strike frame below.
@@ -3746,6 +3753,7 @@ int main(int argc, char** argv) {
                 ac.strike_damage = mt.damage * insult_mult(a.pos[0], a.pos[2]);   // heckled mobs hit softer
                 ac.strike_reach = reach;
                 ac.strike_cos = -0.3f; ac.strike_knockback = 4.0f; ac.crit_mult = 1.0f;
+                if (mt.visual == dc::game::MobVisual::Dragon) { ac.strike_cos = -0.55f; ac.strike_knockback = 7.0f; }   // fire breath sweeps a WIDE arc
                 ac.taunt = (mt.visual == dc::game::MobVisual::Insulter);   // Bill grabs aggro off nearby enemies
                 if (tgt) { const float ex = tgt->position[0]-a.pos[0], ez = tgt->position[2]-a.pos[2];
                            const float el = std::sqrt(ex*ex+ez*ez); ac.aim[0] = el>1e-4f?ex/el:1.0f; ac.aim[2] = el>1e-4f?ez/el:0.0f; }
@@ -5905,6 +5913,7 @@ int main(int argc, char** argv) {
                     case dc::game::MobVisual::Flame:     if (gnome_loaded)     { amdp=&gnome_data; amdlp=&gnome_model; white=true; } break;
                     case dc::game::MobVisual::Troll:     if (troll_loaded)     { amdp=&troll_data; amdlp=&troll_model; white=true; } break;
                     case dc::game::MobVisual::Drone:     if (drone_loaded)     { amdp=&drone_data; amdlp=&drone_model; white=true; } break;
+                    case dc::game::MobVisual::Dragon:    if (dragon_loaded)    { amdp=&dragon_data; amdlp=&dragon_model; white=true; } break;
                     default: break;   // Slime is procedural (handled below)
                 }
                 dc::renderer::ModelData& amd = *amdp; dc::renderer::Model& amdl = *amdlp;
@@ -5915,7 +5924,7 @@ int main(int argc, char** argv) {
                     al.push_back({ &amd.walk, t_now * 1.8f + static_cast<float>(i), -1 });
                 dc::renderer::pose_model(amd, al, 0.0f, enemy_part_world);
                 mat4 apl; glm_mat4_identity(apl);
-                float afy = terrain.height(ax, az) + MODEL_FOOT_LIFT;
+                float afy = terrain.height(ax, az) + (vis == dc::game::MobVisual::Dragon ? 0.0f : MODEL_FOOT_LIFT);   // dragon origin is at its feet
                 if (in_water(ax, az)) afy += -0.35f + std::sin(t_now * 3.0f + i) * 0.1f;   // wade + bob
                 if (dc::game::mob_type(akind).flies) afy += 1.6f + std::sin(t_now*2.0f+i)*0.15f;   // hover
                 if (vis == dc::game::MobVisual::Knight) {
@@ -5966,7 +5975,8 @@ int main(int argc, char** argv) {
                     hboxto(ally_slime, ax, gy + 0.55f/wob, az, w*wob, 0.55f/wob, w*wob, 1.0f, 0.0f);
                     hboxto(ally_slime, ax, gy + 0.95f/wob, az, w*0.55f*wob, 0.4f/wob, w*0.55f*wob, 1.0f, 0.0f);
                 }
-                const float dscale = (vis == dc::game::MobVisual::Demon || vis == dc::game::MobVisual::Troll) ? 1.7f : 1.0f;   // demons + trolls are big
+                const float dscale = (vis == dc::game::MobVisual::Dragon) ? 1.3f
+                                   : (vis == dc::game::MobVisual::Demon || vis == dc::game::MobVisual::Troll) ? 1.7f : 1.0f;   // dragons/demons/trolls are big
                 { vec3 asc = { asize*dscale, asize*dscale, asize*dscale }; glm_scale(apl, asc); }
                 // Tint EVERY ally toward team BLUE (like the skeleton grunts) so they're clearly
                 // distinguishable from the natural-colored enemy mobs.
@@ -5975,6 +5985,27 @@ int main(int argc, char** argv) {
                 else { acol[0]=0.35f; acol[1]=0.85f; acol[2]=0.9f; }         // skeleton grunts: cyan-blue
                 if (vis != dc::game::MobVisual::Knight && vis != dc::game::MobVisual::Slime)   // those are fully procedural
                     renderer.draw_model(amdl, enemy_part_world, apl, acol);
+                // DRAGON fire breath: a sweeping cone of flame from the muzzle, panning L->R as it attacks.
+                if (vis == dc::game::MobVisual::Dragon && aatk > 0.001f) {
+                    const float gy = terrain.height(ax, az);
+                    const float ca2 = std::cos(ayaw), sa2 = std::sin(ayaw);
+                    const float mx = ax + ca2*2.4f, mz = az + sa2*2.4f, my = gy + 2.9f;   // muzzle (front-top)
+                    const float p = 1.0f - aatk;                         // 0 at wind-up -> 1 settled
+                    const float fa = ayaw + (p*2.0f - 1.0f) * 0.9f;      // breath direction sweeps -0.9..+0.9 rad
+                    const float fx = std::cos(fa), fz = std::sin(fa);
+                    const auto& R2 = renderer.cam_right; const auto& U2 = renderer.cam_up;
+                    for (int k = 0; k < 26; ++k) {
+                        const float tt = k / 26.0f;
+                        const float dist = 0.5f + tt * 6.5f;
+                        const float jit = std::sin(t_now*30.0f + k*2.1f) * 0.25f * tt;
+                        const float px = mx + fx*dist - sa2*jit, pz = mz + fz*dist + ca2*jit;
+                        const float py = my - tt*1.8f + std::sin(t_now*20.0f + k)*0.15f;   // arcs down toward the ground
+                        const float sz = 0.25f + tt*0.75f, r = 1.0f, g = 0.78f - tt*0.45f, b = 0.16f*(1.0f-tt), aa = 1.0f - tt*0.55f;
+                        auto P=[&](float u,float v){ particle_verts.insert(particle_verts.end(), {
+                            px+R2[0]*u+U2[0]*v, py+R2[1]*u+U2[1]*v, pz+R2[2]*u+U2[2]*v, r,g,b,aa }); };
+                        P(-sz,-sz);P(sz,-sz);P(sz,sz); P(-sz,-sz);P(sz,sz);P(-sz,sz);
+                    }
+                }
                 // BILL constantly rants: a swirl of yellow motes orbits him (camera-facing billboards).
                 if (dc::game::mob_type(akind).visual == dc::game::MobVisual::Insulter) {
                     const auto& R2 = renderer.cam_right; const auto& U2 = renderer.cam_up;
@@ -6531,17 +6562,46 @@ int main(int argc, char** argv) {
                     renderer.draw_model(mortar_model, mortar_pw, mpl, mtint);
                 }
             }
-            // Arcing shells: a glowing sphere on a parabola from muzzle -> impact + a smoke puff.
+            // Each in-flight shell: a RED target ring on the ground where it'll land (telegraph,
+            // pulsing brighter as it nears), a fiery glowing shell on its arc, and a heavy spark trail.
             for (const auto& sh : mortar_shells) {
                 const float u = sh.dur > 0.0f ? (sh.t / sh.dur) : 1.0f;
+                // --- danger ring at the impact point (radius = blast) ---
+                const float ring = dc::game::MORTAR_BLAST;
+                const float warn = 0.35f + 0.45f * u + 0.20f * std::sin(t_now * 12.0f);   // pulse, intensify near impact
+                const float iy = sh.impact[1] + 0.06f;
+                for (int k = 0; k < 28; ++k) {
+                    const float a0 = (k / 28.0f) * 6.2831853f, a1 = ((k+1) / 28.0f) * 6.2831853f;
+                    const float r0 = ring * 0.86f, r1 = ring;
+                    auto RV = [&](float ang, float rr){ particle_verts.insert(particle_verts.end(), {
+                        sh.impact[0] + std::cos(ang)*rr, iy, sh.impact[2] + std::sin(ang)*rr, 1.0f, 0.12f, 0.10f, warn }); };
+                    RV(a0,r0); RV(a1,r0); RV(a1,r1); RV(a0,r0); RV(a1,r1); RV(a0,r1);   // a ground ring band
+                }
+                // --- the shell on its parabola ---
                 const float px = sh.from[0] + (sh.impact[0]-sh.from[0]) * u;
                 const float pz = sh.from[2] + (sh.impact[2]-sh.from[2]) * u;
-                const float arc = 9.0f * u * (1.0f - u);   // parabolic lob height
+                const float arc = 11.0f * u * (1.0f - u);
                 const float py = sh.from[1] + (sh.impact[1]-sh.from[1]) * u + arc;
-                const float s = 0.22f;
-                auto P = [&](float a, float b){ particle_verts.insert(particle_verts.end(), {
-                    px + R[0]*a + U[0]*b, py + R[1]*a + U[1]*b, pz + R[2]*a + U[2]*b, 1.0f, 0.75f, 0.30f, 1.0f }); };
-                P(-s,-s);P(s,-s);P(s,s); P(-s,-s);P(s,s);P(-s,s);
+                const float s = 0.32f;
+                auto P = [&](float cx, float cy, float cz, float r, float g, float b, float aa, float sz){
+                    particle_verts.insert(particle_verts.end(), {
+                        cx-R[0]*sz-U[0]*sz, cy-R[1]*sz-U[1]*sz, cz-R[2]*sz-U[2]*sz, r,g,b,aa,
+                        cx+R[0]*sz-U[0]*sz, cy+R[1]*sz-U[1]*sz, cz+R[2]*sz-U[2]*sz, r,g,b,aa,
+                        cx+R[0]*sz+U[0]*sz, cy+R[1]*sz+U[1]*sz, cz+R[2]*sz+U[2]*sz, r,g,b,aa,
+                        cx-R[0]*sz-U[0]*sz, cy-R[1]*sz-U[1]*sz, cz-R[2]*sz-U[2]*sz, r,g,b,aa,
+                        cx+R[0]*sz+U[0]*sz, cy+R[1]*sz+U[1]*sz, cz+R[2]*sz+U[2]*sz, r,g,b,aa,
+                        cx-R[0]*sz+U[0]*sz, cy-R[1]*sz+U[1]*sz, cz-R[2]*sz+U[2]*sz, r,g,b,aa }); };
+                P(px, py, pz, 1.0f, 0.55f, 0.18f, 1.0f, s);          // glowing fireball core
+                P(px, py, pz, 1.0f, 0.92f, 0.55f, 1.0f, s*0.55f);     // hot center
+                // smoky/fiery TRAIL behind it (along the arc)
+                for (int k = 1; k <= 6; ++k) {
+                    const float uu = u - k * 0.025f; if (uu < 0.0f) break;
+                    const float tx = sh.from[0] + (sh.impact[0]-sh.from[0]) * uu;
+                    const float tz = sh.from[2] + (sh.impact[2]-sh.from[2]) * uu;
+                    const float ty = sh.from[1] + (sh.impact[1]-sh.from[1]) * uu + 11.0f*uu*(1.0f-uu);
+                    const float f = 1.0f - k/7.0f;
+                    P(tx, ty, tz, 0.7f*f+0.2f, 0.35f*f+0.1f, 0.3f*f, 0.6f*f, s*(0.5f+0.5f*f));
+                }
             }
             // Turret housing model posed once (static); each turret draws it yawed to its
             // HELD aim. Barrel is procedural (3D). Turrets never power down — they hold the
@@ -6885,7 +6945,7 @@ int main(int argc, char** argv) {
                         V(a1,a2,a3);V(b1,b2,b3);V(c1,c2,c3); V(a1,a2,a3);V(c1,c2,c3);V(d1,d2,d3); } }
             };
             auto draw_bolt = [&](float x, float y, float z, bool big, float dx, float dy, float dz) {
-                orb_into(x, y, z, dx, dy, dz, big ? 0.26f : 0.16f, 1.9f);   // stretched ~1.9x along travel
+                orb_into(x, y, z, dx, dy, dz, big ? 0.39f : 0.24f, 1.9f);   // ~1.5x bigger, stretched along travel
             };
             if (net.role == dc::net::Role::Client) for (const auto& b : render_bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, 0, 0, 1);
             else for (const auto& b : bolts) draw_bolt(b.pos[0], b.pos[1], b.pos[2], b.big, b.dir[0], b.dir[1], b.dir[2]);
@@ -8259,9 +8319,25 @@ int main(int argc, char** argv) {
                 hud_rect(px, top - ph, px + pw, top, 0.06f, 0.06f, 0.09f, 0.96f);                                    // panel
             }
 
+            // Persistent BASE HP bar (top-left) so your core's health is always visible.
+            {
+                const float frac = core_health > 0.0f ? core_health / CORE_MAX_HEALTH : 0.0f;
+                const float bx0 = -0.97f, bx1 = -0.62f, by0 = 0.895f, by1 = 0.925f;
+                hud_rect(bx0-0.007f, by0-0.007f, bx1+0.007f, by1+0.007f, 0.04f, 0.05f, 0.07f, 0.9f);   // border
+                hud_rect(bx0, by0, bx1, by1, 0.10f, 0.10f, 0.12f, 0.92f);                              // track
+                const float fillx = bx0 + (bx1-bx0)*frac;
+                hud_rect(bx0, by0, fillx, by1, 0.95f*(1.0f-frac)+0.15f, 0.80f*frac+0.12f, 0.22f, 0.96f); // green->red by HP
+            }
+
             renderer.draw_hud(hud);
 
             // --- Text overlays (separate glyph pass, drawn on top of the HUD rects) ---
+            // BASE label + HP value over the base bar (top-left).
+            {
+                char bh[28]; std::snprintf(bh, sizeof bh, "BASE  %d", (int)(core_health < 0 ? 0 : core_health));
+                vec3 bc = { 0.92f, 0.95f, 1.0f };
+                renderer.draw_text(bh, -0.965f, 0.955f, 14.0f, bc, 1.0f, fbw, fbh);
+            }
             // Day/time clock (top-center, just under the compass strip): e.g. "Day 2  7:14 PM".
             // Tinted warm by day, cool blue at night so the phase reads at a glance.
             {
